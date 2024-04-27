@@ -1,0 +1,6 @@
+[package]
+name = "aqua"
+version = "0.0.0-AFTER"
+edition = "2021"
+
+[dependencies]
