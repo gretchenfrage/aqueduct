@@ -65,17 +65,15 @@
 //!
 //! > **Channel**
 //!
-//! The [`channel`] function is used to create a connected pair of
-//! [`IntoSender`] and [`Receiver`]. The
-//! [`IntoSender`] can be converted into one of various kinds of senders with
-//! their own APIs and guarantees, whereas the [`Receiver`] can be used
-//! directly without further conversion.
+//! The [`channel`] function is used to create a connected pair of [`IntoSender`] and [`Receiver`].
+//! The [`IntoSender`] can be converted into one of various kinds of senders with their own APIs
+//! and guarantees, whereas the [`Receiver`] can be used directly without further conversion.
 //!
 //! Either the [`IntoSender`] half or the [`Receiver`] half can be sent across a network boundary,
 //! or they can both be used within the local process, but attempting to send both across a network
 //! boundary will error, even if it is the same network boundary. It is also illegal to send part
-//! of channel across a network boundary if it was already received from across a network boundary,
-//! or if it otherwise originated from somewhere other than a local call to [`channel`].
+//! of a channel across a network boundary if it was already received from across a network
+//! boundary, or if it otherwise originated from somewhere other than a local call to [`channel`].
 //!
 //! There are also one-shot channels created by the [`oneshot`] function, which are designed to
 //! convey exactly one message in their lifespan (like tokio's `oneshot` module [4]). These are
@@ -256,7 +254,7 @@ impl<T> IntoSender<T> {
     ///
     /// Contrast to simply dropping the `IntoSender`, which results in the receiver yielding
     /// `Ok(None)`.
-    pub fn abort(&self) {
+    pub fn abort(self) {
         todo!()
     }
 }
