@@ -4,3 +4,11 @@ version = "0.0.0-AFTER"
 edition = "2021"
 
 [dependencies]
+anyhow = "1"
+
+# TODO only for provisional API:
+serde_json = "1"
+
+[dev-dependencies.tokio]
+version = "1"
+features = ["full"]
