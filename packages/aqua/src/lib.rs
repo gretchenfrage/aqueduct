@@ -53,6 +53,8 @@
 //! sender or receiver half in a struct, and send that struct down another channel, and have this
 //! work even if that channel is transmitting its data across a network boundary.
 //!
+//! ![aqua](/home/phoenix/repos/aqua/assets/aqua.drawio.png)
+//!
 //! Moreover, it's possible to use this crate's networkable channel types in a non-networked way,
 //! within the same process, as if they were just normal async channels. This allows us to write
 //! code which is highly generic over whether different sub-tasks are running in the same process
@@ -76,7 +78,7 @@
 //! boundary, or if it otherwise originated from somewhere other than a local call to [`channel`].
 //!
 //! There are also one-shot channels created by the [`oneshot`] function, which are designed to
-//! convey exactly one message in their lifespan (like tokio's `oneshot` module [4]). These are
+//! convey exactly one message in their lifespan (like [tokio's `oneshot` module][4]). These are
 //! essentially a simple case of reliable channels.
 //!
 //! [4]: https://docs.rs/tokio/latest/tokio/sync/oneshot/index.html
@@ -502,7 +504,7 @@ pub struct OneshotReceiver<T> {
 /// Error returned by [`OneshotReceiver::recv`][crate::OneshotReceiver::recv] and similar.
 pub enum OneshotRecvError {
     /// The sender half was dropped without sending a message.
-    Aborted,
+    Closed,
     /// The encompassing network connection was lost before the channel closed otherwise.
     ConnectionLost,
 }
@@ -512,7 +514,7 @@ pub enum OneshotTryRecvError<T> {
     /// There is not currently a value available (although there may be in the future).
     Empty(OneshotReceiver<T>),
     /// The sender half was dropped without sending a message.
-    Aborted,
+    Closed,
     /// The encompassing network connection was lost before the channel closed otherwise.
     ConnectionLost,
 }

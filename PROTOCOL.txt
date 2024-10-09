@@ -1,3 +1,175 @@
 The Aqua Protocol Specification
 ---
 
+
+The Aqua protocol runs on top of QUIC. Values are encoded little-endian.
+
+
+#### Channel IDs
+
+Channel IDs are 64-bit bitfields:
+
+- The lowest order bit is:
+
+  - 0 if the channel is flowing towards the server.
+  - 1 if the channel is flowing towards the client.
+- The second lowest order bit is:
+
+  - 0 if the channel was created by the client.
+  - 1 if the channel was created by the server.
+- The other 62 bits are a 62-bit uint, the channel index within its
+  index space (defined by the other two bits).
+
+When channels are created, the creating side assigns them channel IDs
+with channel indexes assigned sequentially within their index space
+(defined by the other two bits), starting at 0.
+
+The channel ID which consists entirely of zeroes (flowing towards
+server, created by client, index 0) is considered the "entrypoint
+channel" and treated specially in some cases.
+
+
+#### Oneshot Channel IDs
+
+Oneshot channel IDs are encoded exactly like normal channel IDs.
+However, they are a different space of IDs which refer to a slightly
+different kind of thing. Whether some 64-bit value is a channel ID or a
+oneshot channel ID cannot be determined from the 64-bit value itself;
+this information is contextual. Oneshot channel IDs have no equivalent
+concept to an "entrypoint channel."
+
+
+#### Attachment Types
+
+Aqua defines four types of "attachments," which can be attached to a
+message, and associates each with a non-zero "attachment type byte"
+for encoding purposes:
+
+- Sender: Associated with the byte 1.
+- Receiver: Associated with the byte 2.
+- OneshotSender: Associated with the byte 3.
+- OneshotReceiver: Associated with the byte 4.
+
+
+#### Stream Frames
+
+When either side opens a QUIC stream, it is expected that one or more
+stream frames will be written to it. Unless stated otherwise, a stream
+frame written to a QUIC stream can be followed by another stream frame
+written afterwards to the same stream.
+
+
+#### Stream Frame Type: ClientHello
+
+The ClientHello frame is sometimes included as the first frame in QUIC
+streams flowing from the client to the server. It informs the server
+that the client is operating within the Aqua protocol and provides
+additional protocol configuration information.
+
+An ClientHello frame is encoded as:
+
+- Frame discriminant: The byte 0.
+- Magic number: The byte sequence [62, 70, 47, 248, 250, 108, 161, 10].
+- Header data: A length-prefixed ASCII string.
+
+The client begins in a state of beginning all QUIC streams it opens to
+the server with a ClientHello frame. It sends the same ClientHello frame
+each time redundantly. This stops when the client receives a message
+from the server through the control stream indicating that the server
+has successfully received a copy of the client's ClientHello frame, at
+which point the client stops sending it in subsequently opened streams. 
+
+
+#### Stream Frame Type: Message
+
+The Message frame carries an application message on a channel.
+
+A Message frame is encoded as:
+
+- Frame discriminant: The byte 1.
+- Destination: A channel ID, the channel this message is being sent to.
+- Payload: A length-prefixed byte string.
+- Attachments: A list of attachments attached to this message, encoded
+  as such:
+
+  - For each of the zero or more attachments:
+    - An attachment type byte, denoting the type of the attachment.
+    - If the attachment type is Sender or Receiver:
+      - A channel ID, the channel being attached.
+    - If the attachment type is OneshotSender or OneshotReceiver:
+      - A oneshot channel ID, the oneshot channel being attached.
+  - A 0 byte, denoting the end of the attachments list.
+
+
+#### Stream Frame Type: BeginControlStream
+
+The BeginControlStream frame begins the control stream. See the section
+on the control stream.
+
+A BeginControlStream frame is encoded as:
+
+- Frame discriminant: The byte 2.
+
+An encoded BeginControlStream frame contains no futher bytes beyond the
+frame discriminant.
+
+
+#### The Control Stream
+
+Immediately after the client connects to the server it opens up a
+bidirectional QUIC stream, the "control stream," which stays alive for
+the duration of the connection.
+
+There is exactly one control stream in the connection. The client only
+makes a second attempt to open a control stream if the first attempt
+failed due to 0-rtt data rejection. If the control stream closes the
+connection terminates.
+
+The control stream begins with a ClientHello frame. It is followed by a
+BeginControlStream frame. After this, the stream switches from being
+a sequence of stream frames to being a sequence of "control frames," a
+different category of frames.
+
+The control stream is the only bidirectional stream Aqua uses. In
+addition to the client writing control frames on the control stream in
+the direction flowing to the server, the server also writes control
+frames on the control stream in the direction flowing to the client.
+
+
+#### The Control Stream: Control Frames
+
+Control frames are a different category of thing than stream frames.
+However, they are made to have non-overlapping sets of frame
+discriminants for convenience.
+
+
+#### Control Frame Type: ThingAttached
+
+The ThingAttached frame is sent by a side of the connection whenever
+that side of the connection attaches an attachment to a message and
+sends that message.
+
+A ThingAttached frame is encoded as:
+
+- Frame discriminant: The byte 3.
+- If the message the attachment was attached to was sent in a QUIC
+  stream:
+
+  - The "how_msg_sent" byte: If the stream was opened in 0-RTT mode, the
+    byte 1, otherwise, the byte 0.
+  - Stream ID: The 64-bit QUIC stream ID of the QUIC stream the message
+    was sent on, encoded as a var-len uint.
+- If the message the attachment was attached to was sent in a QUIC
+  unreliable datagram:
+
+  - The "how_msg_sent" byte: The byte 2.
+  - Datagram ID: The 64-bit sequential unreliable datagram index of the
+    unreliable datagram the message was sent on, encoded as a var-len
+    uint.
+  - The "sent_at" field: The 64-bit number of nanoseconds between when
+    the connection  
+- An attachment type byte, denoting the type of attachment.
+- If the attachment type is Sender or Receiver:
+  - A channel ID, the channel being attached.
+- If the attachment type is OneshotSender or OneshotReceiver:
+  - A oneshot channel ID, the oneshot channel being attached.
