@@ -13,7 +13,7 @@
 //!
 //! ```
 //! use tokio::sync::{oneshot, mpsc};
-//! 
+//!
 //! #[tokio::main]
 //! async fn main() {
 //!     let (send_req, mut recv_req) = mpsc::channel::<(i32, oneshot::Sender<i32>)>(4096);
@@ -49,7 +49,7 @@
 //!
 //! By combining this with a custom serde-like serialization system which knows not only how to
 //! encode/decode the payload representation of messages but also how to talk to the aqua API to
-//! attach / take attached streams, we gain the ability to seamlessly create a channel, put the 
+//! attach / take attached streams, we gain the ability to seamlessly create a channel, put the
 //! sender or receiver half in a struct, and send that struct down another channel, and have this
 //! work even if that channel is transmitting its data across a network boundary.
 //!
@@ -85,13 +85,19 @@
 //!
 //! > **Server**
 //!
-//! (TODO provisional API) See [`server`].
+//! (TODO)
 //!
 //! > **Client**
 //!
-//! (TODO provisional API) See [`client`].
+//! (TODO)
 
-pub use anyhow::Error;
+pub extern crate bytes;
+
+pub mod zero_copy;
+
+mod frame;
+mod stuff;
+//mod frame;
 
 
 /// Create a networkable channel.
@@ -141,7 +147,7 @@ impl<T> IntoSender<T> {
     /// However, so long as the network connection is alive, a best effort will be made to transmit
     /// all sent messages to the receiver. The sequence of received messages is guaranteed to be a
     /// prefix of the sequence of sent messages.
-    pub fn into_ordered_bounded(buffer_num_msgs: usize) -> BlockingSender<T> {
+    pub fn into_ordered_bounded(_buffer_num_msgs: usize) -> BlockingSender<T> {
         todo!()
     }
 
@@ -190,7 +196,7 @@ impl<T> IntoSender<T> {
     /// made to transmit all sent messages to the receiver.
     ///
     /// [1]: https://en.wikipedia.org/wiki/Head-of-line_blocking
-    pub fn into_unordered_bounded(buffer_num_msgs: usize) -> BlockingSender<T> {
+    pub fn into_unordered_bounded(_buffer_num_msgs: usize) -> BlockingSender<T> {
         todo!()
     }
 
@@ -306,17 +312,17 @@ pub enum TrySendErrorReason {
 
 impl<T> BlockingSender<T> {
     /// Send a value, waiting until backpressure allows for it.
-    pub async fn send(&self, value: T) -> Result<(), SendError<T>> {
+    pub async fn send(&self, _value: T) -> Result<(), SendError<T>> {
         todo!()
     }
 
     /// Send a value, blocking until backpressure allows for it.
-    pub fn send_blocking(&self, value: T) -> Result<(), SendError<T>> {
+    pub fn send_blocking(&self, _value: T) -> Result<(), SendError<T>> {
         todo!()
     }
 
     /// Try to send a value now if backpressure allows for it.
-    pub fn try_send(&self, value: T) -> Result<(), TrySendError<T>> {
+    pub fn try_send(&self, _value: T) -> Result<(), TrySendError<T>> {
         todo!()
     }
 
@@ -329,7 +335,7 @@ impl<T> BlockingSender<T> {
     ///
     /// This causes the sender half to give up on transmitting buffered data (if the channel is
     /// networked), and instructs the receiver half to switch to yielding `Aborted` errors
-    /// immediately rather than continuing to deliver buffered values to the application. 
+    /// immediately rather than continuing to deliver buffered values to the application.
     ///
     /// Contrast to simply dropping all the sender handles to a channel, which results in the
     /// sender making a best effort to continue to transmit all buffered data until it is fully
@@ -353,7 +359,7 @@ pub struct NonBlockingSender<T> {
 
 impl<T> NonBlockingSender<T> {
     /// Send a value. Never blocks.
-    pub fn send(&self, value: T) -> Result<(), SendError<T>> {
+    pub fn send(&self, _value: T) -> Result<(), SendError<T>> {
         todo!()
     }
 
@@ -361,7 +367,7 @@ impl<T> NonBlockingSender<T> {
     ///
     /// This causes the sender half to give up on transmitting buffered data (if the channel is
     /// networked), and instructs the receiver half to switch to yielding `Aborted` errors
-    /// immediately rather than continuing to deliver buffered values to the application. 
+    /// immediately rather than continuing to deliver buffered values to the application.
     ///
     /// Contrast to simply dropping all the sender handles to a channel, which results in the
     /// sender making a best effort to continue to transmit all buffered data until it is fully
@@ -399,7 +405,7 @@ pub enum RecvError {
     /// The sender half aborted the channel.
     Aborted,
     /// The encompassing network connection was lost before the channel closed otherwise.
-    ConnectionLost,
+    Disconnected,
 }
 
 /// Error returned by [`Receiver::try_recv`][crate::Receiver::try_recv].
@@ -409,7 +415,7 @@ pub enum TryRecvError {
     /// The sender half aborted the channel.
     Aborted,
     /// The encompassing network connection was lost before the channel closed otherwise.
-    ConnectionLost,
+    Disconnected,
 }
 
 impl<T> Receiver<T> {
@@ -481,7 +487,7 @@ pub enum OneshotSendErrorReason {
 
 impl<T> OneshotSender<T> {
     /// Send a value. Never blocks.
-    pub fn send(self, value: T) -> Result<(), OneshotSendError<T>> {
+    pub fn send(self, _value: T) -> Result<(), OneshotSendError<T>> {
         todo!()
     }
 
@@ -544,7 +550,7 @@ impl<T> OneshotReceiver<T> {
 
 // TODO: the API below is provisional and should be enhanced when the time is right
 
-
+/*
 /// (TODO provisional API) Like `serde_json::Value` but with aqua senders and receivers.
 pub enum Value {
     Null,
@@ -570,3 +576,4 @@ pub fn server(bind_to: &str) -> Result<Receiver<Value>, Error> {
 pub fn client(connect_to: &str) -> Result<IntoSender<Value>, Error> {
     todo!()
 }
+*/
