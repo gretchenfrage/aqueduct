@@ -10,7 +10,7 @@ pub use select::Selector;
 use std::{
     collections::VecDeque,
     sync::{
-        atomic::{AtomicUsize, AtomicBool, Ordering}
+        atomic::{AtomicUsize, AtomicBool, Ordering},
         Arc,
         Weak,
         Mutex,

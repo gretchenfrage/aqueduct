@@ -95,10 +95,12 @@ pub extern crate bytes;
 
 pub mod zero_copy;
 
-mod frame;
-mod channel;
-mod stuff;
-mod flume;
+//mod frame;
+pub mod channel;
+//mod channel;
+//mod channel3;
+//mod stuff;
+//mod flume;
 //mod frame;
 
 /// Create a networkable one-shot channel: a channel that conveys only a single message.

@@ -117,7 +117,7 @@ impl QuicMultiBytesReader {
             let b = self.read_u8().await?;
             out |= ((b & MASK) as u64) << shift;
             shift += 7;
-            if (b & MORE) != 0 { break; }
+            if (b & MORE) == 0 { break; }
         }
         Ok(out)
     }

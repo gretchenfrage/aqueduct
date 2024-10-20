@@ -12,7 +12,7 @@ const MULTI_BYTES_INLINE: usize = 2;
 /// Sequence of bytes stored as an array of [`bytes::Bytes`].
 ///
 /// If there are 2 or fewer segments, the pointers to them are stored inline, without requiring an
-/// additional allocation. Empty pages are automatically filtered out.
+/// additional allocation. Empty segments are automatically filtered out.
 #[derive(Debug, Clone, Default)]
 pub struct MultiBytes {
     pages: SmallVec<[Bytes; MULTI_BYTES_INLINE]>,

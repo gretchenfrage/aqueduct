@@ -24,7 +24,7 @@ pub struct MultiBytesWriter {
     // doubled allocation, we add the existing allocation as a page and make a new allocation with
     // doubled size but which starts with no content.
     // 
-    // the pushing of a `Bytes` resets this "doublings" counter.
+    // the pushing of a `Bytes` directly from the user resets this "doublings" counter.
     inner: MultiBytes,
     buf: Vec<u8>,
     doublings: u8,

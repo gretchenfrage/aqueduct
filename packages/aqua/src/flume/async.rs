@@ -4,17 +4,15 @@ use std::{
     future::Future,
     pin::Pin,
     task::{Context, Poll, Waker},
+    sync::Mutex,
     any::Any,
     ops::Deref,
 };
 use std::fmt::{Debug, Formatter};
-use crate::*;
-use futures_core::{stream::{Stream, FusedStream}, future::FusedFuture};
-use futures_sink::Sink;
-use spin1::Mutex as Spinlock;
+use super::*;
 
 struct AsyncSignal {
-    waker: Spinlock<Waker>,
+    waker: Mutex<Waker>,
     woken: AtomicBool,
     stream: bool,
 }
@@ -22,7 +20,7 @@ struct AsyncSignal {
 impl AsyncSignal {
     fn new(cx: &Context, stream: bool) -> Self {
         AsyncSignal {
-            waker: Spinlock::new(cx.waker().clone()),
+            waker: Mutex::new(cx.waker().clone()),
             woken: AtomicBool::new(false),
             stream,
         }
@@ -89,42 +87,6 @@ impl<T> Sender<T> {
             hook: Some(SendState::NotYetSent(item)),
         }
     }
-
-    /// Convert this sender into a future that asynchronously sends a single message into the channel,
-    /// returning an error if all receivers have been dropped. If the channel is bounded and is full,
-    /// this future will yield to the async runtime.
-    ///
-    /// In the current implementation, the returned future will not yield to the async runtime if the
-    /// channel is unbounded. This may change in later versions.
-    pub fn into_send_async<'a>(self, item: T) -> SendFut<'a, T> {
-        SendFut {
-            sender: OwnedOrRef::Owned(self),
-            hook: Some(SendState::NotYetSent(item)),
-        }
-    }
-
-    /// Create an asynchronous sink that uses this sender to asynchronously send messages into the
-    /// channel. The sender will continue to be usable after the sink has been dropped.
-    ///
-    /// In the current implementation, the returned sink will not yield to the async runtime if the
-    /// channel is unbounded. This may change in later versions.
-    pub fn sink(&self) -> SendSink<'_, T> {
-        SendSink(SendFut {
-            sender: OwnedOrRef::Ref(&self),
-            hook: None,
-        })
-    }
-
-    /// Convert this sender into a sink that allows asynchronously sending messages into the channel.
-    ///
-    /// In the current implementation, the returned sink will not yield to the async runtime if the
-    /// channel is unbounded. This may change in later versions.
-    pub fn into_sink<'a>(self) -> SendSink<'a, T> {
-        SendSink(SendFut {
-            sender: OwnedOrRef::Owned(self),
-            hook: None,
-        })
-    }
 }
 
 enum SendState<T> {
@@ -140,12 +102,6 @@ pub struct SendFut<'a, T> {
     sender: OwnedOrRef<'a, Sender<T>>,
     // Only none after dropping
     hook: Option<SendState<T>>,
-}
-
-impl<'a, T> Debug for SendFut<'a, T> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        f.debug_struct("SendFut").finish()
-    }
 }
 
 impl<T> std::marker::Unpin for SendFut<'_, T> {}
@@ -238,92 +194,6 @@ impl<'a, T> Future for SendFut<'a, T> {
         } else { // Nothing to do
             Poll::Ready(Ok(()))
         }
-    }
-}
-
-impl<'a, T> FusedFuture for SendFut<'a, T> {
-    fn is_terminated(&self) -> bool {
-        self.sender.shared.is_disconnected()
-    }
-}
-
-/// A sink that allows sending values into a channel.
-///
-/// Can be created via [`Sender::sink`] or [`Sender::into_sink`].
-pub struct SendSink<'a, T>(SendFut<'a, T>);
-
-impl<'a, T> SendSink<'a, T> {
-    /// Returns a clone of a sending half of the channel of this sink.
-    pub fn sender(&self) -> &Sender<T> {
-        &self.0.sender
-    }
-
-    /// See [`Sender::is_disconnected`].
-    pub fn is_disconnected(&self) -> bool {
-        self.0.is_disconnected()
-    }
-
-    /// See [`Sender::is_empty`].
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
-
-    /// See [`Sender::is_full`].
-    pub fn is_full(&self) -> bool {
-        self.0.is_full()
-    }
-
-    /// See [`Sender::len`].
-    pub fn len(&self) -> usize {
-        self.0.len()
-    }
-
-    /// See [`Sender::capacity`].
-    pub fn capacity(&self) -> Option<usize> {
-        self.0.capacity()
-    }
-
-    /// Returns whether the SendSinks are belong to the same channel.
-    pub fn same_channel(&self, other: &Self) -> bool {
-        self.sender().same_channel(other.sender())
-    }
-}
-
-impl<'a, T> Debug for SendSink<'a, T> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        f.debug_struct("SendSink").finish()
-    }
-}
-
-impl<'a, T> Sink<T> for SendSink<'a, T> {
-    type Error = SendError<T>;
-
-    fn poll_ready(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), Self::Error>> {
-        Pin::new(&mut self.0).poll(cx)
-    }
-
-    fn start_send(mut self: Pin<&mut Self>, item: T) -> Result<(), Self::Error> {
-        self.0.reset_hook();
-        self.0.hook = Some(SendState::NotYetSent(item));
-
-        Ok(())
-    }
-
-    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), Self::Error>> {
-        Pin::new(&mut self.0).poll(cx) // TODO: A different strategy here?
-    }
-
-    fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), Self::Error>> {
-        Pin::new(&mut self.0).poll(cx) // TODO: A different strategy here?
-    }
-}
-
-impl<'a, T> Clone for SendSink<'a, T> {
-    fn clone(&self) -> SendSink<'a, T> {
-        SendSink(SendFut {
-            sender: self.0.sender.clone(),
-            hook: None,
-        })
     }
 }
 
@@ -489,80 +359,5 @@ impl<'a, T> Future for RecvFut<'a, T> {
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         self.poll_inner(cx, false) // stream = false
-    }
-}
-
-impl<'a, T> FusedFuture for RecvFut<'a, T> {
-    fn is_terminated(&self) -> bool {
-        self.receiver.shared.is_disconnected() && self.receiver.shared.is_empty()
-    }
-}
-
-/// A stream which allows asynchronously receiving messages.
-///
-/// Can be created via [`Receiver::stream`] or [`Receiver::into_stream`].
-pub struct RecvStream<'a, T>(RecvFut<'a, T>);
-
-impl<'a, T> RecvStream<'a, T> {
-    /// See [`Receiver::is_disconnected`].
-    pub fn is_disconnected(&self) -> bool {
-        self.0.is_disconnected()
-    }
-
-    /// See [`Receiver::is_empty`].
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
-
-    /// See [`Receiver::is_full`].
-    pub fn is_full(&self) -> bool {
-        self.0.is_full()
-    }
-
-    /// See [`Receiver::len`].
-    pub fn len(&self) -> usize {
-        self.0.len()
-    }
-
-    /// See [`Receiver::capacity`].
-    pub fn capacity(&self) -> Option<usize> {
-        self.0.capacity()
-    }
-
-    /// Returns whether the SendSinks are belong to the same channel.
-    pub fn same_channel(&self, other: &Self) -> bool {
-        self.0.receiver.same_channel(&*other.0.receiver)
-    }
-}
-
-impl<'a, T> Debug for RecvStream<'a, T> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        f.debug_struct("RecvStream").finish()
-    }
-}
-
-impl<'a, T> Clone for RecvStream<'a, T> {
-    fn clone(&self) -> RecvStream<'a, T> {
-        RecvStream(RecvFut::new(self.0.receiver.clone()))
-    }
-}
-
-impl<'a, T> Stream for RecvStream<'a, T> {
-    type Item = T;
-
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        match Pin::new(&mut self.0).poll_inner(cx, true) { // stream = true
-            Poll::Pending => Poll::Pending,
-            Poll::Ready(item) => {
-                self.0.reset_hook();
-                Poll::Ready(item.ok())
-            }
-        }
-    }
-}
-
-impl<'a, T> FusedStream for RecvStream<'a, T> {
-    fn is_terminated(&self) -> bool {
-        self.0.is_terminated()
     }
 }
