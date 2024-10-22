@@ -165,11 +165,11 @@ impl<T> Channel<T> {
     }
 
     /// push a new node to the back of the recv waiter queue
-    pub fn push_recv_node(&self) -> SendWaiter<T> {
+    pub fn push_recv_node(&self) -> RecvWaiter<T> {
         unsafe {
             let mut lock = self.0.lockable.lock().unwrap();
             let lockable = &mut *lock;
-            SendWaiter(self.push_node(&mut lockable.recv_waiting_front_back, &mut lockable.pool))
+            RecvWaiter(self.push_node(&mut lockable.recv_waiting_front_back, &mut lockable.pool))
         }
     }
 
@@ -336,3 +336,9 @@ impl<T> Drop for RecvWaiter<T> {
         self.remove();
     }
 }
+
+unsafe impl<T: Send> Send for Channel<T> {}
+unsafe impl<T: Send> Sync for Channel<T> {}
+
+unsafe impl<T: Send> Send for WaiterHandle<T> {}
+unsafe impl<T: Send> Sync for WaiterHandle<T> {}

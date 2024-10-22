@@ -1,7 +1,7 @@
 //! Aqueduct's mpmc channels, which can be either local or networked
 //!
-//! An aqueduct channel is created by calling the `channel` function, which creates a linked pair
-//! of `IntoSender<T>` and `Receiver<T>`. The reason it returns an `IntoSender` rather than a
+//! An aqueduct channel is created by calling the [`channel`] function, which creates a linked pair
+//! of [`IntoSender<T>`] and [`Receiver<T>`]. The reason it returns an `IntoSender` rather than a
 //! sender is because the channel starts in an "undifferentiated" state where its delivery,
 //! ordering, and queueing semantics are not yet determined. The user must call a method on
 //! `IntoSender` to convert it into a more specific sender type based on various tradeoffs:
@@ -78,11 +78,11 @@ use self::{
     },
 };
 use std::{
-    sync::atomic::{AtomicU64, Ordering},
     future::Future,
     pin::Pin,
+    sync::atomic::{AtomicU64, Ordering},
     task::{Context, Poll},
-    time::{Instant, Duration},
+    time::{Duration, Instant},
 };
 use tokio::time::{sleep, sleep_until, Sleep};
 
@@ -128,6 +128,7 @@ enum Semantics {
     },
 }
 
+/// Create a new aqueduct channel
 pub fn channel<T>() -> (IntoSender<T>, Receiver<T>) {
     let channel = Channel::new(
         MetaInfo {
@@ -142,6 +143,7 @@ pub fn channel<T>() -> (IntoSender<T>, Receiver<T>) {
     (IntoSender(channel.clone()), Receiver(channel))
 }
 
+/// Undifferentiated sender representing a channel with not-yet-determined semantics
 pub struct IntoSender<T>(Channel<T>);
 
 /// A sender handle to a channel with semantics which may make the sender block
@@ -150,39 +152,85 @@ pub struct BoundedSender<T>(Channel<T>);
 /// A sender handle to a channel with semantics which ensure the sender will never block
 pub struct UnboundedSender<T>(Channel<T>);
 
+/// A receiver handle to a channel
 pub struct Receiver<T>(Channel<T>);
 
+/// Error for trying to send a message into a channel
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct SendError<T> {
-    pub value: T,
+    /// The message that could not be sent
+    pub message: T,
+    /// The reason the message could not be sent
     pub reason: SendErrorReason,
 }
 
+/// Reason for a [`SendError`] occurring
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub enum SendErrorReason {
+    /// All receiver handles have been dropped
+    ///
+    /// Any subsequent attempts to use the same channel will yield the same error.
     NoReceivers,
+    /// This or some other sender handle was used to cancel the channel
+    ///
+    /// Any subsequent attempts to use the same channel will yield the same error.
     Cancelled,
+    /// The channel's network connection was lost
+    ///
+    /// Any subsequent attempts to use the this or any channel on the same connection will yield
+    /// the same error (except individual channels that have already entered some other permanent
+    /// error state).
     ConnectionLost,
 }
 
+/// Error for trying to send a message into a channel immediately or within a deadline
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct TrySendError<T> {
-    pub value: T,
+    /// The message that could not be sent
+    pub message: T,
+    /// The reason the message could not be sent
     pub reason: TrySendErrorReason,
 }
 
+/// Reason for a [`TrySendError`] occurring
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub enum TrySendErrorReason {
-    TimedOutFull,
+    /// The send operation could not be completed immediately / by the deadline
+    NotReady,
+    /// All receiver handles have been dropped
+    ///
+    /// Any subsequent attempts to use the same channel will yield the same error.
     NoReceivers,
+    /// This or some other sender handle was used to cancel the channel
+    ///
+    /// Any subsequent attempts to use the same channel will yield the same error.
     Cancelled,
+    /// The channel's network connection was lost
+    ///
+    /// Any subsequent attempts to use the this or any channel on the same connection will yield
+    /// the same error (except individual channels that have already entered some other permanent
+    /// error state).
     ConnectionLost,
+}
+
+impl<T> TrySendError<T> {
+    /// Whether this is a `NotReady` error
+    pub fn is_temporary(self) -> bool {
+        self.reason.is_temporary()
+    }
+}
+
+impl TrySendErrorReason {
+    /// Whether this is a `NotReady` error
+    pub fn is_temporary(self) -> bool {
+        self == TrySendErrorReason::NotReady
+    }
 }
 
 impl<T> From<SendError<T>> for TrySendError<T> {
     fn from(e: SendError<T>) -> Self {
         TrySendError {
-            value: e.value,
+            message: e.message,
             reason: e.reason.into(),
         }
     }
@@ -198,17 +246,43 @@ impl From<SendErrorReason> for TrySendErrorReason {
     }
 }
 
+/// Error for trying to receive a message from a channel
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub enum RecvError {
+    /// A sender cancelled the channel
+    ///
+    /// Any subsequent attempts to use the same channel will yield the same error.
     Cancelled,
+    /// The channel's network connection was lost
+    ///
+    /// Any subsequent attempts to use the this or any channel on the same connection will yield
+    /// the same error (except individual channels that have already entered some other permanent
+    /// error state).
     ConnectionLost,
 }
 
+/// Error for trying to receive a message from a channel immediately or within a deadline
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub enum TryRecvError {
-    TimedOutEmpty,
+    /// The receive operation could not be completed immediately / by the deadline
+    NotReady,
+    /// A sender cancelled the channel
+    ///
+    /// Any subsequent attempts to use the same channel will yield the same error.
     Cancelled,
+    /// The channel's network connection was lost
+    ///
+    /// Any subsequent attempts to use the this or any channel on the same connection will yield
+    /// the same error (except individual channels that have already entered some other permanent
+    /// error state).
     ConnectionLost,
+}
+
+impl TryRecvError {
+    /// Whether this is a `NotReady` error
+    pub fn is_temporary(self) -> bool {
+        self == TryRecvError::NotReady
+    }
 }
 
 impl From<RecvError> for TryRecvError {
@@ -217,6 +291,16 @@ impl From<RecvError> for TryRecvError {
             RecvError::Cancelled => TryRecvError::Cancelled,
             RecvError::ConnectionLost => TryRecvError::ConnectionLost,
         }
+    }
+}
+
+impl<T> UnboundedSender<T> {
+    /// Send a message immediately
+    pub fn send(&self, message: T) -> Result<(), SendError<T>> {
+        dont_block_on(&mut SendFut {
+            waiter: self.0.push_send_node(),
+            elem: Some(message),
+        }).unwrap()
     }
 }
 
@@ -260,8 +344,8 @@ impl<T> BoundedSender<T> {
         block_on_timeout(&mut fut, timeout)
             .map(|result| result.map_err(From::from))
             .unwrap_or_else(|| Err(TrySendError {
-                value: fut.cancel().unwrap(),
-                reason: TrySendErrorReason::TimedOutFull,
+                message: fut.cancel().unwrap(),
+                reason: TrySendErrorReason::NotReady,
             }))
     }
 
@@ -274,25 +358,59 @@ impl<T> BoundedSender<T> {
         self.send_blocking_timeout(message, deadline.saturating_duration_since(Instant::now()))
     }
 
-    /// Send a message if back-pressure permits it without blocking
+    /// Send a message immediately if back-pressure permits it without blocking
     pub fn try_send(&self, message: T) -> Result<(), TrySendError<T>> {
         let mut fut = self.send(message);
         dont_block_on(&mut fut)
             .map(|result| result.map_err(From::from))
             .unwrap_or_else(|| Err(TrySendError {
-                value: fut.cancel().unwrap(),
-                reason: TrySendErrorReason::TimedOutFull,
+                message: fut.cancel().unwrap(),
+                reason: TrySendErrorReason::NotReady,
             }))
     }
 }
 
-impl<T> UnboundedSender<T> {
-    /// Send a message immediately
-    pub fn send(&self, message: T) -> Result<(), SendError<T>> {
-        dont_block_on(&mut SendFut {
-            waiter: self.0.push_send_node(),
-            elem: Some(message),
-        }).unwrap()
+impl<T> Receiver<T> {
+    /// Receive a message, awaiting until one is available
+    pub fn recv(&self) -> RecvFut<T> {
+        RecvFut(self.0.push_recv_node())
+    }
+
+    /// Receive a message, awaiting until one is available or the timeout elapses
+    pub fn recv_timeout(&self, timeout: Duration) -> RecvTimeoutFut<T> {
+        RecvTimeoutFut {
+            recv: self.recv(),
+            timeout: sleep(timeout),
+        }
+    }
+
+    /// Receive a message, awaiting until one is available or the deadline is reached
+    pub fn recv_deadline(&self, deadline: Instant) -> RecvTimeoutFut<T> {
+        self.recv_timeout(deadline.saturating_duration_since(Instant::now()))
+    }
+
+    /// Receive a message, blocking until one is available
+    pub fn recv_blocking(&self) -> Result<Option<T>, RecvError> {
+        block_on(&mut self.recv())
+    }
+
+    /// Receive a message, blocking until one is available or the timeout elapses
+    pub fn recv_blocking_timeout(&self, timeout: Duration) -> Result<Option<T>, TryRecvError> {
+        block_on_timeout(&mut self.recv(), timeout)
+            .map(|result| result.map_err(From::from))
+            .unwrap_or_else(|| Err(TryRecvError::NotReady))
+    }
+
+    /// Receive a message, blocking until one is available or the deadline is reached
+    pub fn recv_blocking_deadline(&self, deadline: Instant) -> Result<Option<T>, TryRecvError> {
+        self.recv_blocking_timeout(deadline.saturating_duration_since(Instant::now()))
+    }
+
+    /// Receive a message immediately if one is available without blocking
+    pub fn try_recv(&self) -> Result<Option<T>, TryRecvError> {
+        dont_block_on(&mut self.recv())
+            .map(|result| result.map_err(From::from))
+            .unwrap_or_else(|| Err(TryRecvError::NotReady))
     }
 }
 
@@ -331,7 +449,7 @@ impl<T> Future for SendFut<T> {
             .poll(cx, |queue, meta, _| {
                 if let Some(reason) = meta.error {
                     let error = SendError {
-                        value: this.elem.take().expect("SendFut polled after cancelled"),
+                        message: this.elem.take().expect("SendFut polled after cancelled"),
                         reason,
                     };
                     return (Some(Err(error)), false);
@@ -369,7 +487,13 @@ unsafe impl<T> DropWakers for SendFut<T> {
     }
 }
 
-/// Version of `SendFut<T>` with a time-based deadline
+/// Future for sending a message into a channel with a time-based deadline
+///
+/// Uses tokio's timer system.
+///
+/// Blocks all send futures on the same channel created after this future until this future either
+/// resolves or is dropped or cancelled. If this future is dropped or cancelled without resolving,
+/// it is guaranteed that it will have no effect on the channel state.
 pub struct SendTimeoutFut<T> {
     send: SendFut<T>,
     timeout: Sleep,
@@ -390,8 +514,8 @@ impl<T> Future for SendTimeoutFut<T> {
             let timeout = Pin::new_unchecked(&mut this.timeout);
             if let Poll::Ready(()) = timeout.poll(cx) {
                 return Poll::Ready(Err(TrySendError {
-                    value: this.send.cancel().unwrap(),
-                    reason: TrySendErrorReason::TimedOutFull,
+                    message: this.send.cancel().unwrap(),
+                    reason: TrySendErrorReason::NotReady,
                 }));
             }
 
@@ -471,7 +595,16 @@ unsafe impl<T> DropWakers for RecvFut<T> {
     }
 }
 
-/// Version of `SendFut<T>` with a time-based deadline
+/// Future for receiving a message from a channel with a time-based deadline
+///
+/// Uses tokio's timer system.
+///
+/// Resolves to `Ok(None)` if the channel finished gracefully and all messages in it have been
+/// taken.
+///
+/// Blocks all send futures on the same channel created after this future until this future either
+/// resolves or is dropped or cancelled. If this future is dropped or cancelled without resolving,
+/// it is guaranteed that it will have no effect on the channel state.
 pub struct RecvTimeoutFut<T> {
     recv: RecvFut<T>,
     timeout: Sleep,
@@ -491,76 +624,10 @@ impl<T> Future for RecvTimeoutFut<T> {
 
             let timeout = Pin::new_unchecked(&mut this.timeout);
             if let Poll::Ready(()) = timeout.poll(cx) {
-                return Poll::Ready(Err(TryRecvError::TimedOutEmpty));
+                return Poll::Ready(Err(TryRecvError::NotReady));
             }
 
             Poll::Pending
         }
     }
 }
-
-/*
-enum Lifecycle {
-    /// sender is still in IntoSender form
-    Undifferentiated,
-    /// sender and receiver are both active
-    Active {
-        /// optional maximum length
-        capacity: Option<usize>,
-    },
-
-}
-*/
-
-/*
-pub struct SendFut<T> {
-    waiter: WaiterHandle<T>,
-    elem: Option<T>,
-}
-
-impl<T> Future for SendFut<T> {
-    type Output = ();
-
-    fn poll(self: Pin<&mut Self>, cx: &mut Context) -> Poll<()> {
-
-    }
-}
-
-impl<T> SendFut<T> {
-    pub fn cancel(&mut self) -> Option<T> {
-
-    }
-}
-
-pub struct RecvFut<T> {
-    waiter: WaiterHandle<T>,
-    done: bool,
-}
-
-
-impl<T> Future for RecvFut<T> {
-    type Output = ();
-
-    fn poll(self: Pin<&mut Self>, cx: &mut Context) -> Poll<()> {
-
-    }
-}
-
-/// Error returned by [`Receiver::recv`][crate::Receiver::recv] and similar.
-pub enum RecvError {
-    /// The sender half cancelled the channel.
-    Cancelled,
-    /// The encompassing network connection was lost before the channel closed otherwise.
-    NetConnectionLost,
-}
-
-/// Error returned by [`Receiver::try_recv`][crate::Receiver::try_recv].
-pub enum TryRecvError {
-    /// There is not currently a value available (although there may be in the future).
-    Empty,
-    /// The sender half cancelled the channel.
-    Cancelled,
-    /// The encompassing network connection was lost before the channel closed otherwise.
-    NetConnectionLost,
-}
-*/

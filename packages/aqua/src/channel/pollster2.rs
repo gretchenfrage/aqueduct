@@ -119,7 +119,7 @@ where
                 Poll::Ready(item) => break Some(item),
             }
         };
-        fut.drop_wakers();
+        pin.get_unchecked_mut().drop_wakers();
         retval
     }
 }
