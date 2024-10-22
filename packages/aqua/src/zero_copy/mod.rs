@@ -1,4 +1,4 @@
-//! Utilities for zero-copy networking.
+//! Utilities for zero-copy networking
 
 mod multi_bytes;
 mod multi_bytes_writer;

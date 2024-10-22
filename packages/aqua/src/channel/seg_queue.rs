@@ -1,4 +1,4 @@
-//! Segment queue
+//! Segment queue (not concurrent itself)
 
 use std::{
     mem::{size_of, transmute_copy},
