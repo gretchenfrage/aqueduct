@@ -8,7 +8,7 @@ use std::{
     future::Future,
     sync::{Condvar, Mutex},
     task::{Context, Poll, Waker, RawWaker, RawWakerVTable},
-    time::{Instant, Duration},
+    time::Duration,
 };
 
 /// unsafe trait for futures which provide a `drop_wakers` method which must guarantee that any

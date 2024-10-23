@@ -173,11 +173,31 @@ impl<T> Channel<T> {
         }
     }
 
-    /// lock the queue and let `f` mutate its inner state
-    pub fn lock_mutate<F: FnOnce(&mut SegQueue<T>, &mut MetaInfo) -> O, O>(&self, f: F) -> O {
-        let mut lock = self.0.lockable.lock().unwrap();
-        let lockable = &mut *lock;
-        f(&mut lockable.elems, &mut lockable.meta)
+    /// lock the queue and let `f` mutate its inner state. `f` returns 2-tuple of booleans:
+    ///
+    /// - if the first boolean is true, the send waiter node at the front of the send waiter queue
+    ///   will have its waker taken and waken, if able.
+    /// - if the second boolean is true, that will happen for the recv waiter queue.
+    pub fn lock_mutate<F: FnOnce(&mut SegQueue<T>, &mut MetaInfo) -> (bool, bool)>(&self, f: F) {
+        unsafe {
+            let mut lock = self.0.lockable.lock().unwrap();
+            let lockable = &mut *lock;
+            let (should_wake_send, should_wake_recv) = f(&mut lockable.elems, &mut lockable.meta);
+            if should_wake_send {
+                if let Some((mut front, _)) = lockable.send_waiting_front_back {
+                    if let Some(waker) = front.as_mut().waker.take() {
+                        waker.wake();
+                    }
+                }
+            }
+            if should_wake_recv {
+                if let Some((mut front, _)) = lockable.recv_waiting_front_back {
+                    if let Some(waker) = front.as_mut().waker.take() {
+                        waker.wake();
+                    }
+                }
+            }
+        }
     }
 
     /// get this channel's `AtomicMetaInfo
