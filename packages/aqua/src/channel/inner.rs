@@ -10,9 +10,7 @@ use super::{
 use std::{
     sync::{Arc, Mutex},
     ptr::NonNull,
-    future::Future,
-    pin::Pin,
-    task::{Context, Poll, Waker},
+    task::{Context, Waker},
     mem::swap,
 };
 
