@@ -14,11 +14,11 @@ primitives.
 
 ## Specification
 
-See [PROTOCOL.txt][PROTOCOL.txt].
+See [PROTOCOL.txt](PROTOCOL.txt).
 
 ## Design principles
 
-See [docs/PRINCIPLES.md][PROTOCOL.txt] for more elaboration.
+See [docs/PRINCIPLES.md](PROTOCOL.txt) for more elaboration.
 
 1. **Tractable primitives over automagic black boxes.**
 2. **Clear, language-agnostic protocol specification.**
@@ -36,4 +36,4 @@ TODO
 
 ## More resources
 
-See the [docs/][docs] subdirectory.
+See the [docs/](docs) subdirectory.
