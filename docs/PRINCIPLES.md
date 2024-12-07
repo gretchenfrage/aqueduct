@@ -1,7 +1,7 @@
 
 # Aqueduct design principles
 
-TODO
+TODO further elaboration
 
 1. **Tractable primitives over automagic black boxes.**
 2. **Clear, language-agnostic protocol specification.**

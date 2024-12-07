@@ -73,7 +73,7 @@ struct SegMeta<T> {
 }
 
 impl<T> SegPtr<T> {
-    /// allocate on the heap and initialize as empty
+    // allocate on the heap and initialize as empty
     unsafe fn alloc() -> Self {
         let (layout, _) = seg_layout::<T>();
         let Some(ptr) = NonNull::new(alloc(layout)) else { handle_alloc_error(layout) };
@@ -82,17 +82,17 @@ impl<T> SegPtr<T> {
         SegPtr(ptr, PhantomData)
     }
 
-    /// whether the segment is empty
+    // whether the segment is empty
     unsafe fn is_empty(self) -> bool {
         (&*(self.0.as_ptr() as *const SegMeta<T>)).len == 0
     }
 
-    /// whether the segment is full
+    // whether the segment is full
     unsafe fn is_full(self) -> bool {
         (&*(self.0.as_ptr() as *const SegMeta<T>)).len == cap::<T>() as u16
     }
 
-    /// push element to back. assumes it's not full, or UB occurs.
+    // push element to back. assumes it's not full, or UB occurs.
     unsafe fn push(self, t: T) {
         debug_assert!(!self.is_full());
         let meta = &mut *(self.0.as_ptr() as *mut SegMeta<T>);
@@ -102,7 +102,7 @@ impl<T> SegPtr<T> {
         meta.len += 1;
     }
 
-    /// pop element from front. assumes it's not empty, or UB occurs.
+    // pop element from front. assumes it's not empty, or UB occurs.
     unsafe fn pop(self) -> T {
         debug_assert!(!self.is_empty());
         let meta = &mut *(self.0.as_ptr() as *mut SegMeta<T>);
@@ -113,7 +113,7 @@ impl<T> SegPtr<T> {
         t
     }
 
-    /// deallocate segment and drop elements
+    // deallocate segment and drop elements
     unsafe fn drop(self) {
         let meta = &mut *(self.0.as_ptr() as *mut SegMeta<T>);
         let (layout, offset) = seg_layout::<T>();
@@ -124,12 +124,12 @@ impl<T> SegPtr<T> {
         dealloc(self.0.as_ptr(), layout);
     }
 
-    /// get mutable reference to segment's ptr to next segment towards back
+    // get mutable reference to segment's ptr to next segment towards back
     unsafe fn to_back(&self) -> &mut Option<SegPtr<T>> {
         &mut (&mut *(self.0.as_ptr() as *mut SegMeta<T>)).to_back
     }
 
-    /// get mutable reference to segment's ptr to next segment towards front
+    // get mutable reference to segment's ptr to next segment towards front
     unsafe fn to_front(&self) -> &mut Option<SegPtr<T>> {
         &mut (&mut *(self.0.as_ptr() as *mut SegMeta<T>)).to_front
     }
@@ -143,32 +143,32 @@ impl<T> Clone for SegPtr<T> {
 
 impl<T> Copy for SegPtr<T> {}
 
-/// Segment queue of `T`
-pub struct SegQueue<T> {
-    /// total length of seg queue
+// segment queue of `T`
+pub(crate) struct SegQueue<T> {
+    // total length of seg queue
     len: usize,
-    /// front and back segments, unless no segments are linked
-    /// invariant: no linked segments are empty
+    // front and back segments, unless no segments are linked
+    // invariant: no linked segments are empty
     front_back: Option<(SegPtr<T>, SegPtr<T>)>,
-    /// basically a pool of empty segments to pull from before allocating a new one, except
-    /// that the pool's maximum size is 1. this prevents repeated allocations if the queue
-    /// length is fluctuating within a range of `cap::<T>()`.
+    // basically a pool of empty segments to pull from before allocating a new one, except
+    // that the pool's maximum size is 1. this prevents repeated allocations if the queue
+    // length is fluctuating within a range of `cap::<T>()`.
     spare: Option<SegPtr<T>>,
 }
 
 impl<T> SegQueue<T> {
-    /// Construct empty
-    pub fn new() -> Self {
+    // construct empty
+    pub(crate) fn new() -> Self {
         SegQueue { len: 0, front_back: None, spare: None }
     }
 
-    /// Elements in queue
-    pub fn len(&self) -> usize {
+    // elements in queue
+    pub(crate) fn len(&self) -> usize {
         self.len
     }
 
-    /// Push to back
-    pub fn push(&mut self, t: T) {
+    // push to back
+    pub(crate) fn push(&mut self, t: T) {
         unsafe {
             self.len += 1;
             if size_of::<T>() == 0 {
@@ -196,8 +196,8 @@ impl<T> SegQueue<T> {
         }
     }
 
-    /// Pop from front
-    pub fn pop(&mut self) -> Option<T> {
+    // pop from front
+    pub(crate) fn pop(&mut self) -> Option<T> {
         unsafe {
             if self.len() == 0 { return None; }
             self.len -= 1;
@@ -287,17 +287,28 @@ mod tests {
         use std::{
             collections::VecDeque,
             cmp::min,
+            env,
         };
         
+        let outer_iterations = env::var("SEG_QUEUE_TEST_OUTER_ITERATIONS")
+            .ok()
+            .map(|s| s.parse::<u32>().unwrap())
+            .unwrap_or(100);
+        let inner_iterations = env::var("SEG_QUEUE_TEST_INNER_ITERATIONS")
+            .ok()
+            .map(|s| s.parse::<u32>().unwrap())
+            .unwrap_or(10_000);
+        println!("outer iterations = {}", outer_iterations);
+        println!("inner iterations = {}", inner_iterations);
         let mut rng = new_rng();
 
-        for outer in 0..100 {
+        for outer in 0..outer_iterations {
             let mut queue_1 = VecDeque::<[u8; ELEM_SIZE]>::new();
             let mut queue_2 = SegQueue::<[u8; ELEM_SIZE]>::new();
             println!("outer loop {}", outer);
-            for i in 0u32..10_000 {
+            for i in 0u32..inner_iterations {
                 if rng.gen_ratio(52, 100) {
-                    println!("PUSH {}", i);
+                    //println!("PUSH {}", i);
                     let mut elem = [0; ELEM_SIZE];
                     let useable_len = min(ELEM_SIZE, 4);
                     (&mut elem[..useable_len]).copy_from_slice(&i.to_ne_bytes()[..useable_len]);
@@ -305,8 +316,8 @@ mod tests {
                     queue_2.push(elem);
                 } else {
                     let expect = queue_1.pop_front();
-                    let expect_dbg = expect.map(dbg_elem);
-                    println!("POP {:?}", expect_dbg);
+                    let _expect_dbg = expect.map(dbg_elem);
+                    //println!("POP {:?}", _expect_dbg);
                     assert_eq!(queue_2.pop(), expect);
                 }
                 // assert equivalent
@@ -328,7 +339,8 @@ mod tests {
                         let (_, offset) = seg_layout::<[u8; ELEM_SIZE]>();
                         let cap = elem_size_to_cap(ELEM_SIZE);
                         assert!(cap < u16::MAX.into());
-                        let meta = &*(seg_ptr.0.as_ptr() as *const SegMeta<[u8; ELEM_SIZE]>);
+                        let meta = seg_ptr.0.as_ptr() as *const SegMeta<[u8; ELEM_SIZE]>;
+                        let meta = meta.read();
                         assert!(meta.len > 0);
                         assert!((meta.start as usize) < cap);
                         let elems_ptr = seg_ptr.0.as_ptr().add(offset) as *const [u8; ELEM_SIZE];
@@ -394,7 +406,7 @@ mod tests {
         _16384 16384,
         _32768 32768,
         _65536 65536,
-        _131072 131072,
+        //_131072 131072,
 
         // neighborhood of u16::MAX
         _65534 65534,

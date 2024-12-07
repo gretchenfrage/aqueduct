@@ -85,7 +85,10 @@ impl QuicMultiBytesReader {
     // determine whether the stream finishes after the bytes that have been taken
     pub async fn is_done(&mut self) -> Result<bool, Error> {
         while self.chunk_offset == self.chunk.len() {
-            if let Some(chunk) = self.stream.read_chunk(MAX_CHUNK_LENGTH, true).await? {
+            if let Some(chunk) = self.stream
+                .read_chunk(MAX_CHUNK_LENGTH, true).await
+                .context("QUIC error")?
+            {
                 self.chunk = chunk.bytes;
                 self.chunk_offset = 0;
             } else {
