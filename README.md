@@ -1,8 +1,8 @@
 
 # Aqueduct: Stateful network protocols done right
 
-Aqueduct is a protocol based on sending networked message channels down other
-networked message channels, based on QUIC.
+Aqueduct is a protocol based on sending networked message channels through
+other networked message channels, built on QUIC.
 
 Rather than competing with stateless protocols like HTTP and gRPC, where the
 creation of connections is considered an implementation detail, we aim to
@@ -14,11 +14,11 @@ primitives.
 
 ## Specification
 
-See [PROTOCOL.txt].
+See [PROTOCOL.txt][PROTOCOL.txt].
 
 ## Design principles
 
-See [docs/PRINCIPLES.md] for more elaboration.
+See [docs/PRINCIPLES.md][PROTOCOL.txt] for more elaboration.
 
 1. **Tractable primitives over automagic black boxes.**
 2. **Clear, language-agnostic protocol specification.**
@@ -36,4 +36,4 @@ TODO
 
 ## More resources
 
-See the [docs] subdirectory.
+See the [docs/][docs] subdirectory.
