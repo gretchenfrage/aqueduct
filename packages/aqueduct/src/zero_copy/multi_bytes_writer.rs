@@ -35,6 +35,9 @@ impl MultiBytesWriter {
     pub fn write(&mut self, mut bytes: &[u8]) {
         while bytes.len() > 0 {
             if self.buf.capacity() == 0 {
+                while START_CAPACITY << self.doublings < bytes.len() {
+                    self.doublings += 1;
+                }
                 self.buf.reserve(START_CAPACITY << self.doublings);
             }
 
