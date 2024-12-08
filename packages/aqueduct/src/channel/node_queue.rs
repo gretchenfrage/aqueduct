@@ -11,8 +11,8 @@ use std::{
 pub(crate) struct NodeQueue {
     // front and back of queue, unless queue is empty.
     front_back: Option<(NonNull<NodeAlloc>, NonNull<NodeAlloc>)>,
-    // purging the queue is an irreversible operation wherein purged is set to true and all heap
-    // allocations for nodes are dropped and deallocated.
+    // purging the queue is an irreversible operation wherein purged is set to true, all heap
+    // allocations for nodes are dropped and deallocated, and any wakers they have are waked.
     purged: bool,
 }
 
@@ -61,7 +61,7 @@ impl NodeQueue {
     //
     // - the node is already linked.
     // - the queue is purged.
-    pub(crate) unsafe fn push_node(&mut self, node: &mut NodeHandle) {
+    pub(crate) unsafe fn push(&mut self, node: &mut NodeHandle) {
         debug_assert!(!node.linked, "UB");
         debug_assert!(!self.purged, "UB");
 
@@ -69,6 +69,7 @@ impl NodeQueue {
         let alloc = node.ptr.as_mut();
         debug_assert!(alloc.to_front.is_none());
         debug_assert!(alloc.to_back.is_none());
+        debug_assert!(alloc.waker.is_none());
         if let &mut Some((_, ref mut back)) = &mut self.front_back {
             // node becomes new back, and new to_back of previous back
             let back_alloc = back.as_mut();
@@ -82,19 +83,20 @@ impl NodeQueue {
         }
     }
 
-    // unlink the node from this queue.
+    // unlink the node from this queue. also, clear its waker.
     //
     // UB if:
     //
     // - the node is not linked.
     // - the node is linked to a different queue.
     // - the queue is purged.
-    pub(crate) unsafe fn remove_node(&mut self, node: &mut NodeHandle) {
+    pub(crate) unsafe fn remove(&mut self, node: &mut NodeHandle) {
         debug_assert!(node.linked, "UB");
         debug_assert!(!self.purged, "UB");
 
         node.linked = false;
         let alloc = node.ptr.as_mut();
+        alloc.waker = None;
         if let &mut Some((ref mut front, ref mut back)) = &mut self.front_back {
             if let Some(mut to_front) = alloc.to_front {
                 // node's to_back becomes new to_back of node's to_front
@@ -160,14 +162,30 @@ impl NodeQueue {
         &mut node.ptr.as_mut().waker
     }
 
-    // purge the queue, if it is not already purged.
+    // take and wake the waker of the node at the front of this queue, if this queue is not purged,
+    // not empty, and the node at the front has a waker.
+    pub(crate) fn wake_front(&mut self) {
+        unsafe {
+            if self.purged { return; }
+            if let Some((mut front, _)) = self.front_back {
+                if let Some(waker) = front.as_mut().waker.take() {
+                    waker.wake();
+                }
+            }
+        }
+    }
+
+    // purge the queue, if it is not already purged. this causes all wakers to be waked.
     pub(crate) fn purge(&mut self) {
         unsafe {
             self.purged = true;
             let mut next = self.front_back.map(|(front, _)| front);
             while let Some(curr) = next {
-                let alloc_box = Box::from_raw(curr.as_ptr());
+                let mut alloc_box = Box::from_raw(curr.as_ptr());
                 next = alloc_box.to_back;
+                if let Some(waker) = alloc_box.waker.take() {
+                    waker.wake();
+                }
                 drop(alloc_box);
             }
         }
