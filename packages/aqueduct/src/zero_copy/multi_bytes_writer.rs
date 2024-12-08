@@ -11,7 +11,7 @@ use bytes::Bytes;
 const START_CAPACITY: usize = 64;
 
 
-/// Utility for writing bytes in memory build a `MultiBytes`.
+/// Utility for writing bytes in memory build a [`MultiBytes`].
 ///
 /// Uses heuristics to minimize both copying and fragmentation without requiring the writer to know
 /// ahead of time how many bytes will be written, and also allows [`Bytes`] to be appended in a

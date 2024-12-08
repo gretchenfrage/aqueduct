@@ -226,3 +226,46 @@ impl Drop for NodeHandle {
         }
     }
 }
+
+
+unsafe impl Send for NodeHandle {}
+unsafe impl Sync for NodeHandle {}
+
+unsafe impl Send for NodeQueue {}
+unsafe impl Sync for NodeQueue {}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[allow(dead_code)]
+    #[allow(unreachable_code)]
+    #[allow(invalid_value)]
+    unsafe fn ensure_node_handle_is_send() -> impl Send {
+        panic!();
+        std::mem::zeroed::<NodeHandle>()
+    }
+
+    #[allow(dead_code)]
+    #[allow(unreachable_code)]
+    #[allow(invalid_value)]
+    unsafe fn ensure_node_handle_is_sync() -> impl Sync {
+        panic!();
+        std::mem::zeroed::<NodeHandle>()
+    }
+
+    #[allow(dead_code)]
+    #[allow(unreachable_code)]
+    unsafe fn ensure_node_queue_is_send() -> impl Send {
+        panic!();
+        std::mem::zeroed::<NodeQueue>()
+    }
+
+    #[allow(dead_code)]
+    #[allow(unreachable_code)]
+    unsafe fn ensure_node_queue_is_sync() -> impl Sync {
+        panic!();
+        std::mem::zeroed::<NodeQueue>()
+    }
+}

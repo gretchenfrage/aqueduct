@@ -425,4 +425,20 @@ mod tests {
         _19683 19683,
         _59049 59049,
     );
+
+    // assert that the only reason SegQueue is !Sync is because T may be !Sync
+    #[allow(dead_code)]
+    #[allow(unreachable_code)]
+    unsafe fn ensure_is_only_not_sync_because_of_t<T: Sync>() -> impl Sync {
+        panic!();
+        std::mem::zeroed::<SegQueue<T>>()
+    }
+
+    // assert that the only reason SegQueue is !Send is because T may be !Send
+    #[allow(dead_code)]
+    #[allow(unreachable_code)]
+    unsafe fn ensure_is_only_not_send_because_of_t<T: Send>() -> impl Send {
+        panic!();
+        std::mem::zeroed::<SegQueue<T>>()
+    }
 }

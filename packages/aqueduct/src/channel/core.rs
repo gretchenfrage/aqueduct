@@ -93,7 +93,7 @@ pub(crate) enum SendState {
     ConnectionLost,
     // the recv half of the channel was sent through another networked channel in a message that
     // failed to be delivered to the remote side despite the connection as a whole remaining.
-    LostInTransit,
+    ChannelLostInTransit,
 }
 
 // possible values for Shared.recv_state
@@ -109,7 +109,7 @@ pub(crate) enum RecvState {
     ConnectionLost,
     // the send half of the channel was sent through another networked channel in a message that
     // failed to be delivered to the remote side despite the connection as a whole remaining.
-    LostInTransit,
+    ChannelLostInTransit,
 }
 
 impl<T> Channel<T> {
@@ -204,7 +204,7 @@ impl<'a, T> Lock<'a, T> {
         unsafe { self.lock.send_nodes.push(&mut node); }
 
         // construct future
-        Send(Some(SendInner { shared: Arc::clone(self.shared), elem, node }))
+        Send(Some(SendInner { shared: Channel(Arc::clone(self.shared)), elem, node }))
     }
 
     // construct a recv future.
@@ -224,7 +224,7 @@ impl<'a, T> Lock<'a, T> {
         unsafe { self.lock.recv_nodes.push(&mut node); }
 
         // construct future
-        Recv(Some(RecvInner { shared: Arc::clone(self.shared), node }))
+        Recv(Some(RecvInner { shared: Channel(Arc::clone(self.shared)), node }))
     }
 
     // mark the sending side as having finished the channel, if not already done.
@@ -258,7 +258,7 @@ pub(crate) struct Send<T>(Option<SendInner<T>>);
 // state for a `Send` which has not yet resolved or cancelled.
 struct SendInner<T> {
     // handle to channel shared state.
-    shared: Arc<Shared<T>>,
+    shared: Channel<T>,
     // element to send.
     elem: T,
     // invariant: node is linked (into send node queue) so long as it is owned by SendInner.
@@ -274,18 +274,17 @@ impl<T> Future for Send<T> {
     // internally locks the channel. panics iff already resolved or cancelled. guaranteed that, if
     // resolves, all wakers previously cloned when polling are dropped by the time `poll` returns.
     fn poll(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), (u8, T)>> {
-        // safety: Self is !Unpin only because T is !Unpin
-        let this = unsafe { self.get_unchecked_mut() };
+        let this = self.get_mut();
 
         // assert linked. make sure to return ownership of inner state back if we return pending.
         let mut inner = this.0.take()
             .expect("send future polled after already resolved or cancelled");
 
         // lock the channel
-        let mut lock = inner.shared.lockable.lock().unwrap();
+        let mut lock = inner.shared.0.lockable.lock().unwrap();
 
         // now that channel is locked, we can check for error without race conditions
-        let send_state = inner.shared.send_state.load(Relaxed);
+        let send_state = inner.shared.0.send_state.load(Relaxed);
         if send_state != SendState::Normal as u8 {
             // resolve to error
             // safety: if send state is not normal, then send node queue has been purged, which
@@ -348,6 +347,9 @@ impl<T> Future for Send<T> {
     }
 }
 
+// safety: Send is only !Unpin only because T is !Unpin
+impl<T> Unpin for Send<T> {}
+
 impl<T> Send<T> {
     // if not already resolved or cancelled, cancel the future and return the elem.
     //
@@ -358,10 +360,10 @@ impl<T> Send<T> {
         let Some(mut inner) = self.0.take() else { return None };
 
         // lock the channel
-        let mut lock = inner.shared.lockable.lock().unwrap();
+        let mut lock = inner.shared.0.lockable.lock().unwrap();
 
         // now that channel is locked, we can check send state
-        let send_state = inner.shared.send_state.load(Relaxed);
+        let send_state = inner.shared.0.send_state.load(Relaxed);
         if send_state == SendState::Normal as u8 {
             // safety:
             // - send state is normal, therefore send node queue is not purged.
@@ -392,6 +394,13 @@ impl<T> Send<T> {
 
         // done
         Some(inner.elem)
+    }
+
+    // get the channel, or panic if already cancelled or resolved.
+    pub(crate) fn channel(&self) -> &Channel<T> {
+        &self.0.as_ref()
+            .expect("send future used after already resolved or cancelled")
+            .shared
     }
 }
 
@@ -429,7 +438,7 @@ pub(crate) struct Recv<T>(Option<RecvInner<T>>);
 // state for a `Recv` which has not yet resolved or cancelled.
 struct RecvInner<T> {
     // handle to channel shared state.
-    shared: Arc<Shared<T>>,
+    shared: Channel<T>,
     // invariant: node is linked (into recv node queue) so long as it is owned by RecvInner.
     node: NodeHandle,
 }
@@ -443,18 +452,17 @@ impl<T> Future for Recv<T> {
     // internally locks the channel. panics iff already resolved or cancelled. guaranteed that, if
     // resolves, all wakers previously cloned when polling are dropped by the same `poll` returns.
     fn poll(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<T, u8>> {
-        // safety: Self is !Unpin only because T is !Unpin
-        let this = unsafe { self.get_unchecked_mut() };
+        let this = self.get_mut();
 
         // assert linked. make sure to return ownership of inner state back if we return pending.
         let mut inner = this.0.take()
             .expect("recv future polled after already resolved or cancelled");
 
         // lock the chanel
-        let mut lock = inner.shared.lockable.lock().unwrap();
+        let mut lock = inner.shared.0.lockable.lock().unwrap();
 
         // now that channel is locked, we can check for error without race conditions
-        let recv_state = inner.shared.recv_state.load(Relaxed);
+        let recv_state = inner.shared.0.recv_state.load(Relaxed);
         if recv_state != RecvState::Normal as u8 {
             // resolve to error
             // safety: if recv state is not normal, then recv node queue has been purged, which
@@ -509,7 +517,7 @@ impl<T> Future for Recv<T> {
                 // elems is empty and senders are finished
                 // transition recv state to finished and purge recv node queue
                 // (this automatically notifies all nodes in recv queue all at once)
-                inner.shared.recv_state.store(RecvState::Finished as u8, Relaxed);
+                inner.shared.0.recv_state.store(RecvState::Finished as u8, Relaxed);
                 lock.recv_nodes.purge();
             }
         } else {
@@ -525,6 +533,9 @@ impl<T> Future for Recv<T> {
     }
 }
 
+// safety: Recv is only !Unpin only because T is !Unpin
+impl<T> Unpin for Recv<T> {}
+
 impl<T> Recv<T> {
     // if not already resolved or cancelled, cancel the future.
     //
@@ -535,10 +546,10 @@ impl<T> Recv<T> {
         let Some(mut inner) = self.0.take() else { return };
 
         // lock the channel
-        let mut lock = inner.shared.lockable.lock().unwrap();
+        let mut lock = inner.shared.0.lockable.lock().unwrap();
 
         // assert recv state normal or short-circuit
-        let recv_state = inner.shared.recv_state.load(Relaxed);
+        let recv_state = inner.shared.0.recv_state.load(Relaxed);
         if recv_state != RecvState::Normal as u8 {
             // if recv state is not normal, then recv node queue has been purged, which would mean
             // any previously cloned waker has already been dropped.
@@ -568,6 +579,13 @@ impl<T> Recv<T> {
             // is not empty.
             lock.recv_nodes.wake_front();
         }
+    }
+
+    // get the channel, or panic if already cancelled or resolved.
+    pub(crate) fn channel(&self) -> &Channel<T> {
+        &self.0.as_ref()
+            .expect("recv future used after already resolved or cancelled")
+            .shared
     }
 }
 
@@ -601,19 +619,10 @@ impl<T> Drop for Recv<T> {
 mod tests {
     use super::*;
 
-    // assert that the only reason Send is !Unpin is because T may be !Unpin
     #[allow(dead_code)]
     #[allow(unreachable_code)]
-    unsafe fn ensure_send_is_only_unpin_because_of_t<T: Unpin>() -> impl Unpin {
+    unsafe fn ensure_send_is_unpin<T>() -> impl Unpin {
         panic!();
         std::mem::zeroed::<Send<T>>()
-    }
-
-    // assert that the only reason Recv is !Unpin is because T may be !Unpin
-    #[allow(dead_code)]
-    #[allow(unreachable_code)]
-    unsafe fn ensure_recv_is_only_unpin_because_of_t<T: Unpin>() -> impl Unpin {
-        panic!();
-        std::mem::zeroed::<Recv<T>>()
     }
 }
