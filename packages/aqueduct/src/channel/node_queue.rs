@@ -178,6 +178,7 @@ impl NodeQueue {
     // purge the queue, if it is not already purged. this causes all wakers to be waked.
     pub(crate) fn purge(&mut self) {
         unsafe {
+            if self.purged { return; }
             self.purged = true;
             let mut next = self.front_back.map(|(front, _)| front);
             while let Some(curr) = next {
@@ -187,6 +188,9 @@ impl NodeQueue {
                     waker.wake();
                 }
                 drop(alloc_box);
+            }
+            if cfg!(debug_assertions) {
+                self.front_back = None;
             }
         }
     }

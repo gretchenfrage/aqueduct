@@ -51,12 +51,9 @@ struct Shared<T> {
     // begins as RecvState::Normal. may eventually change to a different value.
     //
     // - once changes to a value other than normal, never changes again.
-    // - recv node queue is purged if and only if either of these two conditions are true:
-    //TODO refactor how finishing works
-    // - if value is RecvState::Finished, recv operations immediately return "finished" once all
-    //   elems are drained from Lockable.elems.
-    // - if holds a value other than normal or finished, recv operations immediately return a
-    //   corresponding error.
+    // - holds a value other than normal if and only if send node queue is purged.
+    // - if holds a value other than normal, recv operations immediately return a corresponding
+    //   error (or "finished" value in the case of RecvState::Finished).
     recv_state: AtomicU8,
 }
 
@@ -70,6 +67,15 @@ struct Lockable<T> {
     send_nodes: NodeQueue,
     // node queue for recv futures.
     recv_nodes: NodeQueue,
+    // whether the sending side has finished the channel. starts false, and may at some point
+    // switch to true. if ever it is the case the all of these conditions are met:
+    //
+    // - recv_state is normal
+    // - finished is true
+    // - elems is empty
+    //
+    // then recv_state automatically transitions to finished (and the recv node queue is purged).
+    finished: bool,
     // pool of spare unlinked node allocations.
     node_pool: [Option<NodeHandle>; NODE_POOL_SIZE],
 }
@@ -79,7 +85,7 @@ struct Lockable<T> {
 pub(crate) enum SendState {
     // sending may still be possible.
     Normal,
-    // all receivers have been dropped.
+    // all receivers have been channel.
     NoReceivers,
     // the sender cancelled the stream.
     Cancelled,
@@ -95,9 +101,9 @@ pub(crate) enum SendState {
 pub(crate) enum RecvState {
     // receiving may still be possible.
     Normal,
-    // receiving may still be possible if Lockable.elems is non-empty.
+    // the sender finished the channel and all messages in it have been received.
     Finished,
-    // the sender cancelled the stream.
+    // the sender cancelled the channel.
     Cancelled,
     // the encompassing network connection was lost.
     ConnectionLost,
@@ -115,6 +121,7 @@ impl<T> Channel<T> {
                 bound: None,
                 send_nodes: NodeQueue::new(),
                 recv_nodes: NodeQueue::new(),
+                finished: false,
                 node_pool: [None, None, None, None],
             }),
             send_count: AtomicU64::new(1),
@@ -137,6 +144,16 @@ impl<T> Channel<T> {
     // atomic-read the recv state byte.
     pub(crate) fn recv_state(&self) -> u8 {
         self.0.recv_state.load(Relaxed)
+    }
+
+    // get the send reference count atomic int.
+    pub(crate) fn send_count(&self) -> &AtomicU64 {
+        &self.0.send_count
+    }
+
+    // get the recv reference count atomic int.
+    pub(crate) fn recv_count(&self) -> &AtomicU64 {
+        &self.0.recv_count
     }
 
     // lock the channel
@@ -192,27 +209,42 @@ impl<'a, T> Lock<'a, T> {
 
     // construct a recv future.
     //
-    // panics if RecvState is not normal or Finished.
-    pub(crate) fn recv(&mut self, elem: T) -> Recv<T> {
+    // panics if RecvState is not normal.
+    pub(crate) fn recv(&mut self) -> Recv<T> {
         // safety check
-        let recv_state = self.shared.recv_state.load(Relaxed);
-        assert!(
-            recv_state == RecvState::Normal as u8 || recv_state == RecvState::Finished as u8,
-            "internal bug",
-        );
+        assert_eq!(self.shared.recv_state.load(Relaxed), RecvState::Normal as u8, "internal bug");
 
         // allocate unlinked node
         let mut node = self.allocate_node();
 
         // link node.
         // safety:
-        // - we know that recv state is normal or finished, therefore the recv node queue is not
-        //   purged.
+        // - we know that recv state is normal, therefore the recv node queue is not purged.
         // - node is either newly allocated or from the pool, so it is not linked.
         unsafe { self.lock.recv_nodes.push(&mut node); }
 
         // construct future
         Recv(Some(RecvInner { shared: Arc::clone(self.shared), node }))
+    }
+
+    // mark the sending side as having finished the channel, if not already done.
+    //
+    // once the sending side is marked as finished, the next time elems becomes empty, which may be
+    // immediately, recv state automatically transitions to finished, unless it's already in some
+    // other non-normal state.
+    pub(crate) fn finish(&mut self) {
+        // short-circuit if already finished
+        if self.lock.finished { return; }
+
+        // mark as finished
+        self.lock.finished = true;
+
+        // if conditions are met, transition receivers into finished state
+        let recv_state = self.shared.recv_state.load(Relaxed);
+        if recv_state == RecvState::Normal as u8 && self.lock.elems.len() == 0 {
+            self.shared.recv_state.store(RecvState::Finished as u8, Relaxed);
+            self.lock.recv_nodes.purge();
+        }
     }
 }
 
@@ -272,7 +304,6 @@ impl<T> Future for Send<T> {
         if !is_front || lock.bound.is_some_and(|n| lock.elems.len() >= n) {
             // either backpressure or this future isn't at the front of the send node queue
 
-
             // install a waker from the current context
             // safety: same as above
             let waker = unsafe { lock.send_nodes.waker(&mut inner.node) };
@@ -285,9 +316,9 @@ impl<T> Future for Send<T> {
             // return pending
             return Poll::Pending;
         }
-        // at this point, we know we will send the value and unlink the node now
+        // at this point, we know we will send the elem and unlink the node now
 
-        // send value
+        // send elem
         lock.elems.push(inner.elem);
 
         // unlink node.
@@ -323,7 +354,7 @@ impl<T> Send<T> {
     // internally locks the channel. never panics. guaranteed that all wakers previously cloned
     // when polling are dropped by the time `cancel` returns.
     pub(crate) fn cancel(&mut self) -> Option<T> {
-        // assert linked or short-circuit.
+        // assert linked or short-circuit
         let Some(mut inner) = self.0.take() else { return None };
 
         // lock the channel
@@ -367,15 +398,16 @@ impl<T> Send<T> {
 // safety:
 //
 // - if poll resolves, it guarantees that it drops all previously cloned wakers before returning.
-// - if cancel is called, it guarantees that it drops all previously cloned wakers before returnig.
+// - if cancel is called, it guarantees that it drops all previously cloned wakers before
+//   returning.
 // - poll and drop_wakers panic if and only if the future has previously resolved or cancelled, and
 //   they panic without cloning any additional waker handles.
 unsafe impl<T> DropWakers for Send<T> {
     type DropWakersOutput = T;
 
     fn drop_wakers(&mut self) -> T {
-        // shouldn't be reachable, but only due to details of outer safe API, so we don't rely on
-        // it for preventing UB.
+        // panic shouldn't be reachable, but only due to details of outer safe API, so we don't
+        // rely on it for preventing UB.
         self.cancel().expect("internal bug")
     }
 }
@@ -404,10 +436,8 @@ struct RecvInner<T> {
 
 impl<T> Future for Recv<T> {
     // - if an elem is successfully received, resolves to the elem.
-    // - if the channel enters the finished recv state and becomes empty, resolvse to err with the
-    //   recv state byte.
-    // - if the channel enters a recv state other than normal or finished, resolves to err with the
-    //   recv state byte.
+    // - if the channel enters a recv state other than normal, resolves to err with the recv state
+    //   byte.
     type Output = Result<T, u8>;
 
     // internally locks the channel. panics iff already resolved or cancelled. guaranteed that, if
@@ -423,23 +453,148 @@ impl<T> Future for Recv<T> {
         // lock the chanel
         let mut lock = inner.shared.lockable.lock().unwrap();
 
-        // now that channel is locked, we can check recv state without race conditions
+        // now that channel is locked, we can check for error without race conditions
         let recv_state = inner.shared.recv_state.load(Relaxed);
         if recv_state != RecvState::Normal as u8 {
-            if recv_state != RecvState::Finished as u8 {
-                // recv state is neither normal or finished. resolve to error.
-                // safety: if recv state is neither normal nor finished, then recv node queue has
-                //         been purged, which would mean any previously cloned waker has already
-                //         been dropped.
-                return Poll::Ready(Err(recv_state));
-            }
+            // resolve to error
+            // safety: if recv state is not normal, then recv node queue has been purged, which
+            //         would mean that any previously cloned waker has already been dropped.
+            return Poll::Ready(Err(recv_state));
+        }
 
-            if lock.elems.len() == 0 {
-                // recv state is finished, and the channel is empty. resolve to error.
+        // next, check whether we'll return pending.
+
+        // safety:
+        // - recv state is normal, therefore recv nodes is not purged.
+        // - we already panicked if node is not linked.
+        // - the type system ensures we would only link this node into the send node queue.
+        let is_front = unsafe { lock.send_nodes.is_front(&inner.node) };
+
+        if !is_front || lock.elems.len() == 0 {
+            // either queue is empty or this future isn't at the front of the recv node queue
+
+            // install a waker from the current context
+            // safety: same as above
+            let waker = unsafe { lock.recv_nodes.waker(&mut inner.node) };
+            *waker = Some(cx.waker().clone());
+
+            // put inner state back before returning pending
+            drop(lock);
+            this.0 = Some(inner);
+
+            // return pending
+            return Poll::Pending;
+        }
+        // at this point, we know we will recv an elem and unlink the node now
+
+        // recv elem.
+        // panic safety: we short-circuited if elems was empty
+        let elem = lock.elems.pop().unwrap();
+
+        // unlink node.
+        // safety:
+        // - same as above
+        // - NodeQueue.remove automatically clears the node's waker
+        unsafe { lock.recv_nodes.remove(&mut inner.node) };
+
+        // return node to pool (otherwise we just let it be dropped)
+        debug_assert!(!inner.node.is_linked());
+        if let Some(slot) = lock.node_pool.iter_mut().find(|opt| opt.is_none()) {
+            *slot = Some(inner.node);
+        }
+
+        // notify futures that are now unblocked
+        if lock.elems.len() == 0 {
+            if lock.finished {
+                // elems is empty and senders are finished
+                // transition recv state to finished and purge recv node queue
+                // (this automatically notifies all nodes in recv queue all at once)
+                inner.shared.recv_state.store(RecvState::Finished as u8, Relaxed);
+                lock.recv_nodes.purge();
             }
+        } else {
+            // elems is not yet empty, so notify next recv ndoe
+            lock.recv_nodes.wake_front();
+        }
+        if lock.bound.is_some_and(|n| n == lock.elems.len() + 1) {
+            // if backpressure was jsut relieved, notify the next send node
+            lock.send_nodes.wake_front();
+        }
+
+        Poll::Ready(Ok(elem))
+    }
+}
+
+impl<T> Recv<T> {
+    // if not already resolved or cancelled, cancel the future.
+    //
+    // internally locks the channel. never panics. guaranteed that all wakers previously cloned
+    // when polling are dropped by the time `cancel` returns.
+    pub(crate) fn cancel(&mut self) {
+        // assert linked or short-circuit
+        let Some(mut inner) = self.0.take() else { return };
+
+        // lock the channel
+        let mut lock = inner.shared.lockable.lock().unwrap();
+
+        // assert recv state normal or short-circuit
+        let recv_state = inner.shared.recv_state.load(Relaxed);
+        if recv_state != RecvState::Normal as u8 {
+            // if recv state is not normal, then recv node queue has been purged, which would mean
+            // any previously cloned waker has already been dropped.
+            return;
+        }
+
+        // safety:
+        // - recv state is normal, therefore recv node queue is not purged.
+        // - we already short-circuited if node is not linked.
+        // - the type system ensures we would only link this node into the recv node queue.
+        let is_front = unsafe { lock.recv_nodes.is_front(&inner.node) };
+
+        // unlink node.
+        // safety: same as above.
+        // note: this drops any previously cloned waker.
+        unsafe { lock.recv_nodes.remove(&mut inner.node) };
+
+        // return node to pool (otherwise we just let it be dropped)
+        debug_assert!(!inner.node.is_linked());
+        if let Some(slot) = lock.node_pool.iter_mut().find(|opt| opt.is_none()) {
+            *slot = Some(inner.node);
+        }
+
+        // notify futures that are now unblocked
+        if is_front && lock.elems.len() != 0 {
+            // next recv node, if we were previously at the front of the queue and the channel
+            // is not empty.
+            lock.recv_nodes.wake_front();
         }
     }
 }
+
+// safety:
+//
+// - if poll resolves, it guarantees that it drops all previously cloned wakers before returning.
+// - if cancel is called, it guarantees that it drops all previously cloned wakers before
+//   returning.
+// - poll and drop_wakers panic if and only if the future has previously resolved or cancelled, and
+//   they panic without closing any additional waker handles.
+unsafe impl<T> DropWakers for Recv<T> {
+    type DropWakersOutput = ();
+
+    fn drop_wakers(&mut self) {
+        self.cancel();
+    }
+}
+
+impl<T> Drop for Recv<T> {
+    fn drop(&mut self) {
+        // clean up allocation and unblock other nodes if dropped without resolving.
+        self.cancel();
+    }
+}
+
+
+// ==== tests ====
 
 
 #[cfg(test)]
