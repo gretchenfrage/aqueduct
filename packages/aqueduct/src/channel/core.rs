@@ -3,6 +3,7 @@
 use super::{
     seg_queue::SegQueue,
     node_queue::{NodeQueue, NodeHandle},
+    polling::DropWakers,
 };
 use std::{
     sync::{
@@ -16,6 +17,8 @@ use std::{
         MutexGuard,
     },
     task::{Poll, Context},
+    future::Future,
+    pin::Pin,
 };
 
 
@@ -191,17 +194,20 @@ struct SendInner<T> {
     node: NodeHandle,
 }
 
-impl<T> Send<T> {
-    // poll the future.
-    //
-    // - resolves to ok upon successfully sending.
+impl<T> Future for Send<T> {
+    // - if the elem is successfully sent, resolves to ok.
     // - if the channel enters a send state other than normal, resolves to err with the send state
-    //   byte and the elem which being sent.
-    //
-    // internally locks the channel. panics if already resolved or cancelled.
-    pub(crate) fn poll(&mut self, cx: &mut Context) -> Poll<Result<(), (u8, T)>> {
+    //   byte and the elem which was being sent.
+    type Output = Result<(), (u8, T)>;
+
+    // internally locks the channel. panics iff already resolved or cancelled. guaranteed that, if
+    // resolves, all wakers previously cloned when polling are dropped by the time `poll` returns.
+    fn poll(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), (u8, T)>> {
+        // safety: Self is !Unpin only because T is !Unpin
+        let this = unsafe { self.get_unchecked_mut() };
+
         // assert linked. make sure to return ownership of inner state back if we return pending
-        let mut inner = self.0.take()
+        let mut inner = this.0.take()
             .expect("send future polled after already resolved or cancelled");
 
         // lock the channel
@@ -210,7 +216,9 @@ impl<T> Send<T> {
         // now that channel is locked, we can check for error without race conditions
         let send_state = inner.shared.send_state.load(Relaxed);
         if send_state != SendState::Normal as u8 {
-            // return error
+            // resolve to error
+            // safety: if send state is not normal, then send node queue has been purged, which
+            // would mean any previously cloned waker has already been dropped.
             return Poll::Ready(Err((send_state, inner.elem)));
         }
 
@@ -233,7 +241,7 @@ impl<T> Send<T> {
 
             // put inner state back before returning pending
             drop(lock);
-            self.0 = Some(inner);
+            this.0 = Some(inner);
 
             // return pending
             return Poll::Pending;
@@ -243,8 +251,10 @@ impl<T> Send<T> {
         // send value
         lock.elems.push(inner.elem);
 
-        // unlink node
-        // safety: same as above
+        // unlink node.
+        // safety:
+        // - same as above.
+        // - NodeQueue.remove automatically clears the node's waker.
         unsafe { lock.send_nodes.remove(&mut inner.node) };
 
         // return node to pool (otherwise we just let it be dropped)
@@ -266,7 +276,9 @@ impl<T> Send<T> {
         // done
         Poll::Ready(Ok(()))
     }
+}
 
+impl<T> Send<T> {
     // if not already resolved or cancelled, cancel the future and return the elem.
     //
     // internally locks the channel. never panics. guaranteed that all wakers previously cloned
@@ -310,5 +322,42 @@ impl<T> Send<T> {
 
         // done
         Some(inner.elem)
+    }
+}
+
+// safety:
+//
+// - if poll resolves, it guarantees that it drops all previously cloned wakers before returning.
+// - if cancel is called, it guarantees that it drops all previously cloned wakers before returnig.
+// - poll and drop_wakers panic if and only if the future has previously resolved or cancelled, and
+//   they panic without cloning any additional waker handles.
+unsafe impl<T> DropWakers for Send<T> {
+    type DropWakersOutput = T;
+
+    fn drop_wakers(&mut self) -> T {
+        // shouldn't be reachable, but only due to details of outer safe API, so we don't rely on
+        // it for preventing UB.
+        self.cancel().expect("internal bug")
+    }
+}
+
+impl<T> Drop for Send<T> {
+    fn drop(&mut self) {
+        // clean up allocation and unblock other nodes if dropped without resolving.
+        self.cancel();
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // assert that the only reason Send is !Unpin is because T may be !Unpin
+    #[allow(dead_code)]
+    #[allow(unreachable_code)]
+    unsafe fn ensure_send_is_only_unpin_because_of_t<T: Unpin>() -> impl Unpin {
+        panic!();
+        std::mem::zeroed::<Send<T>>()
     }
 }

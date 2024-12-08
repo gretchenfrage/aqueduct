@@ -6,20 +6,33 @@ use std::{
     future::Future,
     sync::{Condvar, Mutex},
     task::{Context, Poll, Waker, RawWaker, RawWakerVTable},
-    panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
     time::Instant,
     pin::Pin,
 };
 
 
 // `Future` with the ability to drop all wakers it previously cloned.
-pub(crate) unsafe trait DropWakers {
-    // drop all `Waker`s that this future cloned from `Context`s this future was previously polled
-    // with. if that is not done when this method returns, undefined behavior occurs.
-    //
-    // if this future panics when polled, the panic may be caught so that this method may still be
-    // called. thus, this method must still work even following a call to `poll` exiting via panic.
-    fn drop_wakers(&mut self);
+//
+// - this future must guarantee that if a call to Future::poll either:
+//
+//   - returns Poll::Ready
+//   - panics
+//
+//   then all wakers previously cloned from calls to poll have been dropped by the time the call
+//   to poll returns (or returns via panic). otherwise, undefined behavior may occur.
+//
+// - this future must guarantee that if drop_wakers is called, then all wakers previously cloned
+//   from calls to poll have been dropped by the time the call to drop_wakers returns (or returns
+//   via panic). otherwise, undefined behavior may occur.
+//
+// it is expected that drop_wakers will be called only if the future has not yet resolved, and that
+// the future will never again be polled after drop_wakers is called. the future may panic or
+// exhibit bugs if this assumption is violated. however, the future must not trigger undefined
+// behavior if this assumption is violated, including by violating the above requirements.
+pub(crate) unsafe trait DropWakers: Future {
+    type DropWakersOutput;
+
+    fn drop_wakers(&mut self) -> Self::DropWakersOutput;
 }
 
 // timeout for blocking on a future.
@@ -32,8 +45,8 @@ pub(crate) enum Timeout {
     NonBlocking,
 }
 
-// poll the future until it resolves or the timeout is reached, in which case return none.
-pub(crate) fn poll<F>(fut: &mut F, timeout: Timeout) -> Option<F::Output>
+// poll the future until it resolves or the timeout is reached, in which case return err.
+pub(crate) fn poll<F>(fut: &mut F, timeout: Timeout) -> Result<F::Output, F::DropWakersOutput>
 where
     F: Future + DropWakers + Unpin,
 {
@@ -49,18 +62,24 @@ where
         let data = &signal as *const Signal as *const ();
         let waker = Waker::from_raw(vtable_clone(data));
         let mut cx = Context::from_waker(&waker);
-        let to_return =
-            catch_unwind(AssertUnwindSafe(|| poll_inner(fut, &signal, &mut cx, timeout)));
+        // safety: poll_inner will call fut.poll, which may panic. however, fut unsafe-implements
+        //         DropWakers, so it must drop any cloned wakers before panicking.
+        let resolved = poll_inner(fut, &signal, &mut cx, timeout);
 
         // clean up before returning
-        fut.drop_wakers();
+        let to_return = resolved.ok_or_else(|| fut.drop_wakers());
+        // safety: fut unsafe-implements DropWakers, so:
+        //
+        // - if it returned Ready, it must have already dropped any cloned wakers.
+        // - if it didn't return Ready, we called drop_wakers, in which case it must have already
+        //   dropped any cloned wakers.
+        //
+        // therefore, at this point, there are no dangling pointers to the signal locale variable,
+        // so it can be dropped.
         drop(signal);
-        
-        // return
-        match to_return {
-            Ok(value) => value,
-            Err(panic) => resume_unwind(panic),
-        }
+
+        // done
+        to_return
     }
 }
 
