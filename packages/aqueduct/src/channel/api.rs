@@ -85,7 +85,10 @@ impl<T> IntoSender<T> {
 /// Sender handle to a possibly networked channel, with backpressure
 ///
 /// See [channels docs](crate::docs::ch_1_01_channels).
-pub struct Sender<T>(core::Channel<T>);
+pub struct Sender<T> {
+    channel: core::Channel<T>,
+    cancel_on_drop: bool,
+}
 
 impl<T> Sender<T> {
     /// Create a future to send a message on this channel
@@ -151,7 +154,10 @@ impl<T> Clone for Sender<T> {
 /// Sender handle to a possibly networked channel, with no backpresure
 ///
 /// See [channels docs](crate::docs::ch_1_01_channels).
-pub struct NonBlockingSender<T>(core::Channel<T>);
+pub struct NonBlockingSender<T> {
+    channel: core::Channel<T>,
+    cancel_on_drop: bool,
+}
 
 impl<T> NonBlockingSender<T> {
     /// Send a message on this channel
@@ -229,7 +235,10 @@ impl<T> IntoReceiver<T> {
 /// Receiver handle to a possibly networked channel
 ///
 /// See [channels docs](crate::docs::ch_1_01_channels).
-pub struct Receiver<T>(core::Channel<T>);
+pub struct Receiver<T> {
+    channel: core::Channel<T>,
+    cancel_on_drop: bool,
+}
 
 impl<T> Receiver<T> {
     /// Create a future to receive a message from this channel
@@ -244,7 +253,7 @@ impl<T> Receiver<T> {
     ///
     /// If this returns `Some`, all receivers for this channel are permanently in that terminal
     /// state, and all attempts to send will return a corresponding error.
-    pub fn terminal_state(&self) -> Option<SendErrorCause> {
+    pub fn terminal_state(&self) -> Option<RecvTerminalState> {
         todo!()
     }
 

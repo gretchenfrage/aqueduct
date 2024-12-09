@@ -295,15 +295,22 @@ impl<T> Future for Send<T> {
             SendInner::Cheap(send_state, elem) => return Poll::Ready(Err((send_state, elem))),
         };
 
-        // lock the channel
-        let mut lock = inner.shared.0.lockable.lock().unwrap();
-
-        // now that channel is locked, we can check for error without race conditions
+        // try to check for error without locking
         let send_state = inner.shared.0.send_state.load(Relaxed);
         if send_state != SendState::Normal as u8 {
             // resolve to error
             // safety: if send state is not normal, then send node queue has been purged, which
             //         would mean any previously cloned waker has already been dropped.
+            return Poll::Ready(Err((send_state, inner.elem)));
+        }
+
+        // lock the channel
+        let mut lock = inner.shared.0.lockable.lock().unwrap();
+
+        // now that channel is locked, check for error again without race conditions
+        let send_state = inner.shared.0.send_state.load(Relaxed);
+        if send_state != SendState::Normal as u8 {
+            // safety: same as above
             return Poll::Ready(Err((send_state, inner.elem)));
         }
 
@@ -384,10 +391,18 @@ impl<T> Send<T> {
             SendInner::Cheap(_send_state, elem) => return Some(elem),
         };
 
+        // try to short-circuit based on send state without locking
+        let send_state = inner.shared.0.send_state.load(Relaxed);
+        if send_state != SendState::Normal as u8 {
+            // safety: if send state is not normal, then send node queue has been purged, which
+            //         would mean any previously cloned waker has already been dropped.
+            return Some(inner.elem);
+        }
+
         // lock the channel
         let mut lock = inner.shared.0.lockable.lock().unwrap();
 
-        // now that channel is locked, we can check send state
+        // now that channel is locked, check send state again without race conditions
         let send_state = inner.shared.0.send_state.load(Relaxed);
         if send_state == SendState::Normal as u8 {
             // safety:
@@ -448,14 +463,18 @@ unsafe impl<T> DropWakers for Send<T> {
             &mut SendInner::Cheap(_, _) => return,
         };
 
+        // try to short-circuit based on send state without locking
+        let send_state = inner.shared.0.send_state.load(Relaxed);
+        // safety: if send state is not normal, then send node queue has been purged, which would
+        //         mean any previously cloned waker has already been dropped.
+        if send_state != SendState::Normal as u8 { return };
+
         // lock the channel
         let mut lock = inner.shared.0.lockable.lock().unwrap();
 
-        // now that channel is locked, we can check for error without race conditions
+        // now that channel is locked, check send state again without race conditions
         let send_state = inner.shared.0.send_state.load(Relaxed);
-        // short-circuit if send state is not normal.
-        // safety: if send state is not normal, then send node queue has been purged, which would
-        //         mean any previously cloned waker has already been dropped.
+        // safety: same as above
         if send_state != SendState::Normal as u8 { return };
 
         // safety:
@@ -518,17 +537,23 @@ impl<T> Future for Recv<T> {
             RecvInner::Cheap(recv_state) => return Poll::Ready(Err(recv_state)),
         };
 
-        // TODO: check for error here as an optimization, and also in cancel, and also in corresponding methods for Send!!!!!
-
-        // lock the chanel
-        let mut lock = inner.shared.0.lockable.lock().unwrap();
-
-        // now that channel is locked, we can check for error without race conditions
+        // try to check recv state without locking
         let recv_state = inner.shared.0.recv_state.load(Relaxed);
         if recv_state != RecvState::Normal as u8 {
             // resolve to error
             // safety: if recv state is not normal, then recv node queue has been purged, which
             //         would mean that any previously cloned waker has already been dropped.
+            return Poll::Ready(Err(recv_state));
+        }
+
+        // lock the chanel
+        let mut lock = inner.shared.0.lockable.lock().unwrap();
+
+        // now that channel is locked, check for error again without race conditions
+        let recv_state = inner.shared.0.recv_state.load(Relaxed);
+        if recv_state != RecvState::Normal as u8 {
+            // resolve to error
+            // safety: same as above
             return Poll::Ready(Err(recv_state));
         }
 
@@ -611,14 +636,21 @@ impl<T> Recv<T> {
             RecvInner::Cheap(_recv_state) => return,
         };
 
+        // try to short-circuit based on recv state without locking
+        let recv_state = inner.shared.0.recv_state.load(Relaxed);
+        if recv_state != RecvState::Normal as u8 {
+            // safety: if recv state is not normal, then recv node queue has been purged, which
+            //         would mean any previously cloned waker has already been dropped.
+            return;
+        }
+
         // lock the channel
         let mut lock = inner.shared.0.lockable.lock().unwrap();
 
-        // assert recv state normal or short-circuit
+        // now that channel is locked, check recv state again without race conditions
         let recv_state = inner.shared.0.recv_state.load(Relaxed);
         if recv_state != RecvState::Normal as u8 {
-            // if recv state is not normal, then recv node queue has been purged, which would mean
-            // any previously cloned waker has already been dropped.
+            // safety: same as above
             return;
         }
 
@@ -674,14 +706,17 @@ unsafe impl<T> DropWakers for Recv<T> {
             &mut RecvInner::Cheap(_) => return,
         };
 
+        // try to short-circuit based on recv state without locking
+        let recv_state = inner.shared.0.recv_state.load(Relaxed);
+        // safety: if recv state is not normal, then recv node queue has been purged, which would
+        //         mean any previously cloned waker has already been dropped.
+        if recv_state != RecvState::Normal as u8 { return };
+
         // lock the channel
         let mut lock = inner.shared.0.lockable.lock().unwrap();
 
-        // now that channel is locked, we can check for terminal state without race conditions
+        // now that channel is locked, check recv state again without race conditions
         let recv_state = inner.shared.0.recv_state.load(Relaxed);
-        // short-circuit if recv state is not normal.
-        // safety: if recv state is not normal, then recv node queue has been purged, which would
-        //         mean any previously cloned waker has already been dropped.
         if recv_state != RecvState::Normal as u8 { return };
 
         // safety:
