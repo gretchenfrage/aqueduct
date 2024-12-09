@@ -158,7 +158,7 @@ impl<T> NonBlockingSender<T> {
     ///
     /// Errors are "sticky": If this returns an error, that error has become the terminal state for
     /// all of this channel's senders, and any further send operation will return the same error.
-    pub fn send(&self, msg: T) -> Result<(), SendError<T, SendErrorCause>> {
+    pub fn send(&self, msg: T) -> Result<(), SendError<T>> {
         todo!()
     }
 
@@ -260,15 +260,15 @@ impl<T> Clone for Receiver<T> {
 }
 
 fn send_error(send_state_byte: u8) -> Option<SendErrorCause> {
-    if send_state_byte == SendState::Normal as u8 {
+    if send_state_byte == core::SendState::Normal as u8 {
         None
-    } else if send_state_byte == SendState::NoReceivers as u8 {
+    } else if send_state_byte == core::SendState::NoReceivers as u8 {
         Some(NoReceiversError.into())
-    } else if send_state_byte == SendState::Cancelled as u8 {
+    } else if send_state_byte == core::SendState::Cancelled as u8 {
         Some(CancelledError.into())
-    } else if send_state_byte == SendState::ConnectionLost as u8 {
+    } else if send_state_byte == core::SendState::ConnectionLost as u8 {
         Some(ConnectionLostError.into())
-    } else if send_state_byte == SendState::ChannelLostInTransit as u8 {
+    } else if send_state_byte == core::SendState::ChannelLostInTransit as u8 {
         Some(ChannelLostInTransitError.into())
     } else {
         unreachable!("invalid send_state_byte: {}", send_state_byte);
@@ -280,7 +280,6 @@ pub(crate) mod future {
     use super::*;
     use crate::channel::{
         polling::{Timeout, poll},
-        core::*,
     };
     use std::{
         task::{Poll, Context},
@@ -290,38 +289,56 @@ pub(crate) mod future {
     };
 
     /// Future for sending into a [`Sender`](super::Sender)
-    pub struct SendFut<T>(SendFutInner<T>);
+    ///
+    /// The message will not be sent until this future resolves (a call to `poll` returns
+    /// `Poll::Ready`). If this future has not yet resolved, the send operation may be aborted and
+    /// its message retrieved by calling [`rescind`](Self::rescind) (or by dropping).
+    ///
+    /// Only the most recently created send future for a channel that has not yet resolved,
+    /// rescinded, or dropped may successfully resolve. Thus, if one creates a send futures and
+    /// holds it for an extended period, it may block send futures created after it.
+    ///
+    /// Errors are "sticky": If this resolves to an error, that error has become the terminal state
+    /// for all of this channel's senders, and any further send operation will return the same
+    /// error.
+    pub struct SendFut<T>(core::Send<T>);
 
-    pub(crate) enum SendFutInner<T> {
-        // may actually involve locking the channel state.
-        Core(core::Send<T>),
-        // optimization when a terminal state can be read atomically.
-        Cheap(SendError<T, SendErrorCause>),
-        // already resolved or cancelled.
-        Spent,
+    fn map_send_result<T>(result: Result<(), (u8, T)>) -> Result<(), SendError<T>> {
+        result
+            .map_err(|(send_state_byte, msg)| SendError {
+                msg,
+                cause: send_error(send_state_byte).unwrap(),
+            })
     }
 
+    fn map_try_send_result<T>(result: Result<Result<(), (u8, T)>, T>)
+
     impl<T> Future for SendFut<T> {
-        type Output = Result<(), SendError<T, SendErrorCause>>;
+        type Output = Result<(), SendError<T>>;
 
         fn poll(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
-            let inner = &mut self.get_mut().0;
-
-            // optimization
-            if let &mut Core(ref mut core) = inner {
-                if let Some(if core.channel().send_state
-            }
-
-            todo!()
-
-            /*
             pin!(&mut self.get_mut().0)
                 .poll(cx)
-                .map(|result| result
-                    .map_err(|(send_state_byte, msg)| SendError {
-                        msg,
-                        cause: send_error(send_state_byte).unwrap(),
-                    }))*/
+                .map(map_send_result)
+        }
+    }
+
+    impl<T> SendFut<T> {
+        pub fn rescind(&mut self) -> Option<T> {
+            todo!()
+        }
+
+        /// Block until this future resolves
+        pub fn block(&mut self) -> Result<(), SendError<T>> {
+            let result = poll(&mut self.0, Timeout::Never)
+                .ok().expect("poll timed out with Timeout::Never");
+            map_send_result(result)
+        }
+
+        /// Block until this future resolves or a timeout elapses
+        pub fn block_timeout(&mut self, timeout: Duration) -> Result<(), TrySendError<T>> {
+            poll(&mut self.0, Timeout::At(Instant::now() + timeout))
+                .map(map_send_result)
         }
     }
 

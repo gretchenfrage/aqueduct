@@ -43,11 +43,11 @@ pub struct WouldBlockError;
 
 /// Error for trying to send into a channel
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
-pub struct SendError<T, E> {
+pub struct SendError<T> {
     /// The message that could not be sent
     pub msg: T,
     /// The reason the message could not be sent
-    pub cause: E,
+    pub cause: SendErrorCause,
 }
 
 macro_rules! compound_from {
@@ -85,17 +85,24 @@ compound_from!(SendErrorCause {
 
 /// Error for trying to send into a channel with no or limited blocking
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
-pub enum TrySendErrorCause {
+pub enum TrySendError<T> {
     /// The senders of the channel have entered some terminal error state
-    Terminal(SendErrorCause),
+    Terminal(SendError<T>),
     /// The operation could not be resolved immediately or by the specified deadline
     WouldBlock(WouldBlockError),
 }
 
-compound_from!(TrySendErrorCause {
-    Terminal(SendErrorCause),
-    WouldBlock(WouldBlockError),
-});
+impl<T> From<SendError<T>> for TrySendError<T> {
+    fn from(inner: SendError<T>) -> Self {
+        Self::Terminal(inner)
+    }
+}
+
+impl<T> From<WouldBlockError> for TrySendError<T> {
+    fn from(inner: WouldBlockError) -> Self {
+        Self::WouldBlock(inner)
+    }
+}
 
 /// Terminal error state for trying to receive from a channel
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]

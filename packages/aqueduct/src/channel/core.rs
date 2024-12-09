@@ -204,7 +204,8 @@ impl<'a, T> Lock<'a, T> {
         unsafe { self.lock.send_nodes.push(&mut node); }
 
         // construct future
-        Send(Some(SendInner { shared: Channel(Arc::clone(self.shared)), elem, node }))
+        let inner = SendInnerLinked { shared: Channel(Arc::clone(self.shared)), elem, node };
+        Send(Some(SendInner::Linked(inner)))
     }
 
     // construct a recv future.
@@ -224,7 +225,8 @@ impl<'a, T> Lock<'a, T> {
         unsafe { self.lock.recv_nodes.push(&mut node); }
 
         // construct future
-        Recv(Some(RecvInner { shared: Channel(Arc::clone(self.shared)), node }))
+        let inner = RecvInnerLinked { shared: Channel(Arc::clone(self.shared)), node };
+        Recv(Some(RecvInner::Linked(inner)))
     }
 
     // mark the sending side as having finished the channel, if not already done.
@@ -256,12 +258,21 @@ impl<'a, T> Lock<'a, T> {
 pub(crate) struct Send<T>(Option<SendInner<T>>);
 
 // state for a `Send` which has not yet resolved or cancelled.
-struct SendInner<T> {
+enum SendInner<T> {
+    // SendInner that is actually linked into the send node queue.
+    Linked(SendInnerLinked<T>),
+    // optimization to avoid locking.
+    // safety: a send future with the Cheap variant will never clone wakers.
+    Cheap(u8, T),
+}
+
+// content of SendInner that is actually linked into the send node queue.
+struct SendInnerLinked<T> {
     // handle to channel shared state.
     shared: Channel<T>,
     // element to send.
     elem: T,
-    // invariant: node is linked (into send node queue) so long as it is owned by SendInner.
+    // invariant: node is linked (into send node queue) so long as it is owned by SendInnerLinked.
     node: NodeHandle,
 }
 
@@ -277,8 +288,12 @@ impl<T> Future for Send<T> {
         let this = self.get_mut();
 
         // assert linked. make sure to return ownership of inner state back if we return pending.
-        let mut inner = this.0.take()
+        let inner = this.0.take()
             .expect("send future polled after already resolved or cancelled");
+        let mut inner = match inner {
+            SendInner::Linked(linked) => linked,
+            SendInner::Cheap(send_state, elem) => return Poll::Ready(Err((send_state, elem))),
+        };
 
         // lock the channel
         let mut lock = inner.shared.0.lockable.lock().unwrap();
@@ -310,7 +325,7 @@ impl<T> Future for Send<T> {
 
             // put inner state back before returning pending
             drop(lock);
-            this.0 = Some(inner);
+            this.0 = Some(SendInner::Linked(inner));
 
             // return pending
             return Poll::Pending;
@@ -351,13 +366,23 @@ impl<T> Future for Send<T> {
 impl<T> Unpin for Send<T> {}
 
 impl<T> Send<T> {
+    // construct a send future with a cheap variant that does not connect to the channel's shared
+    // state and resolves to an error.
+    pub(crate) fn cheap(send_state_byte: u8, elem: T) -> Self {
+        Send(Some(SendInner::Cheap(send_state_byte, elem)))
+    }
+
     // if not already resolved or cancelled, cancel the future and return the elem.
     //
     // internally locks the channel. never panics. guaranteed that all wakers previously cloned
     // when polling are dropped by the time `cancel` returns.
     pub(crate) fn cancel(&mut self) -> Option<T> {
         // assert linked or short-circuit
-        let Some(mut inner) = self.0.take() else { return None };
+        let Some(inner) = self.0.take() else { return None };
+        let mut inner = match inner {
+            SendInner::Linked(linked) => linked,
+            SendInner::Cheap(_send_state, elem) => return Some(elem),
+        };
 
         // lock the channel
         let mut lock = inner.shared.0.lockable.lock().unwrap();
@@ -395,13 +420,6 @@ impl<T> Send<T> {
         // done
         Some(inner.elem)
     }
-
-    // get the channel, or panic if already cancelled or resolved.
-    pub(crate) fn channel(&self) -> &Channel<T> {
-        &self.0.as_ref()
-            .expect("send future used after already resolved or cancelled")
-            .shared
-    }
 }
 
 // safety:
@@ -436,7 +454,15 @@ impl<T> Drop for Send<T> {
 pub(crate) struct Recv<T>(Option<RecvInner<T>>);
 
 // state for a `Recv` which has not yet resolved or cancelled.
-struct RecvInner<T> {
+enum RecvInner<T> {
+    // RecvInner that is actually linked into the recv node queue.
+    Linked(RecvInnerLinked<T>),
+    // optimization to avoid locking.
+    // safety: a recv future with the Cheap variant will never clone wakers.
+    Cheap(u8),
+}
+
+struct RecvInnerLinked<T> {
     // handle to channel shared state.
     shared: Channel<T>,
     // invariant: node is linked (into recv node queue) so long as it is owned by RecvInner.
@@ -455,8 +481,12 @@ impl<T> Future for Recv<T> {
         let this = self.get_mut();
 
         // assert linked. make sure to return ownership of inner state back if we return pending.
-        let mut inner = this.0.take()
+        let inner = this.0.take()
             .expect("recv future polled after already resolved or cancelled");
+        let mut inner = match inner {
+            RecvInner::Linked(linked) => linked,
+            RecvInner::Cheap(recv_state) => return Poll::Ready(Err(recv_state)),
+        };
 
         // lock the chanel
         let mut lock = inner.shared.0.lockable.lock().unwrap();
@@ -488,7 +518,7 @@ impl<T> Future for Recv<T> {
 
             // put inner state back before returning pending
             drop(lock);
-            this.0 = Some(inner);
+            this.0 = Some(RecvInner::Linked(inner));
 
             // return pending
             return Poll::Pending;
@@ -543,7 +573,11 @@ impl<T> Recv<T> {
     // when polling are dropped by the time `cancel` returns.
     pub(crate) fn cancel(&mut self) {
         // assert linked or short-circuit
-        let Some(mut inner) = self.0.take() else { return };
+        let Some(inner) = self.0.take() else { return };
+        let mut inner = match inner {
+            RecvInner::Linked(linked) => linked,
+            RecvInner::Cheap(_recv_state) => return,
+        };
 
         // lock the channel
         let mut lock = inner.shared.0.lockable.lock().unwrap();
@@ -579,13 +613,6 @@ impl<T> Recv<T> {
             // is not empty.
             lock.recv_nodes.wake_front();
         }
-    }
-
-    // get the channel, or panic if already cancelled or resolved.
-    pub(crate) fn channel(&self) -> &Channel<T> {
-        &self.0.as_ref()
-            .expect("recv future used after already resolved or cancelled")
-            .shared
     }
 }
 
