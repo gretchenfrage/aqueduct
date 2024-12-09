@@ -301,6 +301,10 @@ pub(crate) mod future {
     /// Errors are "sticky": If this resolves to an error, that error has become the terminal state
     /// for all of this channel's senders, and any further send operation will return the same
     /// error.
+    ///
+    /// For purposes of reference-counting senders, this future counts as a sender so long as it
+    /// still has the potential to resolve. Thus, receivers cannot enter the "finished" state until
+    /// all send futures for the channel are dropped, resolved, or rescinded.
     pub struct SendFut<T>(core::Send<T>);
 
     fn map_send_result<T>(result: Result<(), (u8, T)>) -> Result<(), SendError<T>> {
@@ -311,7 +315,14 @@ pub(crate) mod future {
             })
     }
 
-    fn map_try_send_result<T>(result: Result<Result<(), (u8, T)>, T>)
+    fn map_try_send_result<T>(
+        result: Result<Result<(), (u8, T)>, ()>,
+    ) -> Result<(), TrySendError<T>> {
+        match result {
+            Ok(send_result) => map_send_result(send_result).map_err(TrySendError::from),
+            Err(()) => Err(WouldBlockError.into()),
+        }
+    }
 
     impl<T> Future for SendFut<T> {
         type Output = Result<(), SendError<T>>;
@@ -324,8 +335,12 @@ pub(crate) mod future {
     }
 
     impl<T> SendFut<T> {
+        /// Try to abort this send operation and rescind the message which would have been sent
+        ///
+        /// This is guaranteed to return `Some` unless this future has already resolved or
+        /// rescinded. This method never panics.
         pub fn rescind(&mut self) -> Option<T> {
-            todo!()
+            self.0.cancel()
         }
 
         /// Block until this future resolves
@@ -335,10 +350,36 @@ pub(crate) mod future {
             map_send_result(result)
         }
 
+        /// Try to resolve this future immediately without blocking
+        ///
+        /// Calling this method counts as polling this future, and if this method returns anything
+        /// other than [`WouldBlockError`], that counts as this future resolving. This method will
+        /// panic if this future has already resolved or rescinded.
+        pub fn try_send(&mut self) -> Result<(), TrySendError<T>> {
+            map_try_send_result(poll(&mut self.0, Timeout::NonBlocking))
+        }
+
         /// Block until this future resolves or a timeout elapses
+        ///
+        /// Calling this method counts as polling this future, and if this method returns anything
+        /// other than [`WouldBlockError`], that counts as this future resolving. This method will
+        /// panic if this future has already resolved or rescinded.
         pub fn block_timeout(&mut self, timeout: Duration) -> Result<(), TrySendError<T>> {
-            poll(&mut self.0, Timeout::At(Instant::now() + timeout))
-                .map(map_send_result)
+            self.block_deadline(Instant::now() + timeout)
+        }
+
+        /// Block until this future resolves or the deadline is reached
+        ///
+        /// Calling this method counts as polling this future, and if this method returns anything
+        /// other than [`WouldBlockError`], that counts as this future resolving. This method will
+        /// panic if this future has already resolved or rescinded.
+        pub fn block_deadline(&mut self, deadline: Instant) -> Result<(), TrySendError<T>> {
+            map_try_send_result(poll(&mut self.0, Timeout::At(deadline)))
+        }
+
+        /// Whether this future has already resolved or rescinded.
+        pub fn is_terminated(&self) -> bool {
+            self.0.is_terminated()
         }
     }
 

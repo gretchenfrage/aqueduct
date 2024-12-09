@@ -66,7 +66,10 @@ where
         //         DropWakers, so it must drop any cloned wakers before panicking.
         let resolved = poll_inner(fut, &signal, &mut cx, timeout);
 
-        // clean up before returning
+        // clean up before returning.
+        // safety: drop_wakers may panic. however, DropWakers requires that if drop_wakers does
+        //         exit via panic, it drops any cloned wakers before doing so, so there will be no
+        //         dangling poiinters to the signal local variable as unwinding occurs. 
         let to_return = resolved.ok_or_else(|| fut.drop_wakers());
         // safety: fut unsafe-implements DropWakers, so:
         //
@@ -74,7 +77,7 @@ where
         // - if it didn't return Ready, we called drop_wakers, in which case it must have already
         //   dropped any cloned wakers.
         //
-        // therefore, at this point, there are no dangling pointers to the signal locale variable,
+        // therefore, at this point, there are no dangling pointers to the signal local variable,
         // so it can be dropped.
         drop(signal);
 

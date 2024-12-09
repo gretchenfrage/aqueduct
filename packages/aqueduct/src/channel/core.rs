@@ -420,6 +420,11 @@ impl<T> Send<T> {
         // done
         Some(inner.elem)
     }
+
+    // whether this future is resolved or cancelled.
+    pub(crate) fn is_terminated(&self) -> bool {
+        self.0.is_none()
+    }
 }
 
 // safety:
@@ -430,12 +435,37 @@ impl<T> Send<T> {
 // - poll and drop_wakers panic if and only if the future has previously resolved or cancelled, and
 //   they panic without cloning any additional waker handles.
 unsafe impl<T> DropWakers for Send<T> {
-    type DropWakersOutput = T;
+    type DropWakersOutput = ();
 
-    fn drop_wakers(&mut self) -> T {
-        // panic shouldn't be reachable, but only due to details of outer safe API, so we don't
-        // rely on it for preventing UB.
-        self.cancel().expect("internal bug")
+    fn drop_wakers(&mut self) {
+        // note: a previous prototype of this dropped wakers by cancelling, and unwrapping and
+        //       returning the elem. however, we  preserve the ability to poll the future instead.
+
+        // assert linked or short-circuit
+        let Some(inner) = self.0.as_mut() else { return };
+        let inner = match inner {
+            &mut SendInner::Linked(ref mut linked) => linked,
+            &mut SendInner::Cheap(_, _) => return,
+        };
+
+        // lock the channel
+        let mut lock = inner.shared.0.lockable.lock().unwrap();
+
+        // now that channel is locked, we can check for error without race conditions
+        let send_state = inner.shared.0.send_state.load(Relaxed);
+        // short-circuit if send state is not normal.
+        // safety: if send state is not normal, then send node queue has been purged, which would
+        //         mean any previously cloned waker has already been dropped.
+        if send_state != SendState::Normal as u8 { return };
+
+        // safety:
+        // - send state is normal, therefore send nodes is not purged.
+        // - we already short-circuited if node is not linked.
+        // - the type system ensures we would only link this node into the send node queue.
+        let waker = unsafe { lock.send_nodes.waker(&mut inner.node) };
+
+        // simply drop any waker we previously installed up in our send node
+        *waker = None;
     }
 }
 
@@ -614,6 +644,11 @@ impl<T> Recv<T> {
             lock.recv_nodes.wake_front();
         }
     }
+
+    // whether this future is resolved or cancelled.
+    pub(crate) fn is_terminated(&self) -> bool {
+        self.0.is_none()
+    }
 }
 
 // safety:
@@ -627,7 +662,34 @@ unsafe impl<T> DropWakers for Recv<T> {
     type DropWakersOutput = ();
 
     fn drop_wakers(&mut self) {
-        self.cancel();
+        // note: a previous prototype of this dropped wakers by cancelling. however, we preserve
+        //       the ability to poll the future instead.
+
+        // assert linked or short-circuit
+        let Some(inner) = self.0.as_mut() else { return };
+        let inner = match inner {
+            &mut RecvInner::Linked(ref mut linked) => linked,
+            &mut RecvInner::Cheap(_) => return,
+        };
+
+        // lock the channel
+        let mut lock = inner.shared.0.lockable.lock().unwrap();
+
+        // now that channel is locked, we can check for terminal state without race conditions
+        let recv_state = inner.shared.0.recv_state.load(Relaxed);
+        // short-circuit if recv state is not normal.
+        // safety: if recv state is not normal, then recv node queue has been purged, which would
+        //         mean any previously cloned waker has already been dropped.
+        if recv_state != RecvState::Normal as u8 { return };
+
+        // safety:
+        // - recv state is normal, therefore recv nodes is not purged.
+        // - we already short-circuited if node is not linked.
+        // - the type system ensures we would only link this node into the recv node queue.
+        let waker = unsafe { lock.recv_nodes.waker(&mut inner.node) };
+
+        // simply drop any waker we previously installed up in our send node
+        *waker = None;
     }
 }
 
