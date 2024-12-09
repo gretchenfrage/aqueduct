@@ -275,6 +275,22 @@ fn send_error(send_state_byte: u8) -> Option<SendErrorCause> {
     }
 }
 
+fn recv_terminal_state(recv_state_byte: u8) -> Option<RecvTerminalState> {
+    if recv_state_byte == core::RecvState::Normal as u8 {
+        None
+    } else if recv_state_byte == core::RecvState::Finished as u8 {
+        Some(RecvTerminalState::Finished)
+    } else if recv_state_byte == core::RecvState::Cancelled as u8 {
+        Some(RecvTerminalState::Error(CancelledError.into()))
+    } else if recv_state_byte == core::RecvState::ConnectionLost as u8 {
+        Some(RecvTerminalState::Error(ConnectionLostError.into()))
+    } else if recv_state_byte == core::RecvState::ChannelLostInTransit as u8 {
+        Some(RecvTerminalState::Error(ChannelLostInTransitError.into()))
+    } else {
+        unreachable!("invalid recv_state_byte: {}", recv_state_byte)
+    }
+}
+
 // future types for channels.
 pub(crate) mod future {
     use super::*;
@@ -288,14 +304,14 @@ pub(crate) mod future {
         time::{Duration, Instant},
     };
 
-    /// Future for sending into a [`Sender`](super::Sender)
+    /// Future for sending into a [`Sender`]
     ///
     /// The message will not be sent until this future resolves (a call to `poll` returns
     /// `Poll::Ready`). If this future has not yet resolved, the send operation may be aborted and
     /// its message retrieved by calling [`rescind`](Self::rescind) (or by dropping).
     ///
     /// Only the most recently created send future for a channel that has not yet resolved,
-    /// rescinded, or dropped may successfully resolve. Thus, if one creates a send futures and
+    /// rescinded, or dropped may successfully resolve. Thus, if one creates a send future and
     /// holds it for an extended period, it may block send futures created after it.
     ///
     /// Errors are "sticky": If this resolves to an error, that error has become the terminal state
@@ -328,7 +344,12 @@ pub(crate) mod future {
         type Output = Result<(), SendError<T>>;
 
         fn poll(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
-            pin!(&mut self.get_mut().0)
+            let this = self.get_mut();
+            // for implementation of FusedFuture
+            if this.is_terminated() {
+                return Poll::Pending;
+            }
+            pin!(&mut this.0)
                 .poll(cx)
                 .map(map_send_result)
         }
@@ -344,7 +365,12 @@ pub(crate) mod future {
         }
 
         /// Block until this future resolves
+        ///
+        /// Calling this method counts as polling this future, and when this method returns, that
+        /// counts as this future resolving. This method will panic if this future has already
+        /// resolved or rescinded.
         pub fn block(&mut self) -> Result<(), SendError<T>> {
+            assert!(!self.is_terminated(), "SendFut.block called after terminated");
             let result = poll(&mut self.0, Timeout::Never)
                 .ok().expect("poll timed out with Timeout::Never");
             map_send_result(result)
@@ -356,6 +382,7 @@ pub(crate) mod future {
         /// other than [`WouldBlockError`], that counts as this future resolving. This method will
         /// panic if this future has already resolved or rescinded.
         pub fn try_send(&mut self) -> Result<(), TrySendError<T>> {
+            assert!(!self.is_terminated(), "SendFut.block called after terminated");
             map_try_send_result(poll(&mut self.0, Timeout::NonBlocking))
         }
 
@@ -365,6 +392,7 @@ pub(crate) mod future {
         /// other than [`WouldBlockError`], that counts as this future resolving. This method will
         /// panic if this future has already resolved or rescinded.
         pub fn block_timeout(&mut self, timeout: Duration) -> Result<(), TrySendError<T>> {
+            assert!(!self.is_terminated(), "SendFut.block called after terminated");
             self.block_deadline(Instant::now() + timeout)
         }
 
@@ -374,15 +402,141 @@ pub(crate) mod future {
         /// other than [`WouldBlockError`], that counts as this future resolving. This method will
         /// panic if this future has already resolved or rescinded.
         pub fn block_deadline(&mut self, deadline: Instant) -> Result<(), TrySendError<T>> {
+            assert!(!self.is_terminated(), "SendFut.block called after terminated");
             map_try_send_result(poll(&mut self.0, Timeout::At(deadline)))
         }
 
-        /// Whether this future has already resolved or rescinded.
+        /// Whether this future has already resolved or rescinded
         pub fn is_terminated(&self) -> bool {
             self.0.is_terminated()
         }
     }
 
-    /// Future for receiving from a [`Receiver`](super::Receiver)
+    #[cfg(feature = "futures")]
+    impl<T> futures::future::FusedFuture for SendFut<T> {
+        fn is_terminated(&self) -> bool {
+            Self::is_terminated(self)
+        }
+    }
+
+    /// Future for receiving from a [`Receiver`]
+    ///
+    /// Resolves to `Ok(None)` to represent the "finished" state--a graceful termination. Once all
+    /// sender handles to the channel have finished, and all buffered messages have been received,
+    /// the channel may enter the "finished" state.
+    ///
+    /// A message will not be dequeued from the channel until this future resolves (a call to
+    /// `poll` returns `Poll::Ready`). If this future has not yet resolved, the receive operation
+    /// may be aborted by calling [`abort`](Self::abort) (or by dropping).
+    ///
+    /// Only the most recently created receive future for a channel that has not yet resolved,
+    /// aborted, or dropped may successfully resolve. Thus, if one creates a receive future and
+    /// holds it for an extended period, it may block receive futures created after it.
+    ///
+    /// Errors, as well the "finished" state represented by `Ok(None)`, are "sticky": If this
+    /// resolves to such a value, that value has become the terminal state for all of this
+    /// channel's receivers, and any further receive operation will return the same value.
+    ///
+    /// For purposes of reference-counting receivers, this future counts as a receiver so long as
+    /// it still has the potential to resolve. Thus, senders cannot enter the [`NoReceiversError`]
+    /// state until all receive futures for the channel are dropped, resolved, or aborted.
     pub struct RecvFut<T>(core::Recv<T>);
+
+    fn map_recv_result<T>(result: Result<T, u8>) -> Result<Option<T>, RecvError> {
+        match result {
+            Ok(msg) => Ok(Some(msg)),
+            Err(recv_state_byte) => match recv_terminal_state(recv_state_byte).unwrap() {
+                RecvTerminalState::Finished => Ok(None),
+                RecvTerminalState::Error(error) => Err(error),
+            }
+        }
+    }
+
+    fn map_try_recv_result<T>(
+        result: Result<Result<T, u8>, ()>
+    ) -> Result<Option<T>, TryRecvError> {
+        match result {
+            Ok(recv_result) => map_recv_result(recv_result).map_err(TryRecvError::from),
+            Err(()) => Err(WouldBlockError.into()),
+        }
+    }
+
+    impl<T> Future for RecvFut<T> {
+        type Output = Result<Option<T>, RecvError>;
+
+        fn poll(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
+            let this = self.get_mut();
+            // for implementation of FusedFuture
+            if this.is_terminated() {
+                return Poll::Pending;
+            }
+            pin!(&mut this.0)
+                .poll(cx)
+                .map(map_recv_result)
+        }
+    }
+
+    impl<T> RecvFut<T> {
+        /// Try to abort this receive operation
+        ///
+        /// This aborts the receive operation, unless this future has already resolved or aborted,
+        /// in which case this does nothing. This method never panics.
+        pub fn abort(&mut self) {
+            self.0.cancel();
+        }
+
+        /// Block until this future resolves
+        ///
+        /// Calling this method counts as polling this future, and when this method returns, that
+        /// counts as this future resolving. This method will panic if this future has already
+        /// resolved or aborted.
+        pub fn block(&mut self) -> Result<Option<T>, RecvError> {
+            assert!(!self.is_terminated(), "RecvFut.block called after terminated");
+            let result = poll(&mut self.0, Timeout::Never)
+                .ok().expect("poll timed out with Timeout::Never");
+            map_recv_result(result)
+        }
+
+        /// Try to resolve this future immediately without blocking
+        ///
+        /// Calling this method counts as polling this future, and if this method returns anything
+        /// other than [`WouldBlockError`], that counts as this future resolving. This method will
+        /// panic if this future has already resolved or aborted.
+        pub fn try_recv(&mut self) -> Result<Option<T>, TryRecvError> {
+            assert!(!self.is_terminated(), "RecvFut.block called after terminated");
+            map_try_recv_result(poll(&mut self.0, Timeout::NonBlocking))
+        }
+
+        /// Block until this future resolves or a timeout elapses
+        ///
+        /// Calling this method counts as polling this future, and if this method returns anything
+        /// other than [`WouldBlockError`], that counts as this future resolving. This method will
+        /// panic if this future has already resolved or aborted.
+        pub fn block_timeout(&mut self, timeout: Duration) -> Result<Option<T>, TryRecvError> {
+            assert!(!self.is_terminated(), "RecvFut.block called after terminated");
+            self.block_deadline(Instant::now() + timeout)
+        }
+
+        /// Block until this future resolves or the deadline is reached
+        ///
+        /// Calling this method counts as polling this future, and if this method returns anything
+        /// other than [`WouldBlockError`], that counts as this future resolving. This method will
+        /// panic if this future has already resolved or aborted.
+        pub fn block_deadline(&mut self, deadline: Instant) -> Result<Option<T>, TryRecvError> {
+            assert!(!self.is_terminated(), "RecvFut.block called after terminated");
+            map_try_recv_result(poll(&mut self.0, Timeout::At(deadline)))
+        }
+
+        /// Whether this future has already resolved or aborted
+        pub fn is_terminated(&self) -> bool {
+            self.0.is_terminated()
+        }
+    }
+
+    #[cfg(feature = "futures")]
+    impl<T> futures::future::FusedFuture for RecvFut<T> {
+        fn is_terminated(&self) -> bool {
+            Self::is_terminated(self)
+        }
+    }
 }

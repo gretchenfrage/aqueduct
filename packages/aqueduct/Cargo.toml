@@ -4,6 +4,9 @@ version = "0.0.0-AFTER"
 edition = "2021"
 publish = false
 
+[features]
+default = ["futures"]
+
 [dependencies]
 bytes = "1"
 smallvec = "1"
@@ -14,7 +17,11 @@ anyhow = "1"
 [dependencies.tokio]
 version = "1"
 default-features = false
-features = ["sync", "rt", "time"]
+features = ["rt"]
+
+[dependencies.futures]
+version = "0.3"
+optional = true
 
 [dev-dependencies]
 rand = "0.8"

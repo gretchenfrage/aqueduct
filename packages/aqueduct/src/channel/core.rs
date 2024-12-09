@@ -518,6 +518,8 @@ impl<T> Future for Recv<T> {
             RecvInner::Cheap(recv_state) => return Poll::Ready(Err(recv_state)),
         };
 
+        // TODO: check for error here as an optimization, and also in cancel, and also in corresponding methods for Send!!!!!
+
         // lock the chanel
         let mut lock = inner.shared.0.lockable.lock().unwrap();
 
