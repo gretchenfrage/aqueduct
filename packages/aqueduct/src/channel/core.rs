@@ -264,6 +264,25 @@ impl<'a, T> Lock<'a, T> {
             self.lock.recv_nodes.purge();
         }
     }
+
+    // push the elem to elems. if length goes from 0 to 1, notify the recv node at the front. if
+    // length is not yet at the bound, notify the send node at the front.
+    pub(crate) fn enqueue(&mut self, elem: T) {
+        self.lock.elems.push(elem);
+        if self.lock.elems.len() == 1 {
+            // next recv node, if channel was previously empty
+            self.lock.recv_nodes.wake_front();
+        }
+        if self.lock.bound.is_none_or(|n| self.lock.elems.len() < n) {
+            // next send node, if channel is still not full
+            self.lock.send_nodes.wake_front();
+        }
+    }
+
+    // get the elems queue.
+    pub(crate) fn elems(&mut self) -> &mut SegQueue<T> {
+        &mut self.lock.elems
+    }
 }
 
 
@@ -332,7 +351,7 @@ impl<T> Future for Send<T> {
         }
 
         // lock the channel
-        let mut lock = inner.shared.0.lockable.lock().unwrap();
+        let mut lock = inner.shared.lock();
 
         // now that channel is locked, check for error again without race conditions
         let send_state = inner.shared.0.send_state.load(Relaxed);
@@ -351,14 +370,14 @@ impl<T> Future for Send<T> {
         // - send state is normal, therefore send nodes is not purged.
         // - we already panicked if node is not linked.
         // - the type system ensures we would only link this node into the send node queue.
-        let is_front = unsafe { lock.send_nodes.is_front(&inner.node) };
+        let is_front = unsafe { lock.lock.send_nodes.is_front(&inner.node) };
 
-        if !is_front || lock.bound.is_some_and(|n| lock.elems.len() >= n) {
+        if !is_front || lock.lock.bound.is_some_and(|n| lock.lock.elems.len() >= n) {
             // either backpressure or this future isn't at the front of the send node queue
 
             // install a waker from the current context
             // safety: same as above
-            let waker = unsafe { lock.send_nodes.waker(&mut inner.node) };
+            let waker = unsafe { lock.lock.send_nodes.waker(&mut inner.node) };
             *waker = Some(cx.waker().clone());
 
             // put inner state back before returning pending
@@ -370,30 +389,20 @@ impl<T> Future for Send<T> {
         }
         // at this point, we know we will send the elem and unlink the node now
 
-        // send elem
-        lock.elems.push(inner.elem);
-
         // unlink node.
         // safety:
         // - same as above.
         // - NodeQueue.remove automatically clears the node's waker.
-        unsafe { lock.send_nodes.remove(&mut inner.node) };
+        unsafe { lock.lock.send_nodes.remove(&mut inner.node) };
 
         // return node to pool (otherwise we just let it be dropped)
         debug_assert!(!inner.node.is_linked());
-        if let Some(slot) = lock.node_pool.iter_mut().find(|opt| opt.is_none()) {
+        if let Some(slot) = lock.lock.node_pool.iter_mut().find(|opt| opt.is_none()) {
             *slot = Some(inner.node);
         }
         
-        // notify futures that are now unblocked
-        if lock.elems.len() == 1 {
-            // next recv node, if channel was previously empty
-            lock.recv_nodes.wake_front();
-        }
-        if lock.bound.is_none_or(|n| lock.elems.len() < n) {
-            // next send node, if channel is still not full
-            lock.send_nodes.wake_front();
-        }
+        // send elem and notify futures that are now unblocked
+        lock.enqueue(inner.elem);
 
         // done
         drop(lock);

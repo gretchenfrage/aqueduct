@@ -14,36 +14,6 @@ use std::{
 // ==== helper functions for adapting core API to exposed API ====
 
 
-// construct a send future, avoiding locking if possible. increment the send count if appropriate.
-fn send<T>(channel: &core::Channel<T>, msg: T) -> core::Send<T> {
-    let send_state = channel.send_state();
-    if send_state != core::SendState::Normal as u8 {
-        return core::Send::cheap(send_state, msg);
-    }
-    let mut lock = channel.lock();
-    let send_state = channel.send_state();
-    if send_state != core::SendState::Normal as u8 {
-        return core::Send::cheap(send_state, msg);
-    }
-    channel.send_count().fetch_add(1, Relaxed);
-    lock.send(msg)
-}
-
-// construct a recv future, avoiding locking if possible. increment the recv count if appropriate.
-fn recv<T>(channel: &core::Channel<T>) -> core::Recv<T> {
-    let recv_state = channel.recv_state();
-    if recv_state != core::RecvState::Normal as u8 {
-        return core::Recv::cheap(recv_state);
-    }
-    let mut lock = channel.lock();
-    let recv_state = channel.recv_state();
-    if recv_state != core::RecvState::Normal as u8 {
-        return core::Recv::cheap(recv_state,);
-    }
-    channel.recv_count().fetch_add(1, Relaxed);
-    lock.recv()
-}
-
 // cancel the channel, avoiding locking if possible.
 fn cancel<T>(channel: &core::Channel<T>) {
     if channel.send_state() == core::SendState::Normal as u8
@@ -180,6 +150,7 @@ impl<T> IntoSender<T> {
         NonBlockingSender {
             channel: clone_sender(&self.channel),
             cancel_on_drop: take(&mut self.cancel_on_drop),
+            bound: None,
         }
     }
 
@@ -205,6 +176,7 @@ impl<T> IntoSender<T> {
         NonBlockingSender {
             channel: clone_sender(&self.channel),
             cancel_on_drop: take(&mut self.cancel_on_drop),
+            bound: None,
         }
     }
 
@@ -216,11 +188,11 @@ impl<T> IntoSender<T> {
     /// The returned sender inherits this `IntoSender`'s
     /// [`cancel_on_drop`](Self::set_cancel_on_drop) property, which defaults to true.
     pub fn into_unreliable(mut self, bound: Option<usize>) -> NonBlockingSender<T> {
-        // TODO: optional bound
         self.channel.send_count().fetch_add(1, Relaxed);
         NonBlockingSender {
             channel: clone_sender(&self.channel),
             cancel_on_drop: take(&mut self.cancel_on_drop),
+            bound,
         }
     }
 
@@ -264,7 +236,17 @@ impl<T> Sender<T> {
     /// See the API of [`SendFut`], as it is not only a future, but also provides additional
     /// methods, including the API for blocking on a send operation or trying to send immediately.
     pub fn send(&self, msg: T) -> SendFut<T> {
-        SendFut(send(&self.channel, msg))
+        let send_state = self.channel.send_state();
+        if send_state != core::SendState::Normal as u8 {
+            return SendFut(core::Send::cheap(send_state, msg));
+        }
+        let mut lock = self.channel.lock();
+        let send_state = self.channel.send_state();
+        if send_state != core::SendState::Normal as u8 {
+            return SendFut(core::Send::cheap(send_state, msg));
+        }
+        self.channel.send_count().fetch_add(1, Relaxed);
+        SendFut(lock.send(msg))
     }
 
     /// Finish this sender handle
@@ -337,6 +319,7 @@ impl<T> Drop for Sender<T> {
 pub struct NonBlockingSender<T> {
     channel: core::Channel<T>,
     cancel_on_drop: bool,
+    bound: Option<usize>,
 }
 
 impl<T> NonBlockingSender<T> {
@@ -345,7 +328,21 @@ impl<T> NonBlockingSender<T> {
     /// Errors are "sticky": If this returns an error, that error has become the terminal state for
     /// all of this channel's senders, and any further send operation will return the same error.
     pub fn send(&self, msg: T) -> Result<(), SendError<T>> {
-        todo!()
+        if let Some(cause) = send_error(self.channel.send_state()) {
+            return Err(SendError { msg, cause });
+        }
+        let mut lock = self.channel.lock();
+        if let Some(cause) = send_error(self.channel.send_state()) {
+            return Err(SendError { msg, cause });
+        }
+        if let Some(bound) = self.bound {
+            debug_assert!(lock.elems().len() <= bound);
+            if lock.elems().len() == bound {
+                lock.elems().pop();
+            }
+        }
+        lock.enqueue(msg);
+        Ok(())
     }
 
     /// Finish this sender handle
@@ -353,7 +350,7 @@ impl<T> NonBlockingSender<T> {
     /// Once _all_ sender handles to a channel are finished, and all buffered messages have been
     /// received, all receivers enter the "finished" terminal state, unless they enter some other
     /// terminal state first.
-    pub fn finish(self) {
+    pub fn finish(mut self) {
         self.cancel_on_drop = false;
         drop(self);
     }
@@ -401,6 +398,7 @@ impl<T> Clone for NonBlockingSender<T> {
         NonBlockingSender {
             channel: clone_sender(&self.channel),
             cancel_on_drop: self.cancel_on_drop,
+            bound: self.bound,
         }
     }
 }
@@ -442,7 +440,17 @@ impl<T> Receiver<T> {
     /// See the API of [`RecvFut`], as it is not only a future, but also provides additional
     /// methods, including the API for blocking on a recv operation or trying to recv immediately.
     pub fn recv(&self) -> RecvFut<T> {
-        RecvFut(recv(&self.0))
+        let recv_state = self.0.recv_state();
+        if recv_state != core::RecvState::Normal as u8 {
+            return RecvFut(core::Recv::cheap(recv_state));
+        }
+        let mut lock = self.0.lock();
+        let recv_state = self.0.recv_state();
+        if recv_state != core::RecvState::Normal as u8 {
+            return RecvFut(core::Recv::cheap(recv_state));
+        }
+        self.0.recv_count().fetch_add(1, Relaxed);
+        RecvFut(lock.recv())
     }
 
     /// If the receivers of this channel have entered a terminal state, get that terminal state
