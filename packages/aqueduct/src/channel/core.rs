@@ -156,7 +156,7 @@ impl<T> Channel<T> {
         &self.0.recv_count
     }
 
-    // lock the channel
+    // lock the channel.
     pub(crate) fn lock(&self) -> Lock<'_, T> {
         Lock {
             shared: &self.0,
@@ -187,7 +187,7 @@ impl<'a, T> Lock<'a, T> {
         node
     }
 
-    // construct a send future.
+    // construct a linked send future.
     //
     // panics if SendState is not Normal.
     pub(crate) fn send(&mut self, elem: T) -> Send<T> {
@@ -208,7 +208,7 @@ impl<'a, T> Lock<'a, T> {
         Send(Some(SendInner::Linked(inner)))
     }
 
-    // construct a recv future.
+    // construct a linked recv future.
     //
     // panics if RecvState is not normal.
     pub(crate) fn recv(&mut self) -> Recv<T> {
@@ -245,6 +245,22 @@ impl<'a, T> Lock<'a, T> {
         let recv_state = self.shared.recv_state.load(Relaxed);
         if recv_state == RecvState::Normal as u8 && self.lock.elems.len() == 0 {
             self.shared.recv_state.store(RecvState::Finished as u8, Relaxed);
+            self.lock.recv_nodes.purge();
+        }
+    }
+
+    // transition the send state to some error state, if it's currently in the normal state.
+    pub(crate) fn set_send_error(&mut self, error: SendState) {
+        if self.shared.send_state.load(Relaxed) == SendState::Normal as u8 {
+            self.shared.send_state.store(error as u8, Relaxed);
+            self.lock.send_nodes.purge();
+        }
+    }
+
+    // transition the recv state to some error state, if it's currently in the normal state.
+    pub(crate) fn set_recv_error(&mut self, error: RecvState) {
+        if self.shared.recv_state.load(Relaxed) == RecvState::Normal as u8 {
+            self.shared.recv_state.store(error as u8, Relaxed);
             self.lock.recv_nodes.purge();
         }
     }
@@ -375,8 +391,8 @@ impl<T> Unpin for Send<T> {}
 impl<T> Send<T> {
     // construct a send future with a cheap variant that does not connect to the channel's shared
     // state and resolves to an error.
-    pub(crate) fn cheap(send_state_byte: u8, elem: T) -> Self {
-        Send(Some(SendInner::Cheap(send_state_byte, elem)))
+    pub(crate) fn cheap(send_state: u8, elem: T) -> Self {
+        Send(Some(SendInner::Cheap(send_state, elem)))
     }
 
     // if not already resolved or cancelled, cancel the future and return the elem.
@@ -454,7 +470,7 @@ unsafe impl<T> DropWakers for Send<T> {
 
     fn drop_wakers(&mut self) {
         // note: a previous prototype of this dropped wakers by cancelling, and unwrapping and
-        //       returning the elem. however, we  preserve the ability to poll the future instead.
+        //       returning the elem. however, we preserve the ability to poll the future instead.
 
         // assert linked or short-circuit
         let Some(inner) = self.0.as_mut() else { return };
@@ -624,6 +640,12 @@ impl<T> Future for Recv<T> {
 impl<T> Unpin for Recv<T> {}
 
 impl<T> Recv<T> {
+    // construct a recv future with a cheap variant that does not connect to the channel's shared
+    // state and resolves to an `Err`.
+    pub(crate) fn cheap(recv_state: u8) -> Self {
+        Recv(Some(RecvInner::Cheap(recv_state)))
+    }
+
     // if not already resolved or cancelled, cancel the future.
     //
     // internally locks the channel. never panics. guaranteed that all wakers previously cloned

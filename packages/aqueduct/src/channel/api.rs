@@ -5,57 +5,229 @@ use super::{
     error::*,
     core,
 };
-use std::sync::atomic::Ordering::Relaxed;
+use std::{
+    sync::atomic::Ordering::Relaxed,
+    mem::take,
+};
+
+
+// ==== helper functions for adapting core API to exposed API ====
+
+
+// construct a send future, avoiding locking if possible.
+fn send<T>(channel: &core::Channel<T>, msg: T) -> core::Send<T> {
+    todo!(); // todo increment send count
+    let send_state = channel.send_state();
+    if send_state != core::SendState::Normal as u8 {
+        return core::Send::cheap(send_state, msg);
+    }
+    let mut lock = channel.lock();
+    let send_state = channel.send_state();
+    if send_state != core::SendState::Normal as u8 {
+        return core::Send::cheap(send_state, msg);
+    }
+    lock.send(msg)
+}
+
+// construct a recv future, avoiding locking if possible.
+fn recv<T>(channel: &core::Channel<T>) -> core::Recv<T> {
+    todo!(); // todo increment recv count
+    let recv_state = channel.recv_state();
+    if recv_state != core::RecvState::Normal as u8 {
+        return core::Recv::cheap(recv_state);
+    }
+    let mut lock = channel.lock();
+    let recv_state = channel.recv_state();
+    if recv_state != core::RecvState::Normal as u8 {
+        return core::Recv::cheap(recv_state,);
+    }
+    lock.recv()
+}
+
+// cancel the channel, avoiding locking if possible.
+fn cancel<T>(channel: &core::Channel<T>) {
+    if channel.send_state() == core::SendState::Normal as u8
+        || channel.recv_state() == core::RecvState::Normal as u8
+    {
+        let mut lock = channel.lock();
+        lock.set_send_error(core::SendState::Cancelled);
+        lock.set_recv_error(core::RecvState::Cancelled);
+    }
+}
+
+// finish the channel, avoiding locking if possible.
+fn finish<T>(channel: &core::Channel<T>) {
+    if channel.recv_state() == core::RecvState::Normal as u8 {
+        channel.lock().finish();
+    }
+}
+
+// 1. increment channel send count.
+// 2. clone another handle to the channel.
+fn clone_sender<T>(channel: &core::Channel<T>) -> core::Channel<T> {
+    channel.send_count().fetch_add(1, Relaxed);
+    channel.clone()
+}
+
+// 1. decrement channel send count.
+// 2. if cancel_on_drop is true, cancel the channel.
+// 3. if cancel_on_drop is false, and the send count was lowered to 0, finish the channel.
+fn drop_sender<T>(channel: &core::Channel<T>, cancel_on_drop: bool) {
+    let prev_send_count = channel.send_count().fetch_sub(1, Relaxed);
+    if cancel_on_drop {
+        cancel(channel);
+    } else if prev_send_count == 1 {
+        finish(channel);
+    }
+}
+
+// 1. increment channel recv count.
+// 2. clone another handle to the channel.
+fn clone_receiver<T>(channel: &core::Channel<T>) -> core::Channel<T> {
+    channel.recv_count().fetch_sub(1, Relaxed);
+    channel.clone()
+}
+
+// 1. decrement channel recv count.
+// 2. if the recv count was lowered to 0, set the send state to no receivers, avoiding locking if
+//    possible.
+fn drop_receiver<T>(channel: &core::Channel<T>) {
+    let prev_recv_count = channel.recv_count().fetch_sub(1, Relaxed);
+    if prev_recv_count == 1 {
+        if channel.send_state() == core::SendState::Normal as u8 {
+            channel.lock().set_send_error(core::SendState::NoReceivers);
+        }
+    }
+}
+
+// convert send state byte into typed representation of optional terminal state.
+fn send_error(send_state_byte: u8) -> Option<SendErrorCause> {
+    if send_state_byte == core::SendState::Normal as u8 {
+        None
+    } else if send_state_byte == core::SendState::NoReceivers as u8 {
+        Some(NoReceiversError.into())
+    } else if send_state_byte == core::SendState::Cancelled as u8 {
+        Some(CancelledError.into())
+    } else if send_state_byte == core::SendState::ConnectionLost as u8 {
+        Some(ConnectionLostError.into())
+    } else if send_state_byte == core::SendState::ChannelLostInTransit as u8 {
+        Some(ChannelLostInTransitError.into())
+    } else {
+        unreachable!("invalid send_state_byte: {}", send_state_byte);
+    }
+}
+
+// convert send state byte into typed representation of optional terminal state.
+fn recv_terminal_state(recv_state_byte: u8) -> Option<RecvTerminalState> {
+    if recv_state_byte == core::RecvState::Normal as u8 {
+        None
+    } else if recv_state_byte == core::RecvState::Finished as u8 {
+        Some(RecvTerminalState::Finished)
+    } else if recv_state_byte == core::RecvState::Cancelled as u8 {
+        Some(RecvTerminalState::Error(CancelledError.into()))
+    } else if recv_state_byte == core::RecvState::ConnectionLost as u8 {
+        Some(RecvTerminalState::Error(ConnectionLostError.into()))
+    } else if recv_state_byte == core::RecvState::ChannelLostInTransit as u8 {
+        Some(RecvTerminalState::Error(ChannelLostInTransitError.into()))
+    } else {
+        unreachable!("invalid recv_state_byte: {}", recv_state_byte)
+    }
+}
+
+
+// ==== the exposed API ====
 
 
 /// Create a channel
 ///
 /// See [channels docs](crate::docs::ch_1_01_channels).
 pub fn channel<T>() -> (IntoSender<T>, IntoReceiver<T>) {
-    todo!()
+    let channel_1 = core::Channel::new();
+    let channel_2 = channel_1.clone();
+    let send = IntoSender { channel: channel_1, cancel_on_drop: true };
+    let recv = IntoReceiver(channel_2);
+    (send, recv)
 }
-
 
 /// Unconverted sender half of a channel
 ///
 /// See [channels docs](crate::docs::ch_1_01_channels).
-pub struct IntoSender<T>(core::Channel<T>);
+pub struct IntoSender<T> {
+    channel: core::Channel<T>,
+    cancel_on_drop: bool, // TODO: remove this field?
+}
 
 impl<T> IntoSender<T> {
     /// Convert into an ordered, reliable, bounded sender
-    pub fn into_ordered(self, bound: usize) -> Sender<T> {
-        todo!()
+    ///
+    /// The returned sender inherits this `IntoSender`'s
+    /// [`cancel_on_drop`](Self::set_cancel_on_drop) property, which defaults to true.
+    pub fn into_ordered(mut self, bound: usize) -> Sender<T> {
+        self.channel.lock().set_bound(bound);
+        Sender {
+            channel: clone_sender(&self.channel),
+            cancel_on_drop: take(&mut self.cancel_on_drop),
+        }
     }
 
     /// Convert into an ordered, reliable, unbounded sender
-    pub fn into_ordered_unbounded(self) -> NonBlockingSender<T> {
-        todo!()
+    ///
+    /// The returned sender inherits this `IntoSender`'s
+    /// [`cancel_on_drop`](Self::set_cancel_on_drop) property, which defaults to true.
+    pub fn into_ordered_unbounded(mut self) -> NonBlockingSender<T> {
+        NonBlockingSender {
+            channel: clone_sender(&self.channel),
+            cancel_on_drop: take(&mut self.cancel_on_drop),
+        }
     }
 
     /// Convert into an unordered, reliable, bounded sender
-    pub fn into_unordered(self, bound: usize) -> Sender<T> {
-        todo!()
+    ///
+    /// The returned sender inherits this `IntoSender`'s
+    /// [`cancel_on_drop`](Self::set_cancel_on_drop) property, which defaults to true.
+    pub fn into_unordered(mut self, bound: usize) -> Sender<T> {
+        self.channel.lock().set_bound(bound);
+        self.channel.send_count().fetch_add(1, Relaxed);
+        Sender {
+            channel: clone_sender(&self.channel),
+            cancel_on_drop: take(&mut self.cancel_on_drop),
+        }
     }
 
     /// Convert into an unordered, reliable, unbounded sender
-    pub fn into_unordered_unbounded(self) -> NonBlockingSender<T> {
-        todo!()
+    ///
+    /// The returned sender inherits this `IntoSender`'s
+    /// [`cancel_on_drop`](Self::set_cancel_on_drop) property, which defaults to true.
+    pub fn into_unordered_unbounded(mut self) -> NonBlockingSender<T> {
+        self.channel.send_count().fetch_add(1, Relaxed);
+        NonBlockingSender {
+            channel: clone_sender(&self.channel),
+            cancel_on_drop: take(&mut self.cancel_on_drop),
+        }
     }
 
     /// Convert into an unreliable sender
     ///
-    /// The send buffer is bounded, but this does not create backpressure, because overflowing the
-    /// buffer is handled by dropping the oldest buffered message.
-    pub fn into_unreliable(self, bound: usize) -> NonBlockingSender<T> {
-        todo!()
+    /// The send buffer may be bounded, but this does not create backpressure, because overflowing
+    /// the buffer is handled by dropping the oldest buffered message.
+    ///
+    /// The returned sender inherits this `IntoSender`'s
+    /// [`cancel_on_drop`](Self::set_cancel_on_drop) property, which defaults to true.
+    pub fn into_unreliable(mut self, bound: Option<usize>) -> NonBlockingSender<T> {
+        // TODO: optional bound
+        self.channel.send_count().fetch_add(1, Relaxed);
+        NonBlockingSender {
+            channel: clone_sender(&self.channel),
+            cancel_on_drop: take(&mut self.cancel_on_drop),
+        }
     }
 
     /// Finish the channel (without even converting the sender)
     ///
     /// This causes all receivers to enter the "finished" terminal state, unless they enter some
     /// other terminal state first.
-    pub fn finish(self) {
-        todo!()
+    pub fn finish(mut self) {
+        self.channel.lock().finish();
     }
 
     /// Cancel the channel (without even converting the sender)
@@ -63,7 +235,7 @@ impl<T> IntoSender<T> {
     /// This causes all receivers to enter the [`CancelledError`] terminal state, unless they enter
     /// some other terminal state first.
     pub fn cancel(self) {
-        todo!()
+        cancel(&self.channel);
     }
 
     /// Set whether this `IntoSender` automatically cancels the channel if dropped without
@@ -72,12 +244,21 @@ impl<T> IntoSender<T> {
     /// Defaults to true. If set to false, automatically finishes the channel if dropped without
     /// converting or cancelling.
     pub fn set_cancel_on_drop(&mut self, cancel_on_drop: bool) -> &mut Self {
-        todo!()
+        self.cancel_on_drop = cancel_on_drop;
+        self
+        // TODO: remove these methods from IntoSender
     }
 
     /// Ownership-chaining version of [`set_cancel_on_drop`](Self::set_cancel_on_drop)
-    pub fn with_cancel_on_drop(self, cancel_on_drop: bool) -> Self {
-        todo!()
+    pub fn with_cancel_on_drop(mut self, cancel_on_drop: bool) -> Self {
+        self.cancel_on_drop = cancel_on_drop;
+        self
+    }
+}
+
+impl<T> Drop for IntoSender<T> {
+    fn drop(&mut self) {
+        drop_sender(&self.channel, self.cancel_on_drop);
     }
 }
 
@@ -96,7 +277,7 @@ impl<T> Sender<T> {
     /// See the API of [`SendFut`], as it is not only a future, but also provides additional
     /// methods, including the API for blocking on a send operation or trying to send immediately.
     pub fn send(&self, msg: T) -> SendFut<T> {
-        todo!()
+        SendFut(send(&self.channel, msg))
     }
 
     /// Finish this sender handle
@@ -104,8 +285,9 @@ impl<T> Sender<T> {
     /// Once _all_ sender handles to a channel are finished, and all buffered messages have been
     /// received, all receivers enter the "finished" terminal state, unless they enter some other
     /// terminal state first.
-    pub fn finish(self) {
-        todo!()
+    pub fn finish(mut self) {
+        self.cancel_on_drop = false;
+        drop(self);
     }
 
     /// Cancel the channel
@@ -113,7 +295,7 @@ impl<T> Sender<T> {
     /// This causes all buffered messages to be dropped and all senders and receivers to enter the
     /// [`CancelledError`] terminal state, unless they enter some other terminal state first.
     pub fn cancel(&self) {
-        todo!()
+        cancel(&self.channel);
     }
 
     /// Set whether this `Sender` automatically cancels the channel if dropped without finishing
@@ -121,12 +303,14 @@ impl<T> Sender<T> {
     /// Defaults to true. If set to false, automatically finishes the channel if dropped without
     /// cancelling.
     pub fn set_cancel_on_drop(&mut self, cancel_on_drop: bool) -> &mut Self {
-        todo!()
+        self.cancel_on_drop = cancel_on_drop;
+        self
     }
 
     /// Ownership-chaining version of [`set_cancel_on_drop`](Self::set_cancel_on_drop)
-    pub fn with_cancel_on_drop(self, cancel_on_drop: bool) -> Self {
-        todo!()
+    pub fn with_cancel_on_drop(mut self, cancel_on_drop: bool) -> Self {
+        self.cancel_on_drop = cancel_on_drop;
+        self
     }
 
     /// If the senders of this channel have entered a terminal state, get that terminal state
@@ -134,10 +318,10 @@ impl<T> Sender<T> {
     /// If this returns `Some`, all senders for this channel are permanently in that terminal
     /// state, and all attempts to send will return a corresponding error.
     pub fn terminal_state(&self) -> Option<SendErrorCause> {
-        todo!()
+        send_error(self.channel.send_state())
     }
 
-    // TODO: buffered
+    // TODO: buffered, bound
 
     // TODO: debug
 
@@ -146,7 +330,16 @@ impl<T> Sender<T> {
 
 impl<T> Clone for Sender<T> {
     fn clone(&self) -> Self {
-        todo!()
+        Sender {
+            channel: clone_sender(&self.channel),
+            cancel_on_drop: self.cancel_on_drop,
+        }
+    }
+}
+
+impl<T> Drop for Sender<T> {
+    fn drop(&mut self) {
+        drop_sender(&self.channel, self.cancel_on_drop);
     }
 }
 
@@ -206,7 +399,7 @@ impl<T> NonBlockingSender<T> {
         todo!()
     }
 
-    // TODO: buffered
+    // TODO: buffered, bound
 
     // TODO: debug
 
@@ -219,6 +412,13 @@ impl<T> Clone for NonBlockingSender<T> {
     }
 }
 
+impl<T> Drop for NonBlockingSender<T> {
+    fn drop(&mut self) {
+        todo!()
+    }
+}
+
+
 /// Unconverted receiver half of a channel
 ///
 /// See [channels docs](crate::docs::ch_1_01_channels).
@@ -227,7 +427,13 @@ pub struct IntoReceiver<T>(core::Channel<T>);
 impl<T> IntoReceiver<T> {
     /// Convert into a receiver
     pub fn into_receiver(self) -> Receiver<T> {
-        todo!()
+        Receiver(clone_receiver(&self.0))
+    }
+}
+
+impl<T> Drop for IntoReceiver<T> {
+    fn drop(&mut self) {
+        drop_receiver(&self.0);
     }
 }
 
@@ -235,10 +441,7 @@ impl<T> IntoReceiver<T> {
 /// Receiver handle to a possibly networked channel
 ///
 /// See [channels docs](crate::docs::ch_1_01_channels).
-pub struct Receiver<T> {
-    channel: core::Channel<T>,
-    cancel_on_drop: bool,
-}
+pub struct Receiver<T>(core::Channel<T>);
 
 impl<T> Receiver<T> {
     /// Create a future to receive a message from this channel
@@ -246,7 +449,7 @@ impl<T> Receiver<T> {
     /// See the API of [`RecvFut`], as it is not only a future, but also provides additional
     /// methods, including the API for blocking on a recv operation or trying to recv immediately.
     pub fn recv(&self) -> RecvFut<T> {
-        todo!()
+        RecvFut(recv(&self.0))
     }
 
     /// If the receivers of this channel have entered a terminal state, get that terminal state
@@ -254,7 +457,7 @@ impl<T> Receiver<T> {
     /// If this returns `Some`, all receivers for this channel are permanently in that terminal
     /// state, and all attempts to send will return a corresponding error.
     pub fn terminal_state(&self) -> Option<RecvTerminalState> {
-        todo!()
+        recv_terminal_state(self.0.recv_state())
     }
 
     // TODO: debug
@@ -264,41 +467,16 @@ impl<T> Receiver<T> {
 
 impl<T> Clone for Receiver<T> {
     fn clone(&self) -> Self {
-        todo!()
+        Receiver(clone_receiver(&self.0))
     }
 }
 
-fn send_error(send_state_byte: u8) -> Option<SendErrorCause> {
-    if send_state_byte == core::SendState::Normal as u8 {
-        None
-    } else if send_state_byte == core::SendState::NoReceivers as u8 {
-        Some(NoReceiversError.into())
-    } else if send_state_byte == core::SendState::Cancelled as u8 {
-        Some(CancelledError.into())
-    } else if send_state_byte == core::SendState::ConnectionLost as u8 {
-        Some(ConnectionLostError.into())
-    } else if send_state_byte == core::SendState::ChannelLostInTransit as u8 {
-        Some(ChannelLostInTransitError.into())
-    } else {
-        unreachable!("invalid send_state_byte: {}", send_state_byte);
+impl<T> Drop for Receiver<T> {
+    fn drop(&mut self) {
+        drop_receiver(&self.0);
     }
 }
 
-fn recv_terminal_state(recv_state_byte: u8) -> Option<RecvTerminalState> {
-    if recv_state_byte == core::RecvState::Normal as u8 {
-        None
-    } else if recv_state_byte == core::RecvState::Finished as u8 {
-        Some(RecvTerminalState::Finished)
-    } else if recv_state_byte == core::RecvState::Cancelled as u8 {
-        Some(RecvTerminalState::Error(CancelledError.into()))
-    } else if recv_state_byte == core::RecvState::ConnectionLost as u8 {
-        Some(RecvTerminalState::Error(ConnectionLostError.into()))
-    } else if recv_state_byte == core::RecvState::ChannelLostInTransit as u8 {
-        Some(RecvTerminalState::Error(ChannelLostInTransitError.into()))
-    } else {
-        unreachable!("invalid recv_state_byte: {}", recv_state_byte)
-    }
-}
 
 // future types for channels.
 pub(crate) mod future {
@@ -330,7 +508,13 @@ pub(crate) mod future {
     /// For purposes of reference-counting senders, this future counts as a sender so long as it
     /// still has the potential to resolve. Thus, receivers cannot enter the "finished" state until
     /// all send futures for the channel are dropped, resolved, or rescinded.
-    pub struct SendFut<T>(core::Send<T>);
+    pub struct SendFut<T>(pub(super) core::Send<T>);
+
+    impl<T> Drop for SendFut<T> {
+        fn drop(&mut self) {
+            todo!()
+        }
+    }
 
     fn map_send_result<T>(result: Result<(), (u8, T)>) -> Result<(), SendError<T>> {
         result
@@ -449,7 +633,13 @@ pub(crate) mod future {
     /// For purposes of reference-counting receivers, this future counts as a receiver so long as
     /// it still has the potential to resolve. Thus, senders cannot enter the [`NoReceiversError`]
     /// state until all receive futures for the channel are dropped, resolved, or aborted.
-    pub struct RecvFut<T>(core::Recv<T>);
+    pub struct RecvFut<T>(pub(super) core::Recv<T>);
+
+    impl<T> Drop for RecvFut<T> {
+        fn drop(&mut self) {
+            todo!()
+        }
+    }
 
     fn map_recv_result<T>(result: Result<T, u8>) -> Result<Option<T>, RecvError> {
         match result {
