@@ -66,9 +66,9 @@ struct SegMeta<T> {
     // next segment towards front
     to_front: Option<SegPtr<T>>,
     // if len > 0, front is elems[start]
-    // invariant: start < N
+    // invariant: start < cap::<T>()
     start: u16,
-    // if len > 0, back is elems[(start + len - 1) % N]
+    // if len > 0, back is elems[(start + len - 1) % cap::<T>()]
     len: u16,
 }
 

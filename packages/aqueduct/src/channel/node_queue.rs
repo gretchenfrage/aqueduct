@@ -97,7 +97,8 @@ impl NodeQueue {
         node.linked = false;
         let alloc = node.ptr.as_mut();
         alloc.waker = None;
-        if let &mut Some((ref mut front, ref mut back)) = &mut self.front_back {
+        let &mut (ref mut front, ref mut back) = self.front_back.as_mut().unwrap();
+        if front as *mut _ == back as *mut _ {
             if let Some(mut to_front) = alloc.to_front {
                 // node's to_back becomes new to_back of node's to_front
                 let to_front_alloc = to_front.as_mut();
@@ -268,4 +269,6 @@ mod tests {
         panic!();
         std::mem::zeroed::<NodeQueue>()
     }
+
+    // TODO: stochastic isomorphism testing
 }

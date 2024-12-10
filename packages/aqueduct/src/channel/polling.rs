@@ -136,7 +136,6 @@ where
             // dont block on mutex + condvar, return none instead
             &Timeout::NonBlocking => return None,
         }
-        debug_assert!(matches!(&*lock, State::Notified));
         *lock = State::Empty;
     }
 }

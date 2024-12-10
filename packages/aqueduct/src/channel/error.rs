@@ -11,26 +11,28 @@ pub struct NoReceiversError;
 /// Error for trying to use a channel which a sender has cancelled
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct CancelledError;
+// TODO: ^--- install a backtrace
 
 /// Error for trying to use a networked channel for which the encompassing network connection has
 /// been lost
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct ConnectionLostError;
 
-/// Error for trying to use a channel which was sent through another networked channel in a message
-/// that will never be delivered
+/// Error for trying to use a channel which was sent through another channel in a message that will
+/// never be delivered
 ///
 /// This may occur in situations such as:
 ///
 /// - Half of this channel was sent through another networked, unreliable channel, and the message
 ///   it was sent in was lost due to congestion.
-/// - Half of this channel was sent through another networked channel, and then that channel was
-///   cancelled before the message it was sent in was received by the remote side.
+/// - Half of this channel was sent through another channel, and then that channel was cancelled
+///   before the message it was sent in was received by the remote side. (This example could occur
+///   even in a non-networked scenario.)
 ///
 /// This is not designed to cover cases where the relevant encompassing network connection failed
 /// as a whole--see [`ConnectionLostError`].
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
-pub struct ChannelLostInTransitError;
+pub struct ChannelLostInTransitError; // TODO: use thread local variables to make this trigger
 
 /// Error for attempting to use a channel with no or limited blocking, and the operation not
 /// completing immediately or by the specified deadline 
@@ -82,6 +84,8 @@ compound_from!(SendErrorCause {
     ConnectionLost(ConnectionLostError),
     ChannelLostInTransit(ChannelLostInTransitError),
 });
+
+// TODO: more convenience methods and implementations
 
 /// Error for trying to send into a channel with no or limited blocking
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]

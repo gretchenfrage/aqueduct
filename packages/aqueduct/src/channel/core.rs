@@ -623,8 +623,8 @@ impl<T> Future for Recv<T> {
         // safety:
         // - recv state is normal, therefore recv nodes is not purged.
         // - we already panicked if node is not linked.
-        // - the type system ensures we would only link this node into the send node queue.
-        let is_front = unsafe { lock.send_nodes.is_front(&inner.node) };
+        // - the type system ensures we would only link this node into the recv node queue.
+        let is_front = unsafe { lock.recv_nodes.is_front(&inner.node) };
 
         if !is_front || lock.elems.len() == 0 {
             // either queue is empty or this future isn't at the front of the recv node queue
@@ -673,8 +673,8 @@ impl<T> Future for Recv<T> {
             lock.recv_nodes.wake_front();
         }
         if lock.bound.is_some_and(|n| n == lock.elems.len() + 1) {
-            // if backpressure was jsut relieved, notify the next send node
-            lock.send_nodes.wake_front();
+            // if backpressure was jsut relieved, notify the next recv node
+            lock.recv_nodes.wake_front();
         }
 
         drop(lock);
@@ -801,7 +801,7 @@ unsafe impl<T> DropWakers for Recv<T> {
         // - the type system ensures we would only link this node into the recv node queue.
         let waker = unsafe { lock.recv_nodes.waker(&mut inner.node) };
 
-        // simply drop any waker we previously installed up in our send node
+        // simply drop any waker we previously installed up in our recv node
         *waker = None;
     }
 }

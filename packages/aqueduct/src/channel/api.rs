@@ -122,6 +122,7 @@ pub fn channel<T>() -> (IntoSender<T>, IntoReceiver<T>) {
 /// Unconverted sender half of a channel
 ///
 /// See [channels docs](crate::docs::ch_1_01_channels).
+// TODO: comment in the middle of IntoSender and IntoReceiver docs explaining it better
 pub struct IntoSender<T> {
     channel: core::Channel<T>,
     // we don't actually let the user change this. however, removing it would require unsafe code.
@@ -130,10 +131,6 @@ pub struct IntoSender<T> {
 
 impl<T> IntoSender<T> {
     /// Convert into an ordered, reliable, bounded sender
-    ///
-    /// The returned sender inherits this `IntoSender`'s
-    /// [`cancel_on_drop`](Self::set_cancel_on_drop) property, which defaults to true.
-         // TODO update that message ^---
     pub fn into_ordered(mut self, bound: usize) -> Sender<T> {
         self.channel.lock().set_bound(bound);
         Sender {
@@ -143,9 +140,6 @@ impl<T> IntoSender<T> {
     }
 
     /// Convert into an ordered, reliable, unbounded sender
-    ///
-    /// The returned sender inherits this `IntoSender`'s
-    /// [`cancel_on_drop`](Self::set_cancel_on_drop) property, which defaults to true.
     pub fn into_ordered_unbounded(mut self) -> NonBlockingSender<T> {
         NonBlockingSender {
             channel: clone_sender(&self.channel),
@@ -155,9 +149,6 @@ impl<T> IntoSender<T> {
     }
 
     /// Convert into an unordered, reliable, bounded sender
-    ///
-    /// The returned sender inherits this `IntoSender`'s
-    /// [`cancel_on_drop`](Self::set_cancel_on_drop) property, which defaults to true.
     pub fn into_unordered(mut self, bound: usize) -> Sender<T> {
         self.channel.lock().set_bound(bound);
         self.channel.send_count().fetch_add(1, Relaxed);
@@ -168,9 +159,6 @@ impl<T> IntoSender<T> {
     }
 
     /// Convert into an unordered, reliable, unbounded sender
-    ///
-    /// The returned sender inherits this `IntoSender`'s
-    /// [`cancel_on_drop`](Self::set_cancel_on_drop) property, which defaults to true.
     pub fn into_unordered_unbounded(mut self) -> NonBlockingSender<T> {
         self.channel.send_count().fetch_add(1, Relaxed);
         NonBlockingSender {
@@ -184,9 +172,6 @@ impl<T> IntoSender<T> {
     ///
     /// The send buffer may be bounded, but this does not create backpressure, because overflowing
     /// the buffer is handled by dropping the oldest buffered message.
-    ///
-    /// The returned sender inherits this `IntoSender`'s
-    /// [`cancel_on_drop`](Self::set_cancel_on_drop) property, which defaults to true.
     pub fn into_unreliable(mut self, bound: Option<usize>) -> NonBlockingSender<T> {
         self.channel.send_count().fetch_add(1, Relaxed);
         NonBlockingSender {
@@ -269,8 +254,11 @@ impl<T> Sender<T> {
 
     /// Set whether this `Sender` automatically cancels the channel if dropped without finishing
     ///
-    /// Defaults to true. If set to false, automatically finishes the channel if dropped without
-    /// cancelling.
+    /// Defaults to true. If set to false, automatically finishes this sender handle if dropped
+    /// without cancelling. When a sender is cloned, the cloned sender inherits the original
+    /// sender's `cancel_on_drop` property--however, `cancel_on_drop` is only a property of
+    /// individual sender handles, and changing it for one does not change it for all senders in
+    /// the channel.
     pub fn set_cancel_on_drop(&mut self, cancel_on_drop: bool) -> &mut Self {
         self.cancel_on_drop = cancel_on_drop;
         self
@@ -365,8 +353,11 @@ impl<T> NonBlockingSender<T> {
 
     /// Set whether this `Sender` automatically cancels the channel if dropped without finishing
     ///
-    /// Defaults to true. If set to false, automatically finishes the channel if dropped without
-    /// cancelling.
+    /// Defaults to true. If set to false, automatically finishes this sender handle if dropped
+    /// without cancelling. When a sender is cloned, the cloned sender inherits the original
+    /// sender's `cancel_on_drop` property--however, `cancel_on_drop` is only a property of
+    /// individual sender handles, and changing it for one does not change it for all senders in
+    /// the channel.
     pub fn set_cancel_on_drop(&mut self, cancel_on_drop: bool) -> &mut Self {
         self.cancel_on_drop = cancel_on_drop;
         self
@@ -517,6 +508,9 @@ pub(crate) mod future {
         let (result, channel) = result;
         if let Some(channel) = channel {
             drop_sender(&channel, false);
+            // TODO: I think that futures should also have a cancel_on_drop setting
+            // TODO: maybe rename RecvFut.abort to rescind, and also split rescind into
+            //       rescind_finish and rescind_cancel
         }
         result
             .map_err(|(send_state_byte, msg)| SendError {
@@ -581,7 +575,7 @@ pub(crate) mod future {
         /// Calling this method counts as polling this future, and if this method returns anything
         /// other than [`WouldBlockError`], that counts as this future resolving. This method will
         /// panic if this future has already resolved or rescinded.
-        pub fn try_send(&mut self) -> Result<(), TrySendError<T>> {
+        pub fn try_now(&mut self) -> Result<(), TrySendError<T>> {
             assert!(!self.is_terminated(), "SendFut.block called after terminated");
             map_try_send_result(poll(&mut self.0, Timeout::NonBlocking))
         }
@@ -718,7 +712,7 @@ pub(crate) mod future {
         /// Calling this method counts as polling this future, and if this method returns anything
         /// other than [`WouldBlockError`], that counts as this future resolving. This method will
         /// panic if this future has already resolved or aborted.
-        pub fn try_recv(&mut self) -> Result<Option<T>, TryRecvError> {
+        pub fn try_now(&mut self) -> Result<Option<T>, TryRecvError> {
             assert!(!self.is_terminated(), "RecvFut.block called after terminated");
             map_try_recv_result(poll(&mut self.0, Timeout::NonBlocking))
         }
@@ -762,4 +756,46 @@ pub(crate) mod future {
             self.abort();
         }
     }
+}
+
+
+// ==== tests ====
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn basic_1000_test() {
+        use std::{
+            time::Duration,
+            thread,
+        };
+
+        let (send, recv) = channel();
+        let send = send.into_ordered(500);
+        let recv = recv.into_receiver();
+
+        let join_1 = thread::spawn(move || {
+            for i in 1..=1000 {
+                send.send(i).block_timeout(Duration::from_millis(10)).unwrap();
+                if i < 1000 && i % 100 == 0 {
+                    thread::sleep(Duration::from_millis(50));
+                }
+            }
+            send.finish();
+        });
+        let join_2 = thread::spawn(move || {
+            for i in 1..=1000 {
+                let j = recv.recv().block_timeout(Duration::from_millis(60)).unwrap().unwrap();
+                assert_eq!(i, j);
+            }
+            assert!(recv.recv().block_timeout(Duration::from_millis(10)).unwrap().is_none());
+        });
+        join_1.join().unwrap();
+        join_2.join().unwrap();
+    }
+
+    // TODO: stochastic testing
 }
