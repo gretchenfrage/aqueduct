@@ -223,15 +223,24 @@ impl<T> Sender<T> {
     pub fn send(&self, msg: T) -> SendFut<T> {
         let send_state = self.channel.send_state();
         if send_state != core::SendState::Normal as u8 {
-            return SendFut(core::Send::cheap(send_state, msg));
+            return SendFut {
+                fut: core::Send::cheap(send_state, msg),
+                cancel_on_drop: self.cancel_on_drop,
+            };
         }
         let mut lock = self.channel.lock();
         let send_state = self.channel.send_state();
         if send_state != core::SendState::Normal as u8 {
-            return SendFut(core::Send::cheap(send_state, msg));
+            return SendFut {
+                fut: core::Send::cheap(send_state, msg),
+                cancel_on_drop: self.cancel_on_drop,
+            };
         }
         self.channel.send_count().fetch_add(1, Relaxed);
-        SendFut(lock.send(msg))
+        SendFut {
+            fut: lock.send(msg),
+            cancel_on_drop: self.cancel_on_drop,
+        }
     }
 
     /// Finish this sender handle
@@ -500,7 +509,10 @@ pub(crate) mod future {
     /// For purposes of reference-counting senders, this future counts as a sender so long as it
     /// still has the potential to resolve. Thus, receivers cannot enter the "finished" state until
     /// all send futures for the channel are dropped, resolved, or rescinded.
-    pub struct SendFut<T>(pub(super) core::Send<T>);
+    pub struct SendFut<T> {
+        pub(super) fut: core::Send<T>,
+        pub(super) cancel_on_drop: bool,
+    }
 
     fn map_send_result<T>(
         result: (Result<(), (u8, T)>, Option<core::Channel<T>>)
@@ -508,9 +520,6 @@ pub(crate) mod future {
         let (result, channel) = result;
         if let Some(channel) = channel {
             drop_sender(&channel, false);
-            // TODO: I think that futures should also have a cancel_on_drop setting
-            // TODO: maybe rename RecvFut.abort to rescind, and also split rescind into
-            //       rescind_finish and rescind_cancel
         }
         result
             .map_err(|(send_state_byte, msg)| SendError {
@@ -537,37 +546,42 @@ pub(crate) mod future {
             if this.is_terminated() {
                 return Poll::Pending;
             }
-            pin!(&mut this.0)
+            pin!(&mut this.fut)
                 .poll(cx)
                 .map(map_send_result)
         }
     }
 
     impl<T> SendFut<T> {
-        /// Try to abort this send operation and rescind the message which would have been sent
+        /// If the message has not yet been sent, abort the send operation and rescind the message,
+        /// and possibly cancel the channel
         ///
-        /// This is guaranteed to return `Some` unless this future has already resolved or
-        /// rescinded. This method never panics.
-        pub fn rescind(&mut self) -> Option<T> {
-            self.0.cancel()
+        /// If this future has not yet resolved or rescinded, this returns `Some`. Moreover, if
+        /// this returns `Some` and `cancel` was passed as true, the channel will be cancelled.
+        pub fn rescind(&mut self, cancel: bool) -> Option<T> {
+            self.fut.cancel()
                 .map(|(msg, channel)| {
                     if let Some(channel) = channel {
-                        drop_sender(&channel, false);
+                        drop_sender(&channel, cancel);
                     }
                     msg
                 })
         }
 
-        /// Block until this future resolves
+        /// Shorthand for calling [`rescind`](Self::rescind) with `cancel` being true
         ///
-        /// Calling this method counts as polling this future, and when this method returns, that
-        /// counts as this future resolving. This method will panic if this future has already
-        /// resolved or rescinded.
-        pub fn block(&mut self) -> Result<(), SendError<T>> {
-            assert!(!self.is_terminated(), "SendFut.block called after terminated");
-            let result = poll(&mut self.0, Timeout::Never)
-                .ok().expect("poll timed out with Timeout::Never");
-            map_send_result(result)
+        /// If this future has not yet resolved or rescinded, this returns `Some` and cancels the
+        /// channel.
+        pub fn rescind_cancel(&mut self) -> Option<T> {
+            self.rescind(true)
+        }
+
+        /// Shorthand for calling [`rescind`](Self::rescind) with `cancel` being false
+        ///
+        /// If this future has not yet resolved or rescinded, this returns `Some`, and prevents
+        /// this future from cancelling the channel when dropped.
+        pub fn rescind_finish(&mut self) -> Option<T> {
+            self.rescind(false)
         }
 
         /// Try to resolve this future immediately without blocking
@@ -577,7 +591,19 @@ pub(crate) mod future {
         /// panic if this future has already resolved or rescinded.
         pub fn try_now(&mut self) -> Result<(), TrySendError<T>> {
             assert!(!self.is_terminated(), "SendFut.block called after terminated");
-            map_try_send_result(poll(&mut self.0, Timeout::NonBlocking))
+            map_try_send_result(poll(&mut self.fut, Timeout::NonBlocking))
+        }
+
+        /// Block until this future resolves
+        ///
+        /// Calling this method counts as polling this future, and when this method returns, that
+        /// counts as this future resolving. This method will panic if this future has already
+        /// resolved or rescinded.
+        pub fn block(&mut self) -> Result<(), SendError<T>> {
+            assert!(!self.is_terminated(), "SendFut.block called after terminated");
+            let result = poll(&mut self.fut, Timeout::Never)
+                .ok().expect("poll timed out with Timeout::Never");
+            map_send_result(result)
         }
 
         /// Block until this future resolves or a timeout elapses
@@ -597,12 +623,31 @@ pub(crate) mod future {
         /// panic if this future has already resolved or rescinded.
         pub fn block_deadline(&mut self, deadline: Instant) -> Result<(), TrySendError<T>> {
             assert!(!self.is_terminated(), "SendFut.block called after terminated");
-            map_try_send_result(poll(&mut self.0, Timeout::At(deadline)))
+            map_try_send_result(poll(&mut self.fut, Timeout::At(deadline)))
         }
 
         /// Whether this future has already resolved or rescinded
         pub fn is_terminated(&self) -> bool {
-            self.0.is_terminated()
+            self.fut.is_terminated()
+        }
+
+        /// Set whether this `SendFut` automatically cancels the channel if dropped without
+        /// resolving or rescinded.
+        ///
+        /// When a `SendFut` is created, it inherits the [`Sender::cancel_on_drop`][1] property--
+        /// however, `cancel_on_drop` is only a property of the individual `SendFut`, and changing
+        /// it for this future does not change it for all senders in the channel.
+        ///
+        /// [1]: Sender::set_cancel_on_drop
+        pub fn set_cancel_on_drop(&mut self, cancel_on_drop: bool) -> &mut Self {
+            self.cancel_on_drop = cancel_on_drop;
+            self
+        }
+
+        /// Ownership-chaining version of [`set_cancel_on_drop`](Self::set_cancel_on_drop)
+        pub fn with_cancel_on_drop(mut self, cancel_on_drop: bool) -> Self {
+            self.cancel_on_drop = cancel_on_drop;
+            self
         }
     }
 
@@ -616,7 +661,7 @@ pub(crate) mod future {
     impl<T> Drop for SendFut<T> {
         fn drop(&mut self) {
             // to make sure we trigger drop_sender if necessary
-            self.rescind();
+            self.rescind(self.cancel_on_drop);
         }
     }
 

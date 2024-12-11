@@ -1,4 +1,5 @@
 #![allow(dead_code)] // TODO
+//#![doc = include_str!("../../../README.md")] // TODO: fix links
 
 pub extern crate bytes;
 #[cfg(feature = "futures")]
