@@ -287,6 +287,22 @@ impl<T> Sender<T> {
         send_error(self.channel.send_state())
     }
 
+    /// Await the senders of this channel entering a terminal state, then get that terminal state
+    ///
+    /// This is like [`terminal_state`](Self::terminal_state), but it only resolves once it is
+    /// `Some`.
+    pub async fn terminated(&self) -> SendErrorCause {
+        // TODO: this could be done as a fully owned future. but maybe that's not necessary.
+        // TODO: yeah, this really aught to be intentionally a future that does _not_ count as a sender handle?
+
+        // try to check without locking
+        if let Some(terminal_state) = self.terminal_state() {
+            return terminal_state;
+        }
+
+        self.channel.watch_send_state().
+    }
+
     // TODO: buffered, bound
 
     // TODO: debug

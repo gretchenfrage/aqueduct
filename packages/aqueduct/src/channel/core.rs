@@ -20,6 +20,7 @@ use std::{
     future::Future,
     pin::Pin,
 };
+use tokio::sync::watch;
 
 
 // ==== the channel itself ====
@@ -55,6 +56,10 @@ struct Shared<T> {
     // - if holds a value other than normal, recv operations immediately return a corresponding
     //   error (or "finished" value in the case of RecvState::Finished).
     recv_state: AtomicU8,
+
+    // tokio watch channels for send_state and recv_state
+    watch_send_state: (watch::Sender<u8>, watch::Receiver<u8>),
+    watch_recv_state: (watch::Sender<u8>, watch::Receiver<u8>),
 }
 
 // channel lockable state.
@@ -81,6 +86,7 @@ struct Lockable<T> {
 }
 
 // possible values for Shared.send_state
+#[derive(Copy, Clone)]
 #[repr(u8)]
 pub(crate) enum SendState {
     // sending may still be possible.
@@ -97,6 +103,7 @@ pub(crate) enum SendState {
 }
 
 // possible values for Shared.recv_state
+#[derive(Copy, Clone)]
 #[repr(u8)]
 pub(crate) enum RecvState {
     // receiving may still be possible.
@@ -128,6 +135,8 @@ impl<T> Channel<T> {
             recv_count: AtomicU64::new(1),
             send_state: AtomicU8::new(SendState::Normal as u8),
             recv_state: AtomicU8::new(RecvState::Normal as u8),
+            watch_send_state: watch::channel(SendState::Normal as u8),
+            watch_recv_state: watch::channel(RecvState::Normal as u8),
         }))
     }
 
@@ -154,6 +163,16 @@ impl<T> Channel<T> {
     // get the recv reference count atomic int.
     pub(crate) fn recv_count(&self) -> &AtomicU64 {
         &self.0.recv_count
+    }
+
+    // get the watch receiver for the send state byte.
+    pub(crate) fn watch_send_state(&self) -> &watch::Receiver<u8> {
+        &self.0.watch_send_state.1
+    }
+
+    // get the watch receiver for the recv state byte.
+    pub(crate) fn watch_recv_state(&self) -> &watch::Receiver<u8> {
+        &self.0.watch_recv_state.1
     }
 
     // lock the channel.
@@ -246,6 +265,9 @@ impl<'a, T> Lock<'a, T> {
         if recv_state == RecvState::Normal as u8 && self.lock.elems.len() == 0 {
             self.shared.recv_state.store(RecvState::Finished as u8, Relaxed);
             self.lock.recv_nodes.purge();
+
+
+            self.shared.watch_recv_state.0.send(RecvState::Finished as u8).unwrap();
         }
     }
 
@@ -254,6 +276,8 @@ impl<'a, T> Lock<'a, T> {
         if self.shared.send_state.load(Relaxed) == SendState::Normal as u8 {
             self.shared.send_state.store(error as u8, Relaxed);
             self.lock.send_nodes.purge();
+
+            self.shared.watch_send_state.0.send(error as u8).unwrap();
         }
     }
 
@@ -262,6 +286,8 @@ impl<'a, T> Lock<'a, T> {
         if self.shared.recv_state.load(Relaxed) == RecvState::Normal as u8 {
             self.shared.recv_state.store(error as u8, Relaxed);
             self.lock.recv_nodes.purge();
+
+            self.shared.watch_recv_state.0.send(error as u8).unwrap();
         }
     }
 
@@ -667,6 +693,8 @@ impl<T> Future for Recv<T> {
                 // (this automatically notifies all nodes in recv queue all at once)
                 inner.shared.0.recv_state.store(RecvState::Finished as u8, Relaxed);
                 lock.recv_nodes.purge();
+
+                inner.shared.0.watch_recv_state.0.send(RecvState::Finished as u8).unwrap();
             }
         } else {
             // elems is not yet empty, so notify next recv ndoe
