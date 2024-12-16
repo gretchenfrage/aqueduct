@@ -28,17 +28,44 @@ on ways we would like to explore potentially enhancing the protocol. A
 TODO comment noting some idea does not constitute a commitment or
 promise to actually going through with it.
 
+# Glossary
+
+- Aqueduct: This protocol.
+- QUIC: The QUIC protocol, as first standardized in RFC 9000, which
+  Aqueduct runs on.
+- TLS: The encryption protocol which QUIC is fused with.
+- ZeroRTT: A feature provided by QUIC and TLS, also known as TLS Early
+  Data, or TLS (Stateless) Session Resumption, or 0-RTT.
+- Stream: A QUIC byte stream.
+- Bidirectional / Unidirectional stream: Streams being bidirectional or
+  unidirectional is a feature of QUIC streams, provided by QUIC.
+- Datagram: A QUIC unreliable datagram, as per the QUIC unreliable
+  datagram extension first standardized in RFC 9221.
+- Connection: An Aqueduct connection between two sides of the Aqueduct
+  connection, which wraps around a QUIC connection.
+- Client: The side of the Aqueduct connection which initiated the
+  connection.
+- Server: The side of the Aqueduct connection which is not the client.
+- Channel: A networked channel of messages within an Aqueduct
+  connection, which is the main abstraction exposed by Aqueduct to the
+  application.
+- Oneshot channel: A channel that may only ever have up to 1 message
+  sent on it, created like that intentionally by the application.
+- Message: A discrete message sent by the application on a channel.
+- Payload: The part of a message which is a byte array encoded by
+  application-provided serialization logic.
+- Attachment: A relationship between a message and a channel, wherein a
+  new channel may be created by attaching it to a message that is sent
+  on an existing channel.
+- Frame: A unit of Aqueduct protocol communication, written by one side
+  of the Aqueduct connection to a stream or datagram and read by the
+  other side, without being exposed to the application.
+
 # QUIC
 
 Aqueduct runs on top of QUIC. In this document, "streams" refers to QUIC
 streams, whereas "channels" refers to Aqueduct channels. QUIC datagrams
 are also used.
-
-Aqueduct only uses unidirectional QUIC streams, not bidirectional QUIC
-streams. The QUIC bidirectional stream limit should be set to 0, and the
-opening of a bidirectional stream (which should not be possible in QUIC
-if the bidirectional stream limit is set to 0) should be treated as a
-protocol violation error.
 
 Servers and client must accept datagrams (they must have enabled the
 QUIC unreliable datagram extension first standardized in RFC 9221). If
@@ -48,7 +75,7 @@ may be treated as a protocol error.
 TODO: Fallback to TCP or WebSocket for situations where the network
       refuses to carry UDP packets.
 TODO: Fallback, or completely convert to WebTransport for running within
-      web frontends more perforantly than falling back to WebSocket.
+      web frontends more performantly than falling back to WebSocket.
 
 # ZeroRTT
 
@@ -58,9 +85,14 @@ the server accepted or rejected its 0-RTT data. If the server rejects
 its 0-RTT data, it must retransmit all data it sent on a 0-RTT stream on
 a new 1-RTT stream. It should not buffer and retransmit datagrams.
 
+If a handle to a stream opened in 0-RTT mode is being held somewhere in
+Aqueduct's state, and Aqueduct is forced is re-transmit the buffered
+data in a new 1-RTT stream as described above, it must replace the old
+stream with the new one at the place where it's storing it in its state.
+
 Clients should remember address validation tokens from NEW_TOKEN frames
 and use them when making 0-RTT requests if able. Transmitting 0-RTT data
-will not be beneficial if the client does not have a address validation
+will not be beneficial if the client does not have an address validation
 token, so a client may avoid bothering to do so if it doesn't.
 
 An Aqueduct server may receive data from 0-RTT streams, but it must not
@@ -75,13 +107,16 @@ coming from a replay attack, and process it immediately. In such a
 system, the server must take care to ensure that this token reuse
 detection state is at least as persistent as whatever cryptographic keys
 or other mechanism it is using to prevent its tokens from being guessed
-or forged, and that there are also no possibilities for false negatives
-introduced by problems relating to token encryption keys being shared by
-servers in a server farm or cluster, or by eventual consistency in
-replay detection state being shared, replicated, sharded, or otherwise
-distributed across different servers in a server farm or cluster, or by
-lack of consistency in the face of un-graceful server shutdown, or by
-systems to copy or roll back disk state, or by anything else. If the
+or forged. The server also must ensure that there are also no
+possibilities for false negatives introduced by problems relating to
+token encryption keys being shared by servers in a server farm or
+cluster, or by eventual consistency in replay detection state being
+shared, replicated, sharded, or otherwise distributed across different
+servers in a server farm or cluster, or by lack of consistency in the
+face of un-graceful server shutdown, or by systems to copy or roll back
+disk state, or by anything else. If the server is using validation
+tokens to protect against replay attacks as such, it also of course must
+remember to actually check whether a connection is validated. If the
 server cannot for any reason determine with total confidence that 0-RTT
 data is not coming from replay attacks, it must either reject the 0-RTT
 data on the TLS level (QUIC/TLS APIs may not always make this possible),
@@ -131,77 +166,25 @@ Sometimes, a length-prefixed byte array is encoded. This is encoded as a
 var len int, encoding the length of the array, following by that many
 bytes.
 
-# Frames
+# Channel IDs
 
-Frames are the unit of the Aqueduct client and server sending each other
-self-contained messages on the wire.
+Each (networked) channel and oneshot channel within a connection has a
+64-bit channel ID.
 
-Each frame begins with a "frame type byte", a single byte indicating
-what type of frame it is. Then, it may have further bytes, in accordance
-with logic specific to its frame type.
+- The lowest bit is a 0 if the channel is flowing from the client to the
+  server, and 1 if it is flowing from the server to the client.
+- The second lowest bit is a 0 if the channel ID was minted by the
+  client, and a 1 if it was minted by the server.
+- The third lowest bit is a 0 if the channel is not a oneshot channel,
+  and a 1 if it is a oneshot channel.
+- The other 61 bits are the "channel idx", a 61-bit uint.
 
-It is clear from a byte sequence that begins with a frame when that
-frame ends. Thus, it is possible to encode multiple frames back-to-back
-without additional framing.
+When channel IDs are minted, the side minting them assigns them channel
+idxs seqeuentially within their index space, which is defined by the
+other 3 bits, starting at 0.
 
-The client and server must listen to each other for unidirectional QUIC
-streams, and also for QUIC datagrams. Both the data in a stream and the
-data in a datagram is a sequence of one or more frames encoded
-back-to-back.
-
-If the data in a stream or in a datagram fails to decode as frames,
-that's a protocol violation. If there's extra bytes after the frames,
-that's a protocol violation, although it's unclear what that would even
-mean as both streams and datagrams are allowed to contain multiple
-frames and frames describe their own length implicitly. If a received
-QUIC stream is elegantly finished without at least one full frame being
-received on it, that's a protocol violation. If a received datagram does
-not contain at least one full frame on it, that's a protocol violation.
-
-If multiple frames are received in the same stream or datagram, they
-must be processed in sequence (that is, one after the other, in the
-order they are encoded). To clarify, if a frame results in a message
-being delivered to the application through a channel, there is no
-requirement that the application must process these messages in an order
-consistent with the order the frames were encoded within the same stream
-or datagram. However, there would be a requirement that the Aqueduct
-implementation enqueue these messages into the channel in an order
-consistent with the order of the frames themselves, as the processing
-of a frame which triggers enqueueing a message into an application-
-facing channel would encompass just the enqueueing of the message into
-the channel, and not the dequeueing and processing of the message by the
-application. Frames are abstracted away from the application.
-
-Frames received from different streams or different datagrams may be
-processed in parallel.
-
-Parallelizing parts of the processing of frames within the same stream
-or datagram is permissible only to the extent that it has no possibility
-of meaningfully changing behavior / introducing race conditions.
-
-An Aqueduct implementation does not have to care about whether a frame
-came from some particular stream or datagram, or even whether it came
-from a stream or a datagram, when processing it.
-
-If a QUIC stream is cancelled, the receiving side should disregard any
-partially received frames up to the point of cancellation, and does not
-have to process any frames previously received from that stream if it
-has not already done so.
-
-# Frame types
-
-The following frame type bytes and corresponding frame types exist:
-
-- 0: Message
-- 1: ConnHeaderData
-- 2: AckConnectionHeaderData
-- 3: Ping
-- 4: Pong
-- 5: IsChannelOpenRequest
-- 6: IsChannelOpenResponse
+The channel ID which consists entirely of zeroes (flowing towards
+server, created by client, not oneshot index 0) is considered the
+"entrypoint channel" and treated specially in some cases.
 
 
-# Error handling
-
-Upon encountering a protocol error, the QUIC connection should be
-immediately closed.
