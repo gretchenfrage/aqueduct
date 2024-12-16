@@ -189,4 +189,66 @@ server, created by client, not oneshot index 0) is considered the
 
 Channel IDs are encoded as var len ints.
 
+# Frames
+
+TODO
+
+# Connection control stream
+
+When the Aqueduct client creates the Aqueduct connection, it creates a
+QUIC connection to the server. As soon as it can, it opens up a
+bidirectional stream, stores it as the "connection control stream", and
+sends on it a Version frame, followed by a ConnectionHeaders frame.
+
+When the server observes the QUIC connection opening, it waits to
+observe the opening of a bidirectional stream followed by the receiving
+on that stream of a Version frame followed by a ConnectionHeaders frame.
+Once this occurs, the server stores that stream as the connection
+control stream, and sends on it a Version frame, followed by a
+ConnectionHeaders frame.
+
+The server may branch on the Version and ConnectionHeaders data it
+receives from the client in determining what content to send in its
+Version and ConnectionHeaders response. The server may allow the
+application to read the client's connection headers and then determine
+based on that what connection headers the server has for this
+connection.
+
+The client may begin sending message frames to the server before it
+receives the server's connection headers. This avoids adding a round
+trip to connection start-up time. However, until the client receives the
+server's connection headers, it encode a Version frame as the first
+frame on any stream or datagram on which it is encoding other frames.
+This helps protect the client from accidentally sending data to a server
+which is not an Aqueduct server in a way the server could misinterpret,
+as a Version frame begins with a shibboleth magic byte sequence.
+
+The server does not have a reason to send any data to the client, on
+streams or datagrams, before receiving the client's connection headers.
+It must not do so. If in some future version of this protocol the server
+gains a reason to do so, care would have to be taken regarding the same
+concern mentioned in the last section.
+
+If the server receives frames other than Version and ConnectionHeaders
+in any way before it receives the client's ConnectionHeaders frame, it
+must wait to process them until it receives the client's
+ConnectionHeaders frame. This might occur due to race conditions between
+the client sending data on the connection control stream and the client
+sending data by other means.
+
+A connection only has 1 connection control stream, and it lasts as long
+as the connection. It is a protocol error if the connection control
+stream is closed or finished. The client and the server both send a
+ConnectionHeaders frame exactly once, on the connection control stream.
+The server identifies the connection control stream by it being a
+bidirectional stream opened by the client that begins with a Version
+frame followed by a ConnectionHeaders frame. It is a protocol error if
+either side sends a ConnectionHeaders frame multiple times. It is a
+protocol error if the client sends a ConnectionHeaders frame on anything
+other than a bidirectional stream, as the second frame on that stream,
+wherein the first frame on that stream is a Version frame. It is a
+protocol error if the server sends a ConnectionHeaders frame on anything
+other than the control stream, as the second frame on that stream,
+wherein the first frame on that stream is a Version frame.
+
 
