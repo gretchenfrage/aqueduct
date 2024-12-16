@@ -187,4 +187,6 @@ The channel ID which consists entirely of zeroes (flowing towards
 server, created by client, not oneshot index 0) is considered the
 "entrypoint channel" and treated specially in some cases.
 
+Channel IDs are encoded as var len ints.
+
 
