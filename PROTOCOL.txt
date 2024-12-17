@@ -541,7 +541,9 @@ receiver" procedure.
 
 # Dropping receivers
 
-
+If the application permanently abandons the taking of messages from the
+receiver side of a channel for which the receiver still exists, the
+receiver must perform the "abandon receiver" procedure.
 
 # The abandon receiver procedure
 
