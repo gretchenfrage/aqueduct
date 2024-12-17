@@ -377,11 +377,99 @@ application's deserialization logic does not claim ownership of are
 automatically closed, or that their presence triggers some exception
 handling logic that otherwise prevents this from being a problem.
 
+It is a protocol error to attach the same channel to multiple different
+messages.
+
 # Channel control streams
 
+When the client or server creates a receiver for a channel, it creates
+a bidirectional stream, and stores it as that receiver's "channel
+control stream". Immediately after doing so, it sends a ChannelControl
+frame on the stream, with the channel ID of the channel for which the
+receiver was created.
 
+Both sides of the connection listen for ChannelControl frames received
+on bidirectional streams. It is a protocol error for there to be a
+ChannelControl frame on a unidirectional stream, or in a datagram, or
+in the connection control stream, or for there to be multiple
+ChannelControl frames in the same channel control stream.
+
+When a ChannelControl frame is received on its bidirectional stream as
+such:
+
+- If the side that received the ChannelControl stream currently has a
+  sender for that channel ID, it attaches the bidirectional stream as
+  that sender's channel control stream.
+- If the side that received the ChannelControl stream currently has a
+  sender for that channel ID, but the sender already has a channel
+  control stream associated with it, it writes a ChannelClosed frame
+  back on the bidirectional stream.
+
+  NOT FINISHED is ChannelClosed correct?
+
+  TODO I don't think this rule causes problems, but we should double-
+       check whether it is actually necessary / the best design.
+- If the side that received the ChannelControl stream does not currently
+  have a sender for that channel ID, it writes a ChannelClosed frame
+  back on the bidirectional stream.
+
+  NOT FINISHED is ChannelClosed correct?
+
+# Acks and nacks
+
+In Aqueduct, it is possible for a message frame sent on a channel to not
+be received and processed by the receiver, despite the connection as a
+whole remaining alive. This can occur due to the sender cancelling the
+channel, the receiver closing the channel early, or messages sent
+unreliably being lost. The Aqueduct protocol contains a system by which
+the receiver of messages can not only ack messages frames it's processed,
+but also nack messages frames it's declared lost. Moreover, unlike most
+similar systems, nacks experience no false positives, as the receiver
+nacking a message actually represents a commitment to never processing
+that message, even if it arrives late. Other parts of the Aqueduct
+protocol rely on this assurance. Since "exactly once message delivery
+is impossible in a distributed system," these systems do not apply to
+cases where the QUIC connection as a whole closes.
+
+Each sender maintains two sequential u64 counters for messages it's
+sent--one for messages sent reliably (in streams), and one for messages
+sent unreliably (in datagrams). A message frame contains its message
+number within its appropriate space, which is defined by the channel ID
+and whether the message frame is in a stream or datagram.
+
+The sender side of a channel control stream may send SentUnreliable
+frames indicating that the highest unreliable message number it has sent
+for that channel has increased by a certain amount. When a sender sends
+a message unreliably, it must send a SentUnreliable frame indicating
+that that unreliable message number was sent within a reasonable amount
+of time, such as 0.1 second, or half the estimated RTT. It may wait for
+such a delay in anticipation of more unreliable messages potentially
+being sent, in the hopes that only a single SentUnreliable frame would
+have to be sent to cover a larger range of packet numbers.
+
+When the receiver side of a channel control stream receives a
+SentUnreliable frame, it must ack or nack all unreliable messages sent
+up to the message number it was raised to after a reasonable loss-
+detection delay after the SentUnreliable frame was received, such as 1
+second or twice the estimated RTT. It does so by sending an AckNack
+frame back on the channel control stream.
+
+TODO nagling-inspired thing instead of arbitrarily chosen durations?
+
+When a receiver nacks some unreliably received message, it must retain
+whatever state is necessary to ensure that if it does ever receive that
+message frame, it will discard it without processing it. If it did, this
+would be a protocol error.
+
+An Aqueduct implementation does not need to explicitly harden itself
+from the possibility of an unreliable or other message being received in
+duplicate, as the QUIC protocol prevents that from happening.
+
+# Closing channels
 
 # Error handling
 
-Upon encountering a protocol error, the QUIC connection should be
-immediately closed.
+Upon encountering or detecting a protocol error, the QUIC connection
+should be immediately closed.
+
+If the QUIC connection closes, the Aqueduct connection closes.
