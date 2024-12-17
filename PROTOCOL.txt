@@ -438,6 +438,17 @@ such:
 
   NOT FINISHED is ChannelClosed correct?
 
+In the channel-sender-to-receiver direction, a channel control stream
+can be finished and it can be reset. However, if it finishes without its
+final frame being a FinishSender frame, that's a protocol error.
+
+In the channel-receiver-to-sender direction, a channel control stream
+can be finished. It can not be reset; if it is reset, that's a protocol
+error. If the channel-receiver-to-sender direction finishes before the
+channel-sender-to-receiver direction finishes, its final frame in the
+channel-receiver-to-sender direction must be an AbandonReceiver frame,
+or that's a protocol error.
+
 # Acks and nacks
 
 In Aqueduct, it is possible for a message frame sent on a channel to not
@@ -491,9 +502,10 @@ duplicate, as the QUIC protocol prevents that from happening.
 # Finishing channels
 
 When the receiver of a channel finishes a channel, it does so by sending
-a FinishSender frame on the channel control stream. This includes the
-final reliable and unreliable number of messages sent on the channel
-before it finished.
+a FinishSender frame on the channel control stream, then finishes the
+channel control stream's channel-sender-to-receiver direction. The
+FinishSender frame includes the final reliable and unreliable number of
+messages sent on the channel before it finished.
 
 When the receiver receives a FinishSender frame, it enters a "finishing"
 state. This state lasts until it finishes finishing, or until something
@@ -510,18 +522,55 @@ the logic by which the receiver handles SentUnreliable frames.
 Once the receiver has met the above conditions, it sends one final
 AckNack frame back on the channel control stream, unless such a frame
 would be empty of any acks or nacks, and then finishes the channel
-control stream's channel-receiver-to-sender direction.
+control stream's channel-receiver-to-sender direction. After this, the
+receiver ceases to exist.
 
 TODO optimization where we only have to deal with acknacking the message
      frames that actually had attachments
 
 # Cancelling channels
 
+When the sender of a channel cancels a channel, it does so by resetting
+the channel control stream's channel-sender-to-receiver direction. The
+sender should also reset any streams it is using only to send message
+frames for that channel, if it still has potentially live handles to any
+such streams.
 
+When the receiver observes such a resetting, it performs the "abandon
+receiver" procedure.
+
+# Dropping receivers
+
+
+
+# The abandon receiver procedure
+
+The "abandon receiver" procedure is as follows. The receiver sends one
+final AckNack frame back on the channel control stream, which must
+include acks for all unreliable messages frames which been processed and
+not yet acked. Any unreliable message frames not yet processed at this
+point should be nacked immediately, without waiting for a delay. This
+final AckNack frame does not have to include nacks except as necessary
+to encode acks. The receiver may skip sending the final AckNack frame if
+it would not contain any acks. Then, the receiver sends an
+AbandonReceiver frame on the channel control stream. The AbandonReceiver
+frame also contains ack and nack ranges in a way similar to an AckNack
+frame, except for reliable messages instead of unreliable messages. All
+reliable message frames which have been processed at this point must be
+acked via the AbandonReceiver frame, and any not yet received at that
+point may be nacked, but may be not nacked except as necessary to encode
+acks. After this, the receiver finishes the channel control stream's
+channel-receiver-to-sender direction, and then the receiver ceases to
+exist.
+
+NEEDS WORK elaborate about the race conditions in the above paragraph
+           and how overall things here aren't a problem.
+
+The abandon receiver procedure may rip a receiver out of the finishing
+state.
 
 TODO cancelling only some messages sent within an unordered stream,
      maybe unreliable too
-
 
 # Error handling
 
