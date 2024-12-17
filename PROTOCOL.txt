@@ -191,7 +191,73 @@ Channel IDs are encoded as var len ints.
 
 # Frames
 
-TODO
+Frames are the unit of the Aqueduct client and server sending each other
+self-contained messages on the wire.
+
+Each frame begins with a "frame type byte", a single byte indicating
+what type of frame it is. Then, it may have further bytes, in accordance
+with logic specific to its frame type.
+
+It is clear from a byte sequence that begins with a frame when that
+frame ends. Thus, it is possible to encode multiple frames back-to-back
+without additional framing.
+
+The client and server must listen to each other for bidirectional QUIC
+streams, unidirectional QUIC streams, and QUIC datagrams. Both the data
+in a stream and the data in a datagram is a sequence of one or more
+frames encoded back-to-back.
+
+If the data in a stream or in a datagram fails to decode as frames,
+that's a protocol violation. If there's extra bytes after the frames,
+that's a protocol violation, although it's unclear what that would even
+mean as both streams and datagrams are allowed to contain multiple
+frames and frames describe their own length implicitly. If a received
+QUIC stream is elegantly finished without at least one full frame being
+received on it, that's a protocol violation. If a received datagram does
+not contain at least one full frame on it, that's a protocol violation.
+
+If multiple frames are received in the same stream or datagram, they
+must be processed in sequence (that is, one after the other, in the
+order they are encoded). To clarify, if a frame results in a message
+being delivered to the application through a channel, there is no
+requirement that the application must process these messages in an order
+consistent with the order the frames were encoded within the same stream
+or datagram. However, there would be a requirement that the Aqueduct
+implementation enqueue these messages into the channel in an order
+consistent with the order of the frames themselves, as the processing
+of a frame which triggers enqueueing a message into an application-
+facing channel would encompass just the enqueueing of the message into
+the channel, and not the dequeueing and processing of the message by the
+application. Frames are abstracted away from the application.
+
+Frames received from different streams or different datagrams may be
+processed in parallel.
+
+Parallelizing parts of the processing of frames within the same stream
+or datagram is permissible only to the extent that it has no possibility
+of meaningfully changing behavior / introducing race conditions.
+
+An Aqueduct implementation does not have to care about whether a frame
+came from some particular stream or datagram, or even whether it came
+from a stream or a datagram, when processing it.
+
+If a QUIC stream is cancelled, the receiving side should disregard any
+partially received frames up to the point of cancellation, and does not
+have to process any frames previously received from that stream if it
+has not already done so.
+
+NOT FINISHED: describe upgrade frames and bidi streams usage
+
+# Frame types
+
+The following frame type bytes and corresponding frame types exist:
+
+NOT FINISHED: Version numbers
+
+- Version
+- ConnectionHeaders
+- Message
+- 
 
 # Connection control stream
 
@@ -251,4 +317,71 @@ protocol error if the server sends a ConnectionHeaders frame on anything
 other than the control stream, as the second frame on that stream,
 wherein the first frame on that stream is a Version frame.
 
+# Senders and receivers
 
+At a given point in time, the client and the server both have a set of
+senders and receivers. As an intuition, this roughly represents the set
+of channels that they think exist.
+
+Each sender / receiver uniquely corresponds to a channel ID. It is a
+protocol violation if something would trigger the creation of a sender
+on the client for which the channel ID indicates that the client should
+be the receiver, or vice versa for receivers, or vice versa for servers.
+
+When the client first initializes, it begins with a single sender, for
+the entrypoint channel, and no receivers. When the server first
+initializes, it begins with no senders or receivers. After the server
+processes the client's ConnectionHeaders, it creates a receiver for the
+entrypoint channel.
+
+# Sending messages
+
+On either side, the application can send a message on a channel for
+which a sender exists on that side. It does so by sending a message
+frame. It may send multiple message frames on the same unidirectional
+stream to send them in an ordered fashion, or on different
+unidirectional streams to send them in an unordered fashion, or in
+datagrams to send them in an unreliable fashion.
+
+It is a protocol error to send message frames on a control stream. It is
+a protocol error to send message frames on a bidirectional stream.
+
+# Receiving messages
+
+When a message frame is received and processed, a receiver for its
+channel is created if one does not already exist. Then, the message is
+enqueued for delivery to the application on that channel.
+
+For every channel attached to the message, the side receiving the
+message creates a sender or receiver for the attachment's channel ID,
+depending on whether the channel ID indicates that the side that
+received the message should have the sender or the receiver for the
+attached channel, if such a sender or receiver does not already exist.
+
+When the received message's payload is conveyed to the application, its
+attachments (senders and receivers) should also be conveyed with it.
+Attached senders should be conveyed in a way that allows the application
+to send messages on the channel of the attached sender, and which
+facilitates the sender being closed once the application is done with
+it. Attached receivers should be conveyed in a way that allows further
+messages received on the channel of the attached receiver to be conveyed
+to the application such that the application can tell that they have
+been received on that channel, and which facilitates the receiver being
+closed once the application is done with it.
+
+The Aqueduct implementation should take care to ensure that a received
+message which contains senders / receivers which the application did not
+expect to be there is not a hazard for causing a memory leak, such as by
+making it so that any senders / receivers that the receiving
+application's deserialization logic does not claim ownership of are
+automatically closed, or that their presence triggers some exception
+handling logic that otherwise prevents this from being a problem.
+
+# Channel control streams
+
+
+
+# Error handling
+
+Upon encountering a protocol error, the QUIC connection should be
+immediately closed.
