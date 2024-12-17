@@ -39,6 +39,18 @@ promise to actually going through with it.
 - Stream: A QUIC byte stream.
 - Bidirectional / Unidirectional stream: Streams being bidirectional or
   unidirectional is a feature of QUIC streams, provided by QUIC.
+- Finishing a stream: QUIC has a feature where a stream can be
+  "finished". This represents a graceful closing of the stream, in which
+  all bytes sent will be retransmitted as necessary until the reader
+  reads all bytes from the stream, after which the reader observes that
+  the stream has finished. In a bidirectional stream, both sides can be
+  finished independently. Not to be confused with finishing a channel.
+- Resetting a stream: QUIC has a feature where a stream can be "reset".
+  This represents an abrupt closing of the stream, in which the reader
+  observes that the stream was reset as soon as possible, and any bytes
+  buffered, in-transmit, or needing of retransmission are abandoned. In
+  a bidirectional stream, both sides can be reset independently. The
+  analogous concept for channels is cancelling the channel.
 - Datagram: A QUIC unreliable datagram, as per the QUIC unreliable
   datagram extension first standardized in RFC 9221.
 - Connection: An Aqueduct connection between two sides of the Aqueduct
@@ -57,6 +69,17 @@ promise to actually going through with it.
 - Attachment: A relationship between a message and a channel, wherein a
   new channel may be created by attaching it to a message that is sent
   on an existing channel.
+- Finishing a channel: Aqueduct has a feature where a channel can be
+  "finished". This represents a graceful closing of the channel, in
+  which all messages sent reliably will be received, and all messages
+  sent unreliable will be given a reasonable chance to be received,
+  after which the receiver observes that the channel has finished. Not
+  to be confused with finishing a stream.
+- Cancelling a channel: Aqueduct has a feature where a sender can
+  "cancel" a channel. This represents an abrupt closing of the channel,
+  in which the receiver observes that the channel was cancelled as soon
+  as possible, and any messages not yet received are abandoned. The
+  analogous concept for streams is resetting the stream.
 - Frame: A unit of Aqueduct protocol communication, written by one side
   of the Aqueduct connection to a stream or datagram and read by the
   other side, without being exposed to the application.
@@ -241,8 +264,8 @@ An Aqueduct implementation does not have to care about whether a frame
 came from some particular stream or datagram, or even whether it came
 from a stream or a datagram, when processing it.
 
-If a QUIC stream is cancelled, the receiving side should disregard any
-partially received frames up to the point of cancellation, and does not
+If a QUIC stream is reset, the receiving side should disregard any
+partially received frames up to the point of resetting, and does not
 have to process any frames previously received from that stream if it
 has not already done so.
 
@@ -466,6 +489,11 @@ from the possibility of an unreliable or other message being received in
 duplicate, as the QUIC protocol prevents that from happening.
 
 # Closing channels
+
+When the receiver of a channel finishes a channel, it does so by sending
+a FinishSender frame on the channel control stream. This includes the
+message
+
 
 # Error handling
 
