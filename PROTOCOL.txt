@@ -53,16 +53,26 @@ as-soon-as-possible abandonment of all sent sent on the channel, even
 currently buffered messages. This is implemented in an efficient way by
 using QUIC's stream resetting functionality
 
-An Aqueduct connection starts with a single channel, going from the
-client to the server. Subsequent channels, in either direction, are
-created by "attaching" a sender or receiver for the channel to a message
-sent on a different channel. This is analogous to how, when using
-message channels within a process, such as within Tokio, one can send a
-message that has other senders and receivers as fields within it.
+An Aqueduct connection starts with a single "entrypoing channel", going
+from the client to the server. Subsequent channels, in either direction,
+are created by "attaching" a sender or receiver for the channel to a
+message sent on a different channel. This is analogous to how, when
+using message channels within a process, such as within Tokio, one can
+send a message that has other senders and receivers as fields within it.
 Aqueduct implementations facilitate serialization systems that know not
 only how to (de)serialize the binary payload of a message, but also how
 to attach/detach sender/receiver attachments from the message, to create
 a seamless experience for networked channels.
+
+When the Aqueduct client and server initialize, their applications have
+the ability to exchange multimaps of headers, similar to HTTP or Email
+headers. The addition of this feature is inspired by Gordon Brander's
+essay "If headers did not exist, it would be necessary to invent them"
+[1]. The main excepted use case is for the client and server's
+serialization middleware to use headers to agree on a serialization
+format. They may be useful for other things too, such as telemetry.
+
+[1]: https://newsletter.squishy.computer/p/if-headers-did-not-exist-it-would
 
 # 2.2 The distributed algorithm
 
