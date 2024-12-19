@@ -62,7 +62,7 @@ message that has other senders and receivers as fields within it.
 Aqueduct implementations facilitate serialization systems that know not
 only how to (de)serialize the binary payload of a message, but also how
 to attach/detach sender/receiver attachments from the message, to create
-a seamless experience.
+a seamless experience for networked channels.
 
 # 2.2 The distributed algorithm
 
@@ -80,10 +80,13 @@ there are various ways a message sent may fail to be delivered: if the
 channel it was sent on was cancelled, or if it was intentionally sent in
 an unreliable datagram and then the datagram was lost, or if the
 receiver was dropped. This can cause complications if the lost message
-had new channels attached to it. These complications are compounded by
-the facts that 1. messages sent on a channel may arrive before the
-message the channel's receiver was attached to arrives 2. QUIC
-guarantees no time bound on how late a stream or datagram may arrive.
+had new channels attached to it. If a message with an attached channel
+is lost, then all messages sent in that new channel are lost. Those
+message could, in turn, have more channels attached to them. These
+complications are exacerbated by the facts that 1. messages sent on a
+channel may arrive before the message the channel's receiver was
+attached to arrives 2. QUIC guarantees no time bound on how late a
+stream or datagram may arrive.
 
 Each channel is identified by a channel ID, which encodes the direction
 the channel is flowing (which side of the connection has the sender and
@@ -130,11 +133,10 @@ not currently have a receiver for the channel, it automatically creates
 one (and thus creates a channel control stream). The happy path is that
 this occurs because the channel-creating message has not yet arrived.
 However, it may also be the case the the channel-creating message has
-been or will be lost, or that the channel has already shut down past a
-certain point and that the current message is simply arriving late. In
-the case of late arrivals, this can result in "ghost receivers" for a
-channel being created after the real receiver has already been
-discarded.
+been or will be lost, or that the channel has already shut down and that
+the current message is simply arriving late. In the case of late
+arrivals, this can result in "ghost receivers" for a channel being
+created after the real receiver has already been discarded.
 
 When one side receives the creation of a channel control stream for an
 outgoing channel, it attempts to find a local sender that does not yet
@@ -142,14 +144,15 @@ have a channel control stream, and installs the new stream as its
 channel control stream. This is the happy path.
 
 If that happens but the local sender cannot be found, it assumes that
-the channel control stream was created by a ghost receiver, and sends
-a NoChannel response which triggers the receiver to discard its state.
+the channel control stream was created by a ghost receiver, and resets
+the channel control stream which triggers the receiver to discard its
+state.
 
 If that happens and the local sender can be found, but the local sender
 already has a channel control stream, it assumes that the new channel
 control stream was created by a ghost receiver in a way that has raced
 with the distributed shutdown of the real sender and receiver, and thus
-also sends a NoChannel response.
+also resets the new channel control stream.
 
 The "ghost receiver" problem doesn't occur for channels where the side
 creating the channel attached the sender to another message and created
@@ -162,7 +165,7 @@ reasonable amount of time. When a sender initiates graceful shutdown, it
 tells the receiver the final set of all messages it's sent, so that the
 receiver can wait to receive all reliable messages, and wait a
 reasonable amount of time to receive all unreliable messages. The
-closing of the receiver may be initiated by the channel gracefully
+closing of the receiver can be initiated by the channel gracefully
 finishing, by the sender cancelling the channel, or by the receiver-side
 application. When this occurs, the receiver acks and nacks the final set
 of messages received, then discards the receiver. Discarding the
@@ -176,8 +179,33 @@ NEEDS WORK what if that ^ happens without chan ctrl stream
            the flip side even true?
 
 After one side sends a message with an attached receiver, if the message
-with the attachment is declared lost (e.g. due to it being nacked), it
+with the attachment is declared lost (e.g. due to it being nacked), that
+side discards its local sender for the new channel. If that sender has a
+channel control stream attached, it resets it, triggering the receiver
+to discard its state. If not, the discarding of the sender ensures that
+any future attempt by the remote side to create the channel control
+stream will be responded to with resetting.
 
+When this occurs, the sender also has to consider lost all messages
+previously sent on the the sender that was discarded. This may have a
+cascading effect. This can have a cascading effect, as those messages
+may have had receivers attached to them, which would necessitate
+additional senders being discarded, and so on and so forth. The state an
+Aqueduct implementation has to maintain to achieve this forms tree
+structures.
+
+For a message sent to have a chance of being delivered to the remote
+application, it is not only necessary for the message itself to be
+acked, but also, if the local side sent the message on a channel that
+the local side created, for the message which created the channel to be
+acked, and, if the local side sent that message on a channel that the
+local side also created, for the message which created that channel to
+be acked, and so on and so forth until this chain terminates either with
+1. the entrypoint channel, which is special, or 2. an incoming channel.
+The latter case terminates the chain because a message can only be
+received from the remote side if the message was sent by the remote
+application, which implies that whatever message created that channel
+necessarily must have been delivered to the remote application.
 
 
 
