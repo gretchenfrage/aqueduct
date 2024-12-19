@@ -2,7 +2,7 @@ The Aqueduct Protocol Specification
 Pre-Release Version: 0.0.0-AFTER
 ---
 
-# About this document
+# 1. About this document
 
 For pre-1.0 versions of Aqueduct, this document is given the same
 version number as the package itself. Once the package and/or protocol
@@ -28,6 +28,164 @@ on ways we would like to explore potentially enhancing the protocol. A
 TODO comment noting some idea does not constitute a commitment or
 promise to actually going through with it.
 
+# 2. Overview
+
+This is a non-normative section that attempts to give the reader a
+better understanding of how everything in the Aqueudct protocol fits
+together.
+
+# 2.1 Aqueduct from the user's perspective
+
+An Aqueduct connection wraps around a QUIC connection, and utilizes both
+QUIC streams and QUIC datagrams. The main abstraction Aqueduct provides
+is a "channel" of messages within a connection. These messages may be
+conveyed in the same QUIC stream, to deliver them in a reliable and
+ordered fashion, or in many different QUIC streams, to deliver them in
+a reliable but unordered fashion in exchange for reduced head-of-line
+blocking, or in QUIC datagrams, to deliver them in an unreliable and
+unordered fashion, which may be appropriate for real-time media
+streaming or other optimized use-cases.
+
+The sender half of an Aqueduct channel may "finish" the channel,
+representing a graceful end to the data sent on the channel.
+Alternatively, the sender half may "cancel" the channel, representing an
+as-soon-as-possible abandonment of all sent sent on the channel, even
+currently buffered messages. This is implemented in an efficient way by
+using QUIC's stream resetting functionality
+
+An Aqueduct connection starts with a single channel, going from the
+client to the server. Subsequent channels, in either direction, are
+created by "attaching" a sender or receiver for the channel to a message
+sent on a different channel. This is analogous to how, when using
+message channels within a process, such as within Tokio, one can send a
+message that has other senders and receivers as fields within it.
+Aqueduct implementations facilitate serialization systems that know not
+only how to (de)serialize the binary payload of a message, but also how
+to attach/detach sender/receiver attachments from the message, to create
+a seamless experience.
+
+# 2.2 The distributed algorithm
+
+If the QUIC connection as a whole is lost, then the Aqueduct connection
+is lost too. This doesn't complicate the Aqueduct protocol much.
+"Exactly-once message delivery is impossible in a distributed system"--
+coping with this fact is in the domain of opinionated, higher-level
+abstractions that Aqueduct itself can't and shouldn't try to do the work
+of. We do, however, have to be mindful of behavior where only part of
+the Aqueduct connection may fail despite the connection as a whole
+remaining.
+
+Aside from the obvious case of the connection as a whole going down,
+there are various ways a message sent may fail to be delivered: if the
+channel it was sent on was cancelled, or if it was intentionally sent in
+an unreliable datagram and then the datagram was lost, or if the
+receiver was dropped. This can cause complications if the lost message
+had new channels attached to it. These complications are compounded by
+the facts that 1. messages sent on a channel may arrive before the
+message the channel's receiver was attached to arrives 2. QUIC
+guarantees no time bound on how late a stream or datagram may arrive.
+
+Each channel is identified by a channel ID, which encodes the direction
+the channel is flowing (which side of the connection has the sender and
+which the receiver), as well as which side created the channel. In
+combination, these reveal whether the creating side created the channel
+by sending a sender to the other side, or by sending a receiver to the
+other side.
+
+At a given point in time, the state stored by either side of the
+connection includes a mapping from channel ID to sender or receiver
+state for that channel. There is a mechanism by which the sender state
+on one side and the receiver state on the other side for a certain
+channel become connected by a bidirectional QUIC stream, the channel's
+"channel control stream", regardless of how the messages are conveyed.
+This is, of course, subject to edge cases.
+
+One function of the channel control stream is for the sides to agree on
+what exact set of messages sent were or were not delivered. This
+includes not just acks, but committing nacks, where a receiver not only
+states that a message has not been processed, but commits to never
+processing it (in a certain sense) even if it arrives late.
+
+When one side of the connection creates a channel (it sends a message
+with a sender/receiver attached, and locally creates the matching
+receiver/sender), it is the other side of the connection that creates
+the channel control stream, at the same time that something triggers it
+to create its sender/receiver for the channel.
+
+The side that created the channel cannot discard its sender/receiver
+state until either its channel control stream appears or the message
+its receiver/sender was attached to is declared lost, to ensure proper
+shutdown can be performed.
+
+When one side sends a message with a new receiver attached, and locally
+creates the corresponding sender, it can begin sending messages on the
+new channel immediately. This minimizes latency. However, this also
+means that messages it sent on the new channel might arrive before the
+message the new channel was attached to does, or even arrive despite
+the message the new channel was attached to being lost.
+
+When one side of a connection receives a message sent on a channel for
+which the channel was created by the remote side, if the local side does
+not currently have a receiver for the channel, it automatically creates
+one (and thus creates a channel control stream). The happy path is that
+this occurs because the channel-creating message has not yet arrived.
+However, it may also be the case the the channel-creating message has
+been or will be lost, or that the channel has already shut down past a
+certain point and that the current message is simply arriving late. In
+the case of late arrivals, this can result in "ghost receivers" for a
+channel being created after the real receiver has already been
+discarded.
+
+When one side receives the creation of a channel control stream for an
+outgoing channel, it attempts to find a local sender that does not yet
+have a channel control stream, and installs the new stream as its
+channel control stream. This is the happy path.
+
+If that happens but the local sender cannot be found, it assumes that
+the channel control stream was created by a ghost receiver, and sends
+a NoChannel response which triggers the receiver to discard its state.
+
+If that happens and the local sender can be found, but the local sender
+already has a channel control stream, it assumes that the new channel
+control stream was created by a ghost receiver in a way that has raced
+with the distributed shutdown of the real sender and receiver, and thus
+also sends a NoChannel response.
+
+The "ghost receiver" problem doesn't occur for channels where the side
+creating the channel attached the sender to another message and created
+the receiver locally.
+
+The sender half of a channel continuously tells the receiver the set of
+unreliable messages it's sent, via the channel control stream, so that
+the receiver can nack unreliable messages that haven't arrived in a
+reasonable amount of time. When a sender initiates graceful shutdown, it
+tells the receiver the final set of all messages it's sent, so that the
+receiver can wait to receive all reliable messages, and wait a
+reasonable amount of time to receive all unreliable messages. The
+closing of the receiver may be initiated by the channel gracefully
+finishing, by the sender cancelling the channel, or by the receiver-side
+application. When this occurs, the receiver acks and nacks the final set
+of messages received, then discards the receiver. Discarding the
+receiver ensures that any late-arriving messages on the channel will be,
+at most, enqueued into a ghost receiver which gets discarded after a
+round trip. Thus, the effect is similar to nacking all possible future
+messages on the channel.
+
+NEEDS WORK what if that ^ happens without chan ctrl stream 
+           is the thing about ghost receiver not being a problem for
+           the flip side even true?
+
+After one side sends a message with an attached receiver, if the message
+with the attachment is declared lost (e.g. due to it being nacked), it
+
+
+
+
+
+
+
+
+
 # Glossary
 
 - Aqueduct: This protocol.
@@ -48,7 +206,7 @@ promise to actually going through with it.
 - Resetting a stream: QUIC has a feature where a stream can be "reset".
   This represents an abrupt closing of the stream, in which the reader
   observes that the stream was reset as soon as possible, and any bytes
-  buffered, in-transmit, or needing of retransmission are abandoned. In
+  buffered, in-transit, or needing of retransmission are abandoned. In
   a bidirectional stream, both sides can be reset independently. The
   analogous concept for channels is cancelling the channel.
 - Datagram: A QUIC unreliable datagram, as per the QUIC unreliable
@@ -72,7 +230,7 @@ promise to actually going through with it.
 - Finishing a channel: Aqueduct has a feature where a channel can be
   "finished". This represents a graceful closing of the channel, in
   which all messages sent reliably will be received, and all messages
-  sent unreliable will be given a reasonable chance to be received,
+  sent unreliably will be given a reasonable chance to be received,
   after which the receiver observes that the channel has finished. Not
   to be confused with finishing a stream.
 - Cancelling a channel: Aqueduct has a feature where a sender can
@@ -90,10 +248,10 @@ Aqueduct runs on top of QUIC. In this document, "streams" refers to QUIC
 streams, whereas "channels" refers to Aqueduct channels. QUIC datagrams
 are also used.
 
-Servers and client must accept datagrams (they must have enabled the
+Servers and clients must accept datagrams (they must have enabled the
 QUIC unreliable datagram extension first standardized in RFC 9221). If
 they do not, they are not compliant Aqueduct implementations, and this
-may be treated as a protocol error.
+must be treated as a protocol error.
 
 TODO: Fallback to TCP or WebSocket for situations where the network
       refuses to carry UDP packets.
@@ -112,6 +270,9 @@ If a handle to a stream opened in 0-RTT mode is being held somewhere in
 Aqueduct's state, and Aqueduct is forced is re-transmit the buffered
 data in a new 1-RTT stream as described above, it must replace the old
 stream with the new one at the place where it's storing it in its state.
+Anything in the Aqueduct protocol which states something along the lines
+of some data only being allowed to be sent once, does not apply to the
+retransmission of 0-RTT data in a 1-RTT stream as described above.
 
 Clients should remember address validation tokens from NEW_TOKEN frames
 and use them when making 0-RTT requests if able. Transmitting 0-RTT data
@@ -204,10 +365,10 @@ Each (networked) channel and oneshot channel within a connection has a
 
 When channel IDs are minted, the side minting them assigns them channel
 idxs seqeuentially within their index space, which is defined by the
-other 3 bits, starting at 0.
+first 3 bits, starting at 0.
 
 The channel ID which consists entirely of zeroes (flowing towards
-server, created by client, not oneshot index 0) is considered the
+server, created by client, not oneshot, index 0) is considered the
 "entrypoint channel" and treated specially in some cases.
 
 Channel IDs are encoded as var len ints.
@@ -246,12 +407,13 @@ being delivered to the application through a channel, there is no
 requirement that the application must process these messages in an order
 consistent with the order the frames were encoded within the same stream
 or datagram. However, there would be a requirement that the Aqueduct
-implementation enqueue these messages into the channel in an order
-consistent with the order of the frames themselves, as the processing
-of a frame which triggers enqueueing a message into an application-
-facing channel would encompass just the enqueueing of the message into
-the channel, and not the dequeueing and processing of the message by the
-application. Frames are abstracted away from the application.
+implementation enqueue these messages for delivery to the application in
+an order consistent with the order of the frames themselves, as the
+processing of a frame which triggers enqueueing a message into an
+application-facing channel would encompass just the enqueueing of the
+message for delivery to the application, and not the dequeueing and
+processing of the message by the application. Frames are abstracted away
+from the application.
 
 Frames received from different streams or different datagrams may be
 processed in parallel.
@@ -269,18 +431,21 @@ partially received frames up to the point of resetting, and does not
 have to process any frames previously received from that stream if it
 has not already done so.
 
-NOT FINISHED: describe upgrade frames and bidi streams usage
-
 # Frame types
 
 The following frame type bytes and corresponding frame types exist:
 
-NOT FINISHED: Version numbers
+NOT FINISHED: frame type bytes
 
 - Version
-- ConnectionHeaders
 - Message
-- 
+- ConnectionControl
+- ChannelControl
+- RejectChannelControl
+- SentUnreliable
+- AckNackUnreliable
+- FinishSender
+- AbandonReceiver
 
 # Connection control stream
 
@@ -306,7 +471,7 @@ connection.
 The client may begin sending message frames to the server before it
 receives the server's connection headers. This avoids adding a round
 trip to connection start-up time. However, until the client receives the
-server's connection headers, it encode a Version frame as the first
+server's connection headers, it must encode a Version frame as the first
 frame on any stream or datagram on which it is encoding other frames.
 This helps protect the client from accidentally sending data to a server
 which is not an Aqueduct server in a way the server could misinterpret,
@@ -327,7 +492,7 @@ sending data by other means.
 
 A connection only has 1 connection control stream, and it lasts as long
 as the connection. It is a protocol error if the connection control
-stream is closed or finished. The client and the server both send a
+stream is reset or finished. The client and the server both send a
 ConnectionHeaders frame exactly once, on the connection control stream.
 The server identifies the connection control stream by it being a
 bidirectional stream opened by the client that begins with a Version
@@ -392,16 +557,18 @@ to the application such that the application can tell that they have
 been received on that channel, and which facilitates the receiver being
 closed once the application is done with it.
 
-The Aqueduct implementation should take care to ensure that a received
+The Aqueduct implementation must take care to ensure that a received
 message which contains senders / receivers which the application did not
-expect to be there is not a hazard for causing a memory leak, such as by
-making it so that any senders / receivers that the receiving
+expect to be there is not a hazard for causing a resource leak, such as
+by making it so that any senders / receivers that the receiving
 application's deserialization logic does not claim ownership of are
 automatically closed, or that their presence triggers some exception
 handling logic that otherwise prevents this from being a problem.
 
 It is a protocol error to attach the same channel to multiple different
 messages.
+
+TODO maybe that last thing... should just be straight-up allowed?
 
 # Channel control streams
 
@@ -485,8 +652,8 @@ When the receiver side of a channel control stream receives a
 SentUnreliable frame, it must ack or nack all unreliable messages sent
 up to the message number it was raised to after a reasonable loss-
 detection delay after the SentUnreliable frame was received, such as 1
-second or twice the estimated RTT. It does so by sending an AckNack
-frame back on the channel control stream.
+second or twice the estimated RTT. It does so by sending an
+AckNackUnreliable frame back on the channel control stream.
 
 TODO nagling-inspired thing instead of arbitrarily chosen durations?
 
@@ -520,10 +687,10 @@ receiver would've been willing to nack them under logic equivalent to
 the logic by which the receiver handles SentUnreliable frames.
 
 Once the receiver has met the above conditions, it sends one final
-AckNack frame back on the channel control stream, unless such a frame
-would be empty of any acks or nacks, and then finishes the channel
-control stream's channel-receiver-to-sender direction. After this, the
-receiver ceases to exist.
+AckNackUnreliable frame back on the channel control stream, unless such
+a frame would be empty of any acks or nacks, and then finishes the
+channel control stream's channel-receiver-to-sender direction. After
+this, the receiver ceases to exist.
 
 TODO optimization where we only have to deal with acknacking the message
      frames that actually had attachments
@@ -548,22 +715,22 @@ receiver must perform the "abandon receiver" procedure.
 # The abandon receiver procedure
 
 The "abandon receiver" procedure is as follows. The receiver sends one
-final AckNack frame back on the channel control stream, which must
-include acks for all unreliable messages frames which been processed and
-not yet acked. Any unreliable message frames not yet processed at this
-point should be nacked immediately, without waiting for a delay. This
-final AckNack frame does not have to include nacks except as necessary
-to encode acks. The receiver may skip sending the final AckNack frame if
-it would not contain any acks. Then, the receiver sends an
-AbandonReceiver frame on the channel control stream. The AbandonReceiver
-frame also contains ack and nack ranges in a way similar to an AckNack
-frame, except for reliable messages instead of unreliable messages. All
-reliable message frames which have been processed at this point must be
-acked via the AbandonReceiver frame, and any not yet received at that
-point may be nacked, but may be not nacked except as necessary to encode
-acks. After this, the receiver finishes the channel control stream's
-channel-receiver-to-sender direction, and then the receiver ceases to
-exist.
+final AckNackUnreliable frame back on the channel control stream, which
+must include acks for all unreliable messages frames which been
+processed and not yet acked. Any unreliable message frames not yet
+processed at this point should be nacked immediately, without waiting
+for a delay. This final AckNackUnreliable frame does not have to include
+nacks except as necessary to encode acks. The receiver may skip sending
+the final AckNackUnreliable frame if it would not contain any acks.
+Then, the receiver sends an AbandonReceiver frame on the channel control
+stream. The AbandonReceiver frame also contains ack and nack ranges in a
+way similar to an AckNackUnreliable frame, except for reliable messages
+instead of unreliable messages. All reliable message frames which have
+been processed at this point must be acked via the AbandonReceiver
+frame, and any not yet received at that point may be nacked, but may be
+not nacked except as necessary to encode acks. After this, the receiver
+finishes the channel control stream's channel-receiver-to-sender
+direction, and then the receiver ceases to exist.
 
 NEEDS WORK elaborate about the race conditions in the above paragraph
            and how overall things here aren't a problem.
@@ -573,6 +740,52 @@ state.
 
 TODO cancelling only some messages sent within an unordered stream,
      maybe unreliable too
+
+# Race conditions
+
+This is a non-normative section of the protocol specification that
+clarifies how various parts of the system fit together to avoid certain
+race conditions.
+
+At a given point in time, both sides of the connection have some set of
+senders and receivers. These correspond to channel IDs. A receiver
+always has a channel control stream attached to it, whereas a sender
+sometimes comes into existence without a channel control stream
+attached, and gets one attached later in response to a receiver on the
+other end creating one.
+
+Either side of the connection can send messages for any sender it has,
+excepting senders in some sort of shutting down state. A message frame
+may be lost in transit (despite the connection as a whole remaining
+live), either because it was sent on a stream and the stream was
+cancelled, or because it was sent on a datagram and the datagram was
+lost. The channel control stream involves logic relating to informing
+the sender of the exact set of messages that were received or lost.
+
+A message sent is sent on a channel ID. Moreover, a message can contain
+a collection of attached senders and receivers, each represented by a
+channel ID. The bit in an attached channel ID that indicates which side
+minted the channel ID always is the side sending the message with the
+attachment, and the bit indicating which direction the channel is
+flowing in is used to deduce whether it was the sender or receiver that
+was attached to the message.
+
+A sender or receiver can come into existence in these ways:
+
+- The entrypoint sender comes into existence in the client when the
+  client first initializes.
+- The entrypoint receiver comes into existence in the server when the
+  server processes the client's ConnectionControl frame.
+- When a side of the connection sends a message with a sender / receiver
+  attached to it, it mints a channel ID for the attached sender /
+  receiver, and locally creates a corresponding receiver / sender.
+- When a side of the connection receives a message with a sender /
+  receiver attached to it, it locally creates the corresponding sender /
+  receiver, if one does not yet exist.
+- When a side of the connection receives a message, it locally creates a
+  receiver for the channel ID the message was sent on, if one does not
+  yet exist.
+- 
 
 # Error handling
 
