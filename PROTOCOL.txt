@@ -229,8 +229,8 @@ received from the remote side if the message was sent by the remote
 application, which implies that whatever message created that channel
 necessarily must have been delivered to the remote application.
 
-Each sender can maintain a boolean variable called "visible". If this is
-true, it indicates that either the corresponding receiver either has
+Each sender can maintain a boolean variable called "reachable". If this
+is true, it indicates that either the corresponding receiver either has
 been given to the remote application, or could immediately be taken by
 the remote application if it performed the necessary sequence of
 dequeueing messages from receivers. For the entrypoint sender as well as
@@ -242,15 +242,15 @@ Whenever a sender is used to send a message which has an additional
 sender/receiver attached, the Aqueduct implementation makes a link from
 the original sender to the subsequentially locally created
 receiver/sender. It keeps this link until either the message is nacked,
-or the message is both acked and the original sender's "visible"
+or the message is both acked and the original sender's "reachable"
 variable becomes true. If the message is nacked, all linked senders and
 receivers are reset and discarded. If a linked sender had any links for
 any messages whatsoever, those links are also traversed in the same way.
 On the other hand, when it becomes true that both a message is acked and
-the sender it was sent on becomes visible, then all linked senders
-are marked as visible, which itself may trigger a recursive process if
+the sender it was sent on becomes reachable, then all linked senders
+are marked as reachable, which itself may trigger a recursive process if
 those senders already have acked messages. It is not necessary for a
-"visible" variable to be held for receivers.
+"reachable" variable to be held for receivers.
 
 If this cleanup process did not exist, these problems would occur:
 
@@ -261,14 +261,14 @@ If this cleanup process did not exist, these problems would occur:
   which would never be garbage collected.
 
 If this cleanup process did exist, but in a more limited form, without
-the "visible" variable or properly implemented recursive cascading, such
-that a message with attachment's links were always discarded immediately
-upon it being acked, it would actually sort of technically work, but it
-would be problematic. The cascading of noticing that there was an
-upstream loss-in-transit from a sender with previously acked messages
-with attachments to its attached senders/receivers would still occur,
-since the fact that the sender had acked messages implies that its
-control stream is already attached, which means it would reset its
+the "reachable" variable or properly implemented recursive cascading,
+such that a message with attachment's links were always discarded
+immediately upon it being acked, it would actually sort of technically
+work, but it would be problematic. The cascading of noticing that there
+was an upstream loss-in-transit from a sender with previously acked
+messages with attachments to its attached senders/receivers would still
+occur, since the fact that the sender had acked messages implies that
+its control stream is already attached, which means it would reset its
 control stream, triggering the remote side to discard its enqueued
 messages, triggering the destructors for any attachments they had
 attached, triggering the closing of the channels from the remote side,
