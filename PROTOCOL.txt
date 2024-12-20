@@ -109,7 +109,7 @@ combination, these reveal whether the creating side created the channel
 by sending a sender to the other side, or by sending a receiver to the
 other side.
 
-# 2.3.3 Sender, receiver, channel control stream
+# 2.3.3 Channel control stream
 
 At a given point in time, the state stored by either side of the
 connection includes a mapping from channel ID to sender or receiver
@@ -119,15 +119,11 @@ channel become connected by a bidirectional QUIC stream, the channel's
 "channel control stream", regardless of how the messages are conveyed.
 This is, of course, subject to edge cases.
 
-# 2.3.4 Acks and nacks
-
 One function of the channel control stream is for the sides to agree on
 what exact set of messages sent were or were not delivered. This
 includes not just acks, but committing nacks, where a receiver not only
 states that a message has not been processed, but commits to never
 processing it (in a certain sense) even if it arrives late.
-
-# 2.3.5 Lifecycle of the channel control stream
 
 When one side of the connection creates a channel (it sends a message
 with a sender/receiver attached, and locally creates the matching
@@ -193,6 +189,14 @@ receiver ensures that any late-arriving messages on the channel will be,
 at most, enqueued into a ghost receiver which gets discarded after a
 round trip. Thus, the effect is similar to nacking all possible future
 messages on the channel.
+
+The sender half of a channel also continuously tells the receiver the
+set of reliable messages it's sent, and the receiver acks them. However,
+this is cheaper and simpler for reliable messages, as reliable messages
+won't be nacked until and unless the channel is closed abruptly. The
+only reason why it's necessary to ack reliable messages that are sent
+reliably before the channel closes is to prevent state necessary to
+handle channels lost in transit from growing unboundedly.
 
 # 2.3.6 Channels lost in transit
 
