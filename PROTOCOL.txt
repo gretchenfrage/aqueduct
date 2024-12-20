@@ -76,6 +76,8 @@ format. They may be useful for other things too, such as telemetry.
 
 # 2.2 The distributed algorithm
 
+# 2.3.1 Why this is non-trivial
+
 If the QUIC connection as a whole is lost, then the Aqueduct connection
 is lost too. This doesn't complicate the Aqueduct protocol much.
 "Exactly-once message delivery is impossible in a distributed system"--
@@ -98,12 +100,16 @@ channel may arrive before the message the channel's receiver was
 attached to arrives 2. QUIC guarantees no time bound on how late a
 stream or datagram may arrive.
 
+# 2.3.2 Channel IDs
+
 Each channel is identified by a channel ID, which encodes the direction
 the channel is flowing (which side of the connection has the sender and
 which the receiver), as well as which side created the channel. In
 combination, these reveal whether the creating side created the channel
 by sending a sender to the other side, or by sending a receiver to the
 other side.
+
+# 2.3.3 Sender, receiver, channel control stream
 
 At a given point in time, the state stored by either side of the
 connection includes a mapping from channel ID to sender or receiver
@@ -113,11 +119,15 @@ channel become connected by a bidirectional QUIC stream, the channel's
 "channel control stream", regardless of how the messages are conveyed.
 This is, of course, subject to edge cases.
 
+# 2.3.4 Acks and nacks
+
 One function of the channel control stream is for the sides to agree on
 what exact set of messages sent were or were not delivered. This
 includes not just acks, but committing nacks, where a receiver not only
 states that a message has not been processed, but commits to never
 processing it (in a certain sense) even if it arrives late.
+
+# 2.3.5 Lifecycle of the channel control stream
 
 When one side of the connection creates a channel (it sends a message
 with a sender/receiver attached, and locally creates the matching
@@ -184,25 +194,23 @@ at most, enqueued into a ghost receiver which gets discarded after a
 round trip. Thus, the effect is similar to nacking all possible future
 messages on the channel.
 
-NEEDS WORK what if that ^ happens without chan ctrl stream 
-           is the thing about ghost receiver not being a problem for
-           the flip side even true?
+# 2.3.6 Channels lost in transit
 
-After one side sends a message with an attached receiver, if the message
-with the attachment is declared lost (e.g. due to it being nacked), that
-side discards its local sender for the new channel. If that sender has a
-channel control stream attached, it resets it, triggering the receiver
-to discard its state. If not, the discarding of the sender ensures that
+After one side sends a message with an attached receiver/sender, if the
+message with the attachment is declared lost (e.g. due to it being
+nacked), that side discards its local sender/receiver for the new
+channel. If that sender/receiver has a channel control stream attached,
+it resets it, triggering the remote receiver/sender to discard its
+state. If not, the discarding of the local sender/receiver ensures that
 any future attempt by the remote side to create the channel control
 stream will be responded to with resetting.
 
-When this occurs, the sender also has to consider lost all messages
-previously sent on the the sender that was discarded. This may have a
-cascading effect. This can have a cascading effect, as those messages
-may have had receivers attached to them, which would necessitate
-additional senders being discarded, and so on and so forth. The state an
-Aqueduct implementation has to maintain to achieve this forms tree
-structures.
+If this occurs specifically with the local side being a sender, the
+local side also has to consider lost all messages previously sent on the
+sender. This can have a cascading effect, as those messages may have had
+receivers attached to them, which would necessitate additional senders
+being discarded, and so on and so forth. The state an Aqueduct
+implementation has to maintain to achieve this forms tree structures.
 
 For a message sent to have a chance of being delivered to the remote
 application, it is not only necessary for the message itself to be
@@ -217,8 +225,57 @@ received from the remote side if the message was sent by the remote
 application, which implies that whatever message created that channel
 necessarily must have been delivered to the remote application.
 
+Each sender can maintain a boolean variable called "visible". If this is
+true, it indicates that either the corresponding receiver either has
+been given to the remote application, or could immediately be taken by
+the remote application if it performed the necessary sequence of
+dequeueing messages from receivers. For the entrypoint sender as well as
+senders received from the remote side, this initializes as true, whereas
+for senders created by sending a receiver to the remote side, this
+initializes as false.
 
+Whenever a sender is used to send a message which has an additional
+sender/receiver attached, the Aqueduct implementation makes a link from
+the original sender to the subsequentially locally created
+receiver/sender. It keeps this link until either the message is nacked,
+or the message is both acked and the original sender's "visible"
+variable becomes true. If the message is nacked, all linked senders and
+receivers are reset and discarded. If a linked sender had any links for
+any messages whatsoever, those links are also traversed in the same way.
+On the other hand, when it becomes true that both a message is acked and
+the sender it was sent on becomes visible, then all linked senders
+are marked as visible, which itself may trigger a recursive process if
+those senders already have acked messages. It is not necessary for a
+"visible" variable to be held for receivers.
 
+If this cleanup process did not exist, these problems would occur:
+
+- Local senders/receivers would never be garbage collected if the remote
+  receiver/sender was lost in transmit.
+- Messages sent on a sender for which the remote receiver was lost in
+  transit would trigger the creation of an unusable remote receiver
+  which would never be garbage collected.
+
+If this cleanup process did exist, but in a more limited form, without
+the "visible" variable or properly implemented recursive cascading, such
+that a message with attachment's links were always discarded immediately
+upon it being acked, it would actually sort of technically work, but it
+would be problematic. The cascading of noticing that there was an
+upstream loss-in-transit from a sender with previously acked messages
+with attachments to its attached senders/receivers would still occur,
+since the fact that the sender had acked messages implies that its
+control stream is already attached, which means it would reset its
+control stream, triggering the remote side to discard its enqueued
+messages, triggering the destructors for any attachments they had
+attached, triggering the closing of the channels from the remote side,
+which the local side would eventually observe. However, this would
+create suboptimal latency, and require suboptimal amounts of network
+communication. Moreover, it's conceivable that if one side were
+recursively expanding chains of senders faster than this RTT-limited
+emergent failure could collapse them, they could effectively outpace
+the system's ability to detect that they were lost in transmit at an
+upstream point, which could potentially be a nasty emergent failure
+case.
 
 
 
