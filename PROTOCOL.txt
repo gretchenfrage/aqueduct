@@ -252,6 +252,8 @@ are marked as reachable, which itself may trigger a recursive process if
 those senders already have acked messages. It is not necessary for a
 "reachable" variable to be held for receivers.
 
+# 2.3.7 Notes on the necessity of lost-in-transit recursive cleanup
+
 If this cleanup process did not exist, these problems would occur:
 
 - Local senders/receivers would never be garbage collected if the remote
@@ -281,7 +283,73 @@ the system's ability to detect that they were lost in transmit at an
 upstream point, which could potentially be a nasty emergent failure
 case.
 
+# 2.3.8 Late loss-in-transit detection
 
+It is possible for a sender or receiver to be detected as
+lost-in-transit after the local side has already initiated and completed
+a graceful shutdown of the channel, resulting in the channel control
+stream having already deinitialized. If a late loss-in-transit occurs,
+this is conveyed with a message on a different stream, which lets the
+remote side discard any state it is still be holding for the channel
+in the hopes of handing it off to the remote application.
+
+TODO ^-- don't call it that, don't say it must be graceful
+
+# 2.3.9 Errors for lost versus ungracefully closed channels
+
+It would be possible, and in some ways easier, for the error for a
+channel being lost in transit to be the same as the error for the sender
+or receiver being dropped. The reason why they are distinguished is to
+make debugging less confusing.
+
+Some examples for losing a receiver are:
+
+- If a receiver is dropped after being dequeued from another receiver,
+  the remote sender gets a "receiver dropped" error.
+- If a receiver is lost in transit, and thus could not be dequeued from
+  another receiver even if the application drained it empty, the remote
+  sender gets a "lost in transit" error.
+- If a receiver is available to be dequeued from another receiver, and
+  then the application drops the outer receiver without dequeueing the
+  inner receiver, the sender for the inner receiver does still get a
+  "receiver" dropped error rather than a "lost in transit" error.
+
+We'll assume that dropping a sender in these cases causes it to be
+cancelled. Some examples for losing a sender are:
+
+- If a sender is cancelled after being dequeued from a receiver, the
+  remote receiver gets a "cancelled" error.
+- If a sender is lost in transit, and thus could not be dequeued from a
+  receiver even if the application drained it empty, the remote receiver
+  gets a "lost in transit" error.
+- If a receiver is available to be dequeued from another receiver, and
+  then the application drops the receiver without dequeueing the sender,
+  the remote receiver does still get a "cancelled" error rather than a
+  "lost in transit" error.
+
+When resetting a stream, the error code used in the reset is used to
+convey whether this reset is due to loss-in-transit or not. This is
+fundamentally a hint to the application for debugging purposes, and not
+something that's relied on for correctness. Resets are overall handled
+the same regardless of error code, other than the error code being
+threaded through to error values and other resets.
+
+TODO ^-- that's not true
+
+# 2.3.10 Loss of message after ack
+
+It's possible for a message to be received, deserialized, and enqueued
+for delivery to the application, then dropped before the application has
+dequeued it. This can happen due to the channel being cancelled, or due
+to old buffered messages being automatically evicted from an unreliable
+channel. This can also occur for messages after they're enqueued for
+transmission but before they're transmitted or even serialized.
+
+Ideally, an Aqueduct implementation tries to make this appear to the
+other half as a "lost in transit" error rather than the error that would
+occur due to a channel handle being dropped. This might be achievable
+via thread-local variables, set in the channel implementation and read
+by the sender/receiver's destructors.
 
 
 
