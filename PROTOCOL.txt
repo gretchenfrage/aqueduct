@@ -283,17 +283,15 @@ the system's ability to detect that they were lost in transmit at an
 upstream point, which could potentially be a nasty emergent failure
 case.
 
-# 2.3.8 Late loss-in-transit detection
+# 2.3.8 Closed channel loss-in-transit detection
 
 It is possible for a sender or receiver to be detected as
 lost-in-transit after the local side has already initiated and completed
-a graceful shutdown of the channel, resulting in the channel control
-stream having already deinitialized. If a late loss-in-transit occurs,
-this is conveyed with a message on a different stream, which lets the
-remote side discard any state it is still be holding for the channel
-in the hopes of handing it off to the remote application.
-
-TODO ^-- don't call it that, don't say it must be graceful
+a shutdown of the channel, resulting in the channel control stream
+having already deinitialized. If such a "closed channel lost" scenario
+occurs, this is conveyed with a message on a different stream, which
+lets the remote side discard any state it is still be holding for the
+channel in the hopes of handing it off to the remote application.
 
 # 2.3.9 Errors for lost versus ungracefully closed channels
 
@@ -328,13 +326,20 @@ cancelled. Some examples for losing a sender are:
   "lost in transit" error.
 
 When resetting a stream, the error code used in the reset is used to
-convey whether this reset is due to loss-in-transit or not. This is
-fundamentally a hint to the application for debugging purposes, and not
-something that's relied on for correctness. Resets are overall handled
-the same regardless of error code, other than the error code being
-threaded through to error values and other resets.
+convey whether this reset is due to loss-in-transit or not. The
+processing of a stream reset can differ based on the reset code in 2
+ways:
 
-TODO ^-- that's not true
+- The reset code can be threaded through to application-facing errors
+  and other resets.
+- If the reset code indicates a loss, enqueued state which is waiting
+  to be taken by the application is discarded with the understanding
+  that the application would never be able to take it.
+
+There are some situations where a "lost" reset code has to be used to
+prevent a memory leak on the remote side. There are other situations
+where this is not the case, but using a "lost" reset code is still best
+to ensure the remote application receives an appropriate error message.
 
 # 2.3.10 Loss of message after ack
 
