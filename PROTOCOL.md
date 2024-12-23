@@ -446,11 +446,13 @@ TODO: TLS client authentication, both in general, and also getting that
       old client key. Consider whether this has tradeoffs with
       cryptographic forward security and how to navigate those.
 
-## Endianness
+## Encoding
+
+### Endianness
 
 Values are encoded little-endian unless stated otherwise.
 
-## Var len ints
+### Var len ints
 
 Sometimes, a variable length uint encoding is used. An encoded var len
 int always contains at least 1 byte. The lowest 7 bits of the byte
@@ -465,12 +467,12 @@ continues until terminated by an encoded byte with its highest bit being
 encoded in more bytes than necessary, or if it contains more than 64
 bits, excepting unavoidable trailing 0 bits.
 
-## Byte arrays
+### Byte arrays
 
 Sometimes, a var len byte array is encoded. This is encoded as a var len
 int, encoding the length of the array, following by that many bytes.
 
-## Header data
+### Header data
 
 Sometimes, "header data" is encoded. This is encoded as a var len byte
 array. Within the outer var len byte array are 0 or more inner var len
@@ -481,7 +483,7 @@ data is a multimap. It is a protocol error if a key is not an ASCII
 string. A value may be any sequence of bytes. It is a protocol error if
 a key is empty. A value may be empty.
 
-### Recommendations for users utilizing headers
+#### Recommendations for users utilizing headers
 
 The recommended way to choose a name for a header is to use a short but
 descriptive name, followed by a dash, followed by a random 6-digit
@@ -513,7 +515,7 @@ experimental way that's not yet standardized, it's recommended that one
 add a suffix that would prevent such code from being misinterpreted by
 prod code, such as `cbor-b3b650-TEST` or `cbor-b3b650-0.4.0-AFTER`.
 
-## Pos-neg range data
+### Pos-neg range data
 
 Sometimes, "positive negative range data" is encoded. This is encoded as
 a var len byte array which contains 0 or more var len ints encoded
@@ -528,7 +530,7 @@ what the "start" is depends on context. It is a protocol error if any
 int in the sequence is 0, with the exception that the 1st int in the
 sequence may be 0 if there are also other ints after it.
 
-## Channel IDs
+### Channel IDs
 
 Each (networked) channel and oneshot channel within a connection has a
 64-bit channel ID.
@@ -551,7 +553,7 @@ server, created by client, not oneshot, index 0) is considered the
 
 Channel IDs are encoded as var len ints.
 
-## Frames
+### Frames
 
 Frames are the unit of the Aqueduct client and server sending each other
 self-contained messages on the wire.
