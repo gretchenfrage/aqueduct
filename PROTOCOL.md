@@ -33,7 +33,7 @@ promise to actually going through with it.
 # Overview
 
 This is a non-normative section that attempts to give the reader a
-better understanding of how everything in the Aqueudct protocol fits
+better understanding of how everything in the Aqueduct protocol fits
 together.
 
 ## Aqueduct from the user's perspective
