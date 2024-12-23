@@ -511,6 +511,21 @@ experimental way that's not yet standardized, it's recommended that one
 add a suffix that would prevent such code from being misinterpreted by
 prod code, such as `cbor-b3b650-TEST` or `cbor-b3b650-0.4.0-AFTER`.
 
+# 3.7 Pos-neg range data
+
+Sometimes, "positive negative range data" is encoded. This is encoded as
+a var len byte array which contains 0 or more var len ints encoded
+back-to-back. The range of ints from the "start" (inclusive) to the
+start plus the 1st element is considered "positive," and the range of
+ints from the start plus the 1st element to that plus the 2nd element is
+considered "negative", and the range of ints from that to that plus the
+3rd element is considered "positive" again, and the range of ints from
+that to that plus the 4th element is considered "negative" again, and so
+on and so forth. The meaning of "positive" and "negative" as well as
+what the "start" is depends on context. It is a protocol error if any
+int in the sequence is 0, with the exception that the 1st int in the
+sequence may be 0 if there are also other ints after it.
+
 # 3.7. Channel IDs
 
 Each (networked) channel and oneshot channel within a connection has a
@@ -603,7 +618,7 @@ The following frame type bytes and corresponding frame types exist:
 - 8: FinalAckNack
 - 9: ClosedChannelLost
 
-# 3.9.1 Version frames
+# 3.9.1. Version frames
 
 A version frame is encoded as:
 
@@ -622,15 +637,118 @@ A version frame is encoded as:
 It is a protocol error for a Version frame to occur elsewhere than as
 the first frame in its stream or datagram.
 
-# 3.9.2 ConnectionControl frames
+# 3.9.2. ConnectionControl frames
 
 A ConnectionControl frame is encoded as:
 
 - The frame type byte: 1
-- The header data: Either the client or server's header data.
+- The client or server's header data: Header data
 
-#
+# 3.9.3. ChannelControl frames
 
+A ChannelControl frame is encoded as:
+
+- The frame type byte: 2
+- The channel ID: A channel ID
+
+It is a protocol error for a ChannelControl frame to occur elsewhere
+than as the first frame in a bidirectional stream in the direction
+flowing away from the side that created the stream.
+
+# 3.9.4. Message frames
+
+A Message frame is encoded as:
+
+- The frame type byte: 3
+- The channel ID of the channel the message was sent on: A channel ID
+- Message number: A var len int
+
+  Within each channel, there are 2 spaces of message numbers, one for
+  reliable messages, and one for unreliable messages. Message numbers
+  are assigned sequentially by the sender starting at 0 within the space
+  defined by the channel and whether the Message frame is being written
+  to a stream or a datagram.
+- The message payload: A var len byte array
+- The message attachments: A var len byte array, containing 0 or more
+  channel IDs encoded back-to-back.
+
+It is a protocol error for a Message frame to occur in a bidirectional
+stream.
+
+# 3.9.5. SentReliable frames
+
+A SentReliable frame is encoded as:
+
+- The frame type byte: 4
+- The number of messages sent reliably on this channel since the last
+  SentReliable frame on this channel: A var len int
+
+It is a protocol error for a SentReliable frame to occur elsewhere
+than in a channel control stream in the sender-to-receiver direction.
+
+# 3.9.6. SentUnreliable frames
+
+A SentUnreliable frame is encoded as:
+
+- The frame type byte: 5
+- The number of messages sent unreliably on this channel since the last
+  SentUnreliable frame on this channel:  A var len int
+
+It is a protocol error for a SentUnreliable frame to occur elsewhere
+than in a channel control stream in the sender-to-receiver direction.
+
+# 3.9.7. AckReliable frames
+
+An AckReliable frame is encoded as:
+
+- The frame type byte: 6
+- The acks: Pos-neg range data, positive ranges represent acks, negative
+  ranges represent messages not yet being acked or nacked rather than
+  them being nacked, and the start is the highest message number in the
+  channel's reliable message space for which all message numbers less
+  than it have been acked.
+
+It is a protocol error for a AckReliable frame to occur elsewhere than
+in a channel control stream in the receiver-to-sender direction.
+
+# 3.9.8. AckNackUnreliable frames
+
+An AckNackUnreliable frame is encoded as:
+
+- The frame type byte: 7
+- The acks and nacks: Pos-neg range of data, positive ranges represent
+  acks, negative ranges represent nacks, and the start is where the last
+  AckNackUnreliable for this channel left off.
+
+It is a protocol error for a AckNackUnreliable frame to occur elsewhere
+than in a channel control stream in the receiver-to-sender direction.
+
+# 3.9.9. FinalAckNack frames
+
+A FinalAckNack frame is encoded as:
+
+- The frame type byte: 8
+- Final reliable acks and nacks: Pos-neg range data, positive ranges
+  represent acks, negative ranges represent nacks, and the start is the
+  highest message number in the channel's reliable message space for
+  which all message numbers less than it have been acked.
+- Final unreliable acks and nacks: Pos-neg range of data, positive
+  ranges represent acks, negative ranges represent nacks, and the start
+  is where the last AckNackUnreliable for this channel left off.
+
+It is a protocol error for a FinalAckNack frame to occur elsewhere than
+as the final frame in a channel control stream in the receiver-to-sender
+direction.
+
+# 3.9.10. ClosedChannelLost frames
+
+A ClosedChannelLost frame is encoded as:
+
+- The frame type byte: 9
+- The channel ID: A channel ID
+
+It is a protocol error for a ClosedChannelLost frame to occur elsewhere
+than in the connection control stream.
 
 
 
