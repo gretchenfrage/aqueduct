@@ -34,21 +34,21 @@ This is a non-normative section that attempts to give the reader a
 better understanding of how everything in the Aqueudct protocol fits
 together.
 
-# 2.1 Aqueduct from the user's perspective
+# 2.1. Aqueduct from the user's perspective
 
 An Aqueduct connection wraps around a QUIC connection, and utilizes both
 QUIC streams and QUIC datagrams. The main abstraction Aqueduct provides
-is a "channel" of messages within a connection. These messages may be
+is a "channel" of messages within a connection. These messages can be
 conveyed in the same QUIC stream, to deliver them in a reliable and
 ordered fashion, or in many different QUIC streams, to deliver them in
 a reliable but unordered fashion in exchange for reduced head-of-line
 blocking, or in QUIC datagrams, to deliver them in an unreliable and
-unordered fashion, which may be appropriate for real-time media
+unordered fashion, which can be appropriate for real-time media
 streaming or other optimized use-cases.
 
-The sender half of an Aqueduct channel may "finish" the channel,
+The sender half of an Aqueduct channel can "finish" the channel,
 representing a graceful end to the data sent on the channel.
-Alternatively, the sender half may "cancel" the channel, representing an
+Alternatively, the sender half can "cancel" the channel, representing an
 as-soon-as-possible abandonment of all sent sent on the channel, even
 currently buffered messages. This is implemented in an efficient way by
 using QUIC's stream resetting functionality
@@ -70,13 +70,13 @@ headers. The addition of this feature is inspired by Gordon Brander's
 essay "If headers did not exist, it would be necessary to invent them"
 [1]. The main excepted use case is for the client and server's
 serialization middleware to use headers to agree on a serialization
-format. They may be useful for other things too, such as telemetry.
+format. They can be useful for other things too, such as telemetry.
 
 [1]: https://newsletter.squishy.computer/p/if-headers-did-not-exist-it-would
 
-# 2.2 The distributed algorithm
+# 2.2. The distributed algorithm
 
-# 2.3.1 Why this is non-trivial
+# 2.3.1. Why this is non-trivial
 
 If the QUIC connection as a whole is lost, then the Aqueduct connection
 is lost too. This doesn't complicate the Aqueduct protocol much.
@@ -84,11 +84,11 @@ is lost too. This doesn't complicate the Aqueduct protocol much.
 coping with this fact is in the domain of opinionated, higher-level
 abstractions that Aqueduct itself can't and shouldn't try to do the work
 of. We do, however, have to be mindful of behavior where only part of
-the Aqueduct connection may fail despite the connection as a whole
+the Aqueduct connection can fail despite the connection as a whole
 remaining.
 
 Aside from the obvious case of the connection as a whole going down,
-there are various ways a message sent may fail to be delivered: if the
+there are various ways a message sent can fail to be delivered: if the
 channel it was sent on was cancelled, or if it was intentionally sent in
 an unreliable datagram and then the datagram was lost, or if the
 receiver was dropped. This can cause complications if the lost message
@@ -96,11 +96,11 @@ had new channels attached to it. If a message with an attached channel
 is lost, then all messages sent in that new channel are lost. Those
 message could, in turn, have more channels attached to them. These
 complications are exacerbated by the facts that 1. messages sent on a
-channel may arrive before the message the channel's receiver was
+channel can arrive before the message the channel's receiver was
 attached to arrives 2. QUIC guarantees no time bound on how late a
-stream or datagram may arrive.
+stream or datagram can arrive.
 
-# 2.3.2 Channel IDs
+# 2.3.2. Channel IDs
 
 Each channel is identified by a channel ID, which encodes the direction
 the channel is flowing (which side of the connection has the sender and
@@ -109,7 +109,7 @@ combination, these reveal whether the creating side created the channel
 by sending a sender to the other side, or by sending a receiver to the
 other side.
 
-# 2.3.3 Channel control stream
+# 2.3.3. Channel control stream
 
 At a given point in time, the state stored by either side of the
 connection includes a mapping from channel ID to sender or receiver
@@ -148,7 +148,7 @@ which the channel was created by the remote side, if the local side does
 not currently have a receiver for the channel, it automatically creates
 one (and thus creates a channel control stream). The happy path is that
 this occurs because the channel-creating message has not yet arrived.
-However, it may also be the case the the channel-creating message has
+However, it can also be the case that the channel-creating message has
 been or will be lost, or that the channel has already shut down and that
 the current message is simply arriving late. In the case of late
 arrivals, this can result in "ghost receivers" for a channel being
@@ -198,7 +198,7 @@ only reason why it's necessary to ack reliable messages that are sent
 reliably before the channel closes is to prevent state necessary to
 handle channels lost in transit from growing unboundedly.
 
-# 2.3.6 Channels lost in transit
+# 2.3.6. Channels lost in transit
 
 After one side sends a message with an attached receiver/sender, if the
 message with the attachment is declared lost (e.g. due to it being
@@ -211,9 +211,9 @@ stream will be responded to with resetting.
 
 If this occurs specifically with the local side being a sender, the
 local side also has to consider lost all messages previously sent on the
-sender. This can have a cascading effect, as those messages may have had
-receivers attached to them, which would necessitate additional senders
-being discarded, and so on and so forth. The state an Aqueduct
+sender. This can have a cascading effect, as those messages might have
+had receivers attached to them, which would necessitate additional
+senders being discarded, and so on and so forth. The state an Aqueduct
 implementation has to maintain to achieve this forms tree structures.
 
 For a message sent to have a chance of being delivered to the remote
@@ -248,11 +248,11 @@ receivers are reset and discarded. If a linked sender had any links for
 any messages whatsoever, those links are also traversed in the same way.
 On the other hand, when it becomes true that both a message is acked and
 the sender it was sent on becomes reachable, then all linked senders
-are marked as reachable, which itself may trigger a recursive process if
+are marked as reachable, which itself can trigger a recursive process if
 those senders already have acked messages. It is not necessary for a
 "reachable" variable to be held for receivers.
 
-# 2.3.7 Notes on the necessity of lost-in-transit recursive cleanup
+# 2.3.7. Notes on the necessity of lost-in-transit recursive cleanup
 
 If this cleanup process did not exist, these problems would occur:
 
@@ -283,7 +283,7 @@ the system's ability to detect that they were lost in transmit at an
 upstream point, which could potentially be a nasty emergent failure
 case.
 
-# 2.3.8 Closed channel loss-in-transit detection
+# 2.3.8. Closed channel loss-in-transit detection
 
 It is possible for a sender or receiver to be detected as
 lost-in-transit after the local side has already initiated and completed
@@ -293,7 +293,7 @@ occurs, this is conveyed with a message on a different stream, which
 lets the remote side discard any state it is still be holding for the
 channel in the hopes of handing it off to the remote application.
 
-# 2.3.9 Errors for lost versus ungracefully closed channels
+# 2.3.9. Errors for lost versus ungracefully closed channels
 
 It would be possible, and in some ways easier, for the error for a
 channel being lost in transit to be the same as the error for the sender
@@ -341,7 +341,7 @@ prevent a memory leak on the remote side. There are other situations
 where this is not the case, but using a "lost" reset code is still best
 to ensure the remote application receives an appropriate error message.
 
-# 2.3.10 Loss of message after ack
+# 2.3.10. Loss of message after ack
 
 It's possible for a message to be received, deserialized, and enqueued
 for delivery to the application, then dropped before the application has
@@ -356,65 +356,12 @@ occur due to a channel handle being dropped. This might be achievable
 via thread-local variables, set in the channel implementation and read
 by the sender/receiver's destructors.
 
+# 3. Specification
 
+This is a normative section to be used as a reference when implementing
+the Aqueduct protocol.
 
-# Glossary
-
-- Aqueduct: This protocol.
-- QUIC: The QUIC protocol, as first standardized in RFC 9000, which
-  Aqueduct runs on.
-- TLS: The encryption protocol which QUIC is fused with.
-- ZeroRTT: A feature provided by QUIC and TLS, also known as TLS Early
-  Data, or TLS (Stateless) Session Resumption, or 0-RTT.
-- Stream: A QUIC byte stream.
-- Bidirectional / Unidirectional stream: Streams being bidirectional or
-  unidirectional is a feature of QUIC streams, provided by QUIC.
-- Finishing a stream: QUIC has a feature where a stream can be
-  "finished". This represents a graceful closing of the stream, in which
-  all bytes sent will be retransmitted as necessary until the reader
-  reads all bytes from the stream, after which the reader observes that
-  the stream has finished. In a bidirectional stream, both sides can be
-  finished independently. Not to be confused with finishing a channel.
-- Resetting a stream: QUIC has a feature where a stream can be "reset".
-  This represents an abrupt closing of the stream, in which the reader
-  observes that the stream was reset as soon as possible, and any bytes
-  buffered, in-transit, or needing of retransmission are abandoned. In
-  a bidirectional stream, both sides can be reset independently. The
-  analogous concept for channels is cancelling the channel.
-- Datagram: A QUIC unreliable datagram, as per the QUIC unreliable
-  datagram extension first standardized in RFC 9221.
-- Connection: An Aqueduct connection between two sides of the Aqueduct
-  connection, which wraps around a QUIC connection.
-- Client: The side of the Aqueduct connection which initiated the
-  connection.
-- Server: The side of the Aqueduct connection which is not the client.
-- Channel: A networked channel of messages within an Aqueduct
-  connection, which is the main abstraction exposed by Aqueduct to the
-  application.
-- Oneshot channel: A channel that may only ever have up to 1 message
-  sent on it, created like that intentionally by the application.
-- Message: A discrete message sent by the application on a channel.
-- Payload: The part of a message which is a byte array encoded by
-  application-provided serialization logic.
-- Attachment: A relationship between a message and a channel, wherein a
-  new channel may be created by attaching it to a message that is sent
-  on an existing channel.
-- Finishing a channel: Aqueduct has a feature where a channel can be
-  "finished". This represents a graceful closing of the channel, in
-  which all messages sent reliably will be received, and all messages
-  sent unreliably will be given a reasonable chance to be received,
-  after which the receiver observes that the channel has finished. Not
-  to be confused with finishing a stream.
-- Cancelling a channel: Aqueduct has a feature where a sender can
-  "cancel" a channel. This represents an abrupt closing of the channel,
-  in which the receiver observes that the channel was cancelled as soon
-  as possible, and any messages not yet received are abandoned. The
-  analogous concept for streams is resetting the stream.
-- Frame: A unit of Aqueduct protocol communication, written by one side
-  of the Aqueduct connection to a stream or datagram and read by the
-  other side, without being exposed to the application.
-
-# QUIC
+# 3.1. QUIC
 
 Aqueduct runs on top of QUIC. In this document, "streams" refers to QUIC
 streams, whereas "channels" refers to Aqueduct channels. QUIC datagrams
@@ -430,7 +377,7 @@ TODO: Fallback to TCP or WebSocket for situations where the network
 TODO: Fallback, or completely convert to WebTransport for running within
       web frontends more performantly than falling back to WebSocket.
 
-# ZeroRTT
+# 3.2. ZeroRTT
 
 An Aqueduct client may send any data in 0-RTT streams and 0-RTT
 datagrams. It must buffer all data sent on 0-RTT streams until it learns
@@ -497,11 +444,11 @@ TODO: TLS client authentication, both in general, and also getting that
       old client key. Consider whether this has tradeoffs with
       cryptographic forward security and how to navigate those.
 
-# Endianness
+# 3.3. Endianness
 
 Values are encoded little-endian unless stated otherwise.
 
-# Var len ints
+# 3.4. Var len ints
 
 Sometimes, a variable length uint encoding is used. An encoded var len
 int always contains at least 1 byte. The lowest 7 bits of the byte
@@ -516,13 +463,55 @@ continues until terminated by an encoded byte with its highest bit being
 encoded in more bytes than necessary, or if it contains more than 64
 bits, excepting unavoidable trailing 0 bits.
 
-# Byte arrays
+# 3.5. Byte arrays
 
-Sometimes, a length-prefixed byte array is encoded. This is encoded as a
-var len int, encoding the length of the array, following by that many
-bytes.
+Sometimes, a var len byte array is encoded. This is encoded as a var len
+int, encoding the length of the array, following by that many bytes.
 
-# Channel IDs
+# 3.6. Header data
+
+Sometimes, "header data" is encoded. This is encoded as a var len byte
+array. Within the outer var len byte array are 0 or more inner var len
+byte arrays encoded back-to-back. It is a protocol error if there is an
+odd number of inner byte arrays. Each sequential group of 2 inner byte
+arrays is a key/value pair. Keys are not required to be unique; header
+data is a multimap. It is a protocol error if a key is not an ASCII
+string. A value may be any sequence of bytes. It is a protocol error if
+a key is empty. A value may be empty.
+
+# 3.6.1 Recommendations for users utilizing headers
+
+The recommended way to choose a name for a header is to use a short but
+descriptive name, followed by a dash, followed by a random 6-digit
+hexadecimal sequence generated at the time of designing the header by
+an website or by a command such as `openssl rand -hex 3`.
+
+For example, one might design a serialization middleware that utilizes a
+header key such as `cbor-b3b650` to indicate that CBOR is used to
+serialize the messages, wherein the value is some CBOR-encoded settings
+object.
+
+The addition of random hex bytes serves as a decentralized way to avoid
+accidentally colliding with some other engineer in the world who wants
+to call their header `cbor`.
+
+If one already is using a header with some generated random byte
+sequence, and wants switch the semantics of their header in a
+non-backwards compatible way, it is recommended that one add or
+increment a version number at the end of their header name, such that
+the key might become something like `cbor-b3b650-v4` or
+`cbor-b3b650-0.4.0`. This could be used to indicate, for example, that
+the expected fields of the value are different.
+
+The important part is to avoid excessively generating new hex sequences,
+which keeps the probability of accidental collision low.
+
+If one wants to develop code that uses an established header in some
+experimental way that's not yet standardized, it's recommended that one
+add a suffix that would prevent such code from being misinterpreted by
+prod code, such as `cbor-b3b650-TEST` or `cbor-b3b650-0.4.0-AFTER`.
+
+# 3.7. Channel IDs
 
 Each (networked) channel and oneshot channel within a connection has a
 64-bit channel ID.
@@ -545,7 +534,7 @@ server, created by client, not oneshot, index 0) is considered the
 
 Channel IDs are encoded as var len ints.
 
-# Frames
+# 3.8. Frames
 
 Frames are the unit of the Aqueduct client and server sending each other
 self-contained messages on the wire.
@@ -594,48 +583,76 @@ Parallelizing parts of the processing of frames within the same stream
 or datagram is permissible only to the extent that it has no possibility
 of meaningfully changing behavior / introducing race conditions.
 
-An Aqueduct implementation does not have to care about whether a frame
-came from some particular stream or datagram, or even whether it came
-from a stream or a datagram, when processing it.
-
 If a QUIC stream is reset, the receiving side should disregard any
 partially received frames up to the point of resetting, and does not
 have to process any frames previously received from that stream if it
 has not already done so.
 
-# Frame types
+# 3.9. Frame types
 
 The following frame type bytes and corresponding frame types exist:
 
-NOT FINISHED: frame type bytes
+- 239: Version
+- 1: ConnectionControl
+- 2: ChannelControl
+- 3: Message
+- 4: SentReliable
+- 5: SentUnreliable
+- 6: AckReliable
+- 7: AckNackUnreliable
+- 8: FinalAckNack
+- 9: ClosedChannelLost
 
-- Version
-- Message
-- ConnectionControl
-- ChannelControl
-- RejectChannelControl
-- SentUnreliable
-- AckNackUnreliable
-- FinishSender
-- AbandonReceiver
+# 3.9.1 Version frames
 
-# Connection control stream
+A version frame is encoded as:
+
+- The frame type byte: 239
+- The magic byte sequence: 80, 95, 166, 96, 15, 64, 142
+
+  The frame type byte and the magic byte sequence were both chosen
+  randomly, to help avoid collision with non-Aqueduct protocols.
+- Human text: The bytes of the ASCII string "AQUEDUCT".
+
+  This is designed to be a human-readable hint to someone looking at the
+  decrypted bytes on the wire as to what sort of traffic this is.
+- Version: A var-len byte array containing the ASCII string
+  "0.0.0-AFTER".
+
+It is a protocol error for a Version frame to occur elsewhere than as
+the first frame in its stream or datagram.
+
+# 3.9.2 ConnectionControl frames
+
+A ConnectionControl frame is encoded as:
+
+- The frame type byte: 1
+- The header data: Either the client or server's header data.
+
+#
+
+
+
+
+
+
+# 3.9. Connection control stream
 
 When the Aqueduct client creates the Aqueduct connection, it creates a
 QUIC connection to the server. As soon as it can, it opens up a
 bidirectional stream, stores it as the "connection control stream", and
-sends on it a Version frame, followed by a ConnectionHeaders frame.
+sends on it a Version frame, followed by a ConnectionControl frame.
 
 When the server observes the QUIC connection opening, it waits to
 observe the opening of a bidirectional stream followed by the receiving
-on that stream of a Version frame followed by a ConnectionHeaders frame.
+on that stream of a Version frame followed by a ConnectionControl frame.
 Once this occurs, the server stores that stream as the connection
 control stream, and sends on it a Version frame, followed by a
-ConnectionHeaders frame.
+ConnectionControl frame.
 
-The server may branch on the Version and ConnectionHeaders data it
+The server may branch on the Version and ConnectionControl data it
 receives from the client in determining what content to send in its
-Version and ConnectionHeaders response. The server may allow the
+Version and ConnectionControl response. The server may allow the
 application to read the client's connection headers and then determine
 based on that what connection headers the server has for this
 connection.
@@ -655,44 +672,74 @@ It must not do so. If in some future version of this protocol the server
 gains a reason to do so, care would have to be taken regarding the same
 concern mentioned in the last section.
 
-If the server receives frames other than Version and ConnectionHeaders
-in any way before it receives the client's ConnectionHeaders frame, it
+If the server receives frames other than Version and ConnectionControl
+in any way before it receives the client's ConnectionControl frame, it
 must wait to process them until it receives the client's
-ConnectionHeaders frame. This might occur due to race conditions between
+ConnectionControl frame. This might occur due to race conditions between
 the client sending data on the connection control stream and the client
 sending data by other means.
 
 A connection only has 1 connection control stream, and it lasts as long
 as the connection. It is a protocol error if the connection control
 stream is reset or finished. The client and the server both send a
-ConnectionHeaders frame exactly once, on the connection control stream.
+ConnectionControl frame exactly once, on the connection control stream.
 The server identifies the connection control stream by it being a
 bidirectional stream opened by the client that begins with a Version
-frame followed by a ConnectionHeaders frame. It is a protocol error if
-either side sends a ConnectionHeaders frame multiple times. It is a
-protocol error if the client sends a ConnectionHeaders frame on anything
+frame followed by a ConnectionControl frame. It is a protocol error if
+either side sends a ConnectionControl frame multiple times. It is a
+protocol error if the client sends a ConnectionControl frame on anything
 other than a bidirectional stream, as the second frame on that stream,
 wherein the first frame on that stream is a Version frame. It is a
-protocol error if the server sends a ConnectionHeaders frame on anything
+protocol error if the server sends a ConnectionControl frame on anything
 other than the control stream, as the second frame on that stream,
 wherein the first frame on that stream is a Version frame.
 
-# Senders and receivers
+# 3.10. Senders and receivers
 
 At a given point in time, the client and the server both have a set of
-senders and receivers. As an intuition, this roughly represents the set
-of channels that they think exist.
+senders and receivers. Each sender/receiver uniquely corresponds to a
+channel ID. It is a protocol violation if something would trigger the
+creation of a sender on the client for which the channel ID indicates
+that the client should be the receiver, or vice versa for receivers, or
+vice versa for servers.
 
-Each sender / receiver uniquely corresponds to a channel ID. It is a
-protocol violation if something would trigger the creation of a sender
-on the client for which the channel ID indicates that the client should
-be the receiver, or vice versa for receivers, or vice versa for servers.
+A sender might have the following data attached:
+
+- 
 
 When the client first initializes, it begins with a single sender, for
 the entrypoint channel, and no receivers. When the server first
 initializes, it begins with no senders or receivers. After the server
 processes the client's ConnectionHeaders, it creates a receiver for the
 entrypoint channel.
+
+NEEDS WORK
+
+# 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 # Sending messages
 
@@ -965,3 +1012,87 @@ Upon encountering or detecting a protocol error, the QUIC connection
 should be immediately closed.
 
 If the QUIC connection closes, the Aqueduct connection closes.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# Glossary
+
+- Aqueduct: This protocol.
+- QUIC: The QUIC protocol, as first standardized in RFC 9000, which
+  Aqueduct runs on.
+- TLS: The encryption protocol which QUIC is fused with.
+- ZeroRTT: A feature provided by QUIC and TLS, also known as TLS Early
+  Data, or TLS (Stateless) Session Resumption, or 0-RTT.
+- Stream: A QUIC byte stream.
+- Bidirectional / Unidirectional stream: Streams being bidirectional or
+  unidirectional is a feature of QUIC streams, provided by QUIC.
+- Finishing a stream: QUIC has a feature where a stream can be
+  "finished". This represents a graceful closing of the stream, in which
+  all bytes sent will be retransmitted as necessary until the reader
+  reads all bytes from the stream, after which the reader observes that
+  the stream has finished. In a bidirectional stream, both sides can be
+  finished independently. Not to be confused with finishing a channel.
+- Resetting a stream: QUIC has a feature where a stream can be "reset".
+  This represents an abrupt closing of the stream, in which the reader
+  observes that the stream was reset as soon as possible, and any bytes
+  buffered, in-transit, or needing of retransmission are abandoned. In
+  a bidirectional stream, both sides can be reset independently. The
+  analogous concept for channels is cancelling the channel.
+- Datagram: A QUIC unreliable datagram, as per the QUIC unreliable
+  datagram extension first standardized in RFC 9221.
+- Connection: An Aqueduct connection between two sides of the Aqueduct
+  connection, which wraps around a QUIC connection.
+- Client: The side of the Aqueduct connection which initiated the
+  connection.
+- Server: The side of the Aqueduct connection which is not the client.
+- Channel: A networked channel of messages within an Aqueduct
+  connection, which is the main abstraction exposed by Aqueduct to the
+  application.
+- Oneshot channel: A channel that may only ever have up to 1 message
+  sent on it, created like that intentionally by the application.
+- Message: A discrete message sent by the application on a channel.
+- Payload: The part of a message which is a byte array encoded by
+  application-provided serialization logic.
+- Attachment: A relationship between a message and a channel, wherein a
+  new channel may be created by attaching it to a message that is sent
+  on an existing channel.
+- Finishing a channel: Aqueduct has a feature where a channel can be
+  "finished". This represents a graceful closing of the channel, in
+  which all messages sent reliably will be received, and all messages
+  sent unreliably will be given a reasonable chance to be received,
+  after which the receiver observes that the channel has finished. Not
+  to be confused with finishing a stream.
+- Cancelling a channel: Aqueduct has a feature where a sender can
+  "cancel" a channel. This represents an abrupt closing of the channel,
+  in which the receiver observes that the channel was cancelled as soon
+  as possible, and any messages not yet received are abandoned. The
+  analogous concept for streams is resetting the stream.
+- Frame: A unit of Aqueduct protocol communication, written by one side
+  of the Aqueduct connection to a stream or datagram and read by the
+  other side, without being exposed to the application.
