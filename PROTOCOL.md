@@ -1,8 +1,9 @@
 The Aqueduct Protocol Specification
 Pre-Release Version: 0.0.0-AFTER
+
 ---
 
-# 1. About this document
+# About this document
 
 For pre-1.0 versions of Aqueduct, this document is given the same
 version number as the package itself. Once the package and/or protocol
@@ -28,13 +29,13 @@ on ways we would like to explore potentially enhancing the protocol. A
 TODO comment noting some idea does not constitute a commitment or
 promise to actually going through with it.
 
-# 2. Overview
+# Overview
 
 This is a non-normative section that attempts to give the reader a
 better understanding of how everything in the Aqueudct protocol fits
 together.
 
-# 2.1. Aqueduct from the user's perspective
+## Aqueduct from the user's perspective
 
 An Aqueduct connection wraps around a QUIC connection, and utilizes both
 QUIC streams and QUIC datagrams. The main abstraction Aqueduct provides
@@ -74,9 +75,9 @@ format. They can be useful for other things too, such as telemetry.
 
 [1]: https://newsletter.squishy.computer/p/if-headers-did-not-exist-it-would
 
-# 2.2. The distributed algorithm
+## The distributed algorithm
 
-# 2.3.1. Why this is non-trivial
+### Why this is non-trivial
 
 If the QUIC connection as a whole is lost, then the Aqueduct connection
 is lost too. This doesn't complicate the Aqueduct protocol much.
@@ -100,7 +101,7 @@ channel can arrive before the message the channel's receiver was
 attached to arrives 2. QUIC guarantees no time bound on how late a
 stream or datagram can arrive.
 
-# 2.3.2. Channel IDs
+### Channel IDs
 
 Each channel is identified by a channel ID, which encodes the direction
 the channel is flowing (which side of the connection has the sender and
@@ -109,7 +110,7 @@ combination, these reveal whether the creating side created the channel
 by sending a sender to the other side, or by sending a receiver to the
 other side.
 
-# 2.3.3. Channel control stream
+### Channel control stream
 
 At a given point in time, the state stored by either side of the
 connection includes a mapping from channel ID to sender or receiver
@@ -198,7 +199,7 @@ only reason why it's necessary to ack reliable messages that are sent
 reliably before the channel closes is to prevent state necessary to
 handle channels lost in transit from growing unboundedly.
 
-# 2.3.6. Channels lost in transit
+### Channels lost in transit
 
 After one side sends a message with an attached receiver/sender, if the
 message with the attachment is declared lost (e.g. due to it being
@@ -252,7 +253,7 @@ are marked as reachable, which itself can trigger a recursive process if
 those senders already have acked messages. It is not necessary for a
 "reachable" variable to be held for receivers.
 
-# 2.3.7. Notes on the necessity of lost-in-transit recursive cleanup
+### Notes on the necessity of lost-in-transit recursive cleanup
 
 If this cleanup process did not exist, these problems would occur:
 
@@ -283,7 +284,7 @@ the system's ability to detect that they were lost in transmit at an
 upstream point, which could potentially be a nasty emergent failure
 case.
 
-# 2.3.8. Closed channel loss-in-transit detection
+### Closed channel loss-in-transit detection
 
 It is possible for a sender or receiver to be detected as
 lost-in-transit after the local side has already initiated and completed
@@ -293,7 +294,7 @@ occurs, this is conveyed with a message on a different stream, which
 lets the remote side discard any state it is still be holding for the
 channel in the hopes of handing it off to the remote application.
 
-# 2.3.9. Errors for lost versus ungracefully closed channels
+### Errors for lost versus ungracefully closed channels
 
 It would be possible, and in some ways easier, for the error for a
 channel being lost in transit to be the same as the error for the sender
@@ -341,7 +342,7 @@ prevent a memory leak on the remote side. There are other situations
 where this is not the case, but using a "lost" reset code is still best
 to ensure the remote application receives an appropriate error message.
 
-# 2.3.10. Loss of message after ack
+### Loss of message after ack
 
 It's possible for a message to be received, deserialized, and enqueued
 for delivery to the application, then dropped before the application has
@@ -356,12 +357,12 @@ occur due to a channel handle being dropped. This might be achievable
 via thread-local variables, set in the channel implementation and read
 by the sender/receiver's destructors.
 
-# 3. Specification
+# Specification
 
 This is a normative section to be used as a reference when implementing
 the Aqueduct protocol.
 
-# 3.1. QUIC
+## QUIC
 
 Aqueduct runs on top of QUIC. In this document, "streams" refers to QUIC
 streams, whereas "channels" refers to Aqueduct channels. QUIC datagrams
@@ -377,7 +378,7 @@ TODO: Fallback to TCP or WebSocket for situations where the network
 TODO: Fallback, or completely convert to WebTransport for running within
       web frontends more performantly than falling back to WebSocket.
 
-# 3.2. ZeroRTT
+## ZeroRTT
 
 An Aqueduct client may send any data in 0-RTT streams and 0-RTT
 datagrams. It must buffer all data sent on 0-RTT streams until it learns
@@ -444,11 +445,11 @@ TODO: TLS client authentication, both in general, and also getting that
       old client key. Consider whether this has tradeoffs with
       cryptographic forward security and how to navigate those.
 
-# 3.3. Endianness
+## Endianness
 
 Values are encoded little-endian unless stated otherwise.
 
-# 3.4. Var len ints
+## Var len ints
 
 Sometimes, a variable length uint encoding is used. An encoded var len
 int always contains at least 1 byte. The lowest 7 bits of the byte
@@ -463,12 +464,12 @@ continues until terminated by an encoded byte with its highest bit being
 encoded in more bytes than necessary, or if it contains more than 64
 bits, excepting unavoidable trailing 0 bits.
 
-# 3.5. Byte arrays
+## Byte arrays
 
 Sometimes, a var len byte array is encoded. This is encoded as a var len
 int, encoding the length of the array, following by that many bytes.
 
-# 3.6. Header data
+## Header data
 
 Sometimes, "header data" is encoded. This is encoded as a var len byte
 array. Within the outer var len byte array are 0 or more inner var len
@@ -479,7 +480,7 @@ data is a multimap. It is a protocol error if a key is not an ASCII
 string. A value may be any sequence of bytes. It is a protocol error if
 a key is empty. A value may be empty.
 
-# 3.6.1 Recommendations for users utilizing headers
+### Recommendations for users utilizing headers
 
 The recommended way to choose a name for a header is to use a short but
 descriptive name, followed by a dash, followed by a random 6-digit
@@ -511,7 +512,7 @@ experimental way that's not yet standardized, it's recommended that one
 add a suffix that would prevent such code from being misinterpreted by
 prod code, such as `cbor-b3b650-TEST` or `cbor-b3b650-0.4.0-AFTER`.
 
-# 3.7 Pos-neg range data
+## Pos-neg range data
 
 Sometimes, "positive negative range data" is encoded. This is encoded as
 a var len byte array which contains 0 or more var len ints encoded
@@ -526,7 +527,7 @@ what the "start" is depends on context. It is a protocol error if any
 int in the sequence is 0, with the exception that the 1st int in the
 sequence may be 0 if there are also other ints after it.
 
-# 3.7. Channel IDs
+## Channel IDs
 
 Each (networked) channel and oneshot channel within a connection has a
 64-bit channel ID.
@@ -549,7 +550,7 @@ server, created by client, not oneshot, index 0) is considered the
 
 Channel IDs are encoded as var len ints.
 
-# 3.8. Frames
+## Frames
 
 Frames are the unit of the Aqueduct client and server sending each other
 self-contained messages on the wire.
@@ -603,7 +604,7 @@ partially received frames up to the point of resetting, and does not
 have to process any frames previously received from that stream if it
 has not already done so.
 
-# 3.9. Frame types
+## Frame types
 
 The following frame type bytes and corresponding frame types exist:
 
@@ -618,7 +619,7 @@ The following frame type bytes and corresponding frame types exist:
 - 8: FinalAckNack
 - 9: ClosedChannelLost
 
-# 3.9.1. Version frames
+### Version frames
 
 A version frame is encoded as:
 
@@ -637,14 +638,14 @@ A version frame is encoded as:
 It is a protocol error for a Version frame to occur elsewhere than as
 the first frame in its stream or datagram.
 
-# 3.9.2. ConnectionControl frames
+### ConnectionControl frames
 
 A ConnectionControl frame is encoded as:
 
 - The frame type byte: 1
 - The client or server's header data: Header data
 
-# 3.9.3. ChannelControl frames
+### ChannelControl frames
 
 A ChannelControl frame is encoded as:
 
@@ -655,7 +656,7 @@ It is a protocol error for a ChannelControl frame to occur elsewhere
 than as the first frame in a bidirectional stream in the direction
 flowing away from the side that created the stream.
 
-# 3.9.4. Message frames
+### Message frames
 
 A Message frame is encoded as:
 
@@ -675,7 +676,7 @@ A Message frame is encoded as:
 It is a protocol error for a Message frame to occur in a bidirectional
 stream.
 
-# 3.9.5. SentReliable frames
+### SentReliable frames
 
 A SentReliable frame is encoded as:
 
@@ -686,7 +687,7 @@ A SentReliable frame is encoded as:
 It is a protocol error for a SentReliable frame to occur elsewhere
 than in a channel control stream in the sender-to-receiver direction.
 
-# 3.9.6. SentUnreliable frames
+### SentUnreliable frames
 
 A SentUnreliable frame is encoded as:
 
@@ -697,7 +698,7 @@ A SentUnreliable frame is encoded as:
 It is a protocol error for a SentUnreliable frame to occur elsewhere
 than in a channel control stream in the sender-to-receiver direction.
 
-# 3.9.7. AckReliable frames
+### AckReliable frames
 
 An AckReliable frame is encoded as:
 
@@ -711,7 +712,7 @@ An AckReliable frame is encoded as:
 It is a protocol error for a AckReliable frame to occur elsewhere than
 in a channel control stream in the receiver-to-sender direction.
 
-# 3.9.8. AckNackUnreliable frames
+### AckNackUnreliable frames
 
 An AckNackUnreliable frame is encoded as:
 
@@ -723,7 +724,7 @@ An AckNackUnreliable frame is encoded as:
 It is a protocol error for a AckNackUnreliable frame to occur elsewhere
 than in a channel control stream in the receiver-to-sender direction.
 
-# 3.9.9. FinalAckNack frames
+### FinalAckNack frames
 
 A FinalAckNack frame is encoded as:
 
@@ -740,7 +741,7 @@ It is a protocol error for a FinalAckNack frame to occur elsewhere than
 as the final frame in a channel control stream in the receiver-to-sender
 direction.
 
-# 3.9.10. ClosedChannelLost frames
+### ClosedChannelLost frames
 
 A ClosedChannelLost frame is encoded as:
 
@@ -750,7 +751,7 @@ A ClosedChannelLost frame is encoded as:
 It is a protocol error for a ClosedChannelLost frame to occur elsewhere
 than in the connection control stream.
 
-
+---
 
 
 
