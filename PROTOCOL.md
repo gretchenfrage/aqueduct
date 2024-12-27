@@ -615,10 +615,10 @@ The following frame type bytes and corresponding frame types exist:
 - 1: ConnectionControl
 - 2: ChannelControl
 - 3: Message
-- 4: SentReliable
-- 5: SentUnreliable
-- 6: AckReliable
-- 7: AckNackUnreliable
+- 4: SentUnreliable
+- 5: AckReliable
+- 6: AckNackUnreliable
+- 7: FinishSender // NEEDS WORK: rename to like, FinishSender, CloseReceiver
 - 8: FinalAckNack
 - 9: ClosedChannelLost
 
@@ -679,22 +679,11 @@ A Message frame is encoded as:
 It is a protocol error for a Message frame to occur in a bidirectional
 stream.
 
-### SentReliable frames
-
-A SentReliable frame is encoded as:
-
-- The frame type byte: 4
-- The number of messages sent reliably on this channel since the last
-  SentReliable frame on this channel: A var len int
-
-It is a protocol error for a SentReliable frame to occur elsewhere
-than in a channel control stream in the sender-to-receiver direction.
-
 ### SentUnreliable frames
 
 A SentUnreliable frame is encoded as:
 
-- The frame type byte: 5
+- The frame type byte: 4
 - The number of messages sent unreliably on this channel since the last
   SentUnreliable frame on this channel:  A var len int
 
@@ -705,7 +694,7 @@ than in a channel control stream in the sender-to-receiver direction.
 
 An AckReliable frame is encoded as:
 
-- The frame type byte: 6
+- The frame type byte: 5
 - The acks: Pos-neg range data, positive ranges represent acks, negative
   ranges represent messages not yet being acked or nacked rather than
   them being nacked, and the start is the highest message number in the
@@ -719,13 +708,34 @@ in a channel control stream in the receiver-to-sender direction.
 
 An AckNackUnreliable frame is encoded as:
 
-- The frame type byte: 7
+- The frame type byte: 6
 - The acks and nacks: Pos-neg range of data, positive ranges represent
   acks, negative ranges represent nacks, and the start is where the last
   AckNackUnreliable for this channel left off.
 
 It is a protocol error for a AckNackUnreliable frame to occur elsewhere
 than in a channel control stream in the receiver-to-sender direction.
+
+NOTE: one reason AckNackUnreliable frames don't have the ability to
+      represent a not-yet-acked-or-nacked state in the way that
+      AckReliable frames do is because it may be reasonable in some
+      circumstances for a higher priority reliable QUIC stream to starve
+      a lower priority reliable QUIC stream for arbitrarily long amounts
+      of time, whereas QUIC datagrams are all considered to be of
+      equally maximal priority.
+
+### FinishSender frames
+
+A FinishSender frame is encoded as:
+
+- The frame type byte: 7
+- The number of messages ever sent reliably on this channel: A var len
+  int
+
+It is a protocol error for a FinishSender frame to occur elsewhere than
+in a channel control stream in the sender-to-receiver direction, and as
+the final frame in that stream in that direction before it finishes or
+resets.
 
 ### FinalAckNack frames
 
@@ -989,7 +999,71 @@ of time if it cannot ack the message due to the channel control stream
 not yet being attached.
 
 It is a protocol violation to ack or nack a message that has already
-been acked or nacked.
+been acked or nacked by the same receiver.
+
+## Channel shutdown
+
+### Finishing
+
+The application must be provided an API to attempt to gracefully finish
+a channel via its local sender. For a sender to attempt to gracefully a
+finish its channel, it must first wait for the channel control stream to
+become attached if it is not already attached. Then, the sender must
+use the channel control stream to send a SentUnreliable frame declaring
+any undeclared unreliable messages, unless all unreliable messages have
+already been declared, followed by a FinishSender frame, followed by
+finishing the sender-to-receiver direction of the control stream. Then,
+the sender must enter the "finishing" state.
+
+A sender must not send any additional messages after entering the
+finishing state. If it is possible for the application to request this
+be done, an error should be returned to the application.
+
+When a receiver receives a FinishSender frame, the receiver must enter
+the "finishing" state. Once in the finishing state, the receiver can
+finalize finishing once all declared messages have been acked or nacked.
+The receiver must wait for all declared reliable messages to have been
+received. The receiver must wait for all declared unreliable messages to
+either have been received, or to have been nacked. The receiver must not
+nack unaccounted-for unreliable messages immediately merely because it
+has entered the finishing state--it must give them a fair chance to
+arrive. A receiver in the finishing state should follow similar waiting
+logic in terms of nacking unreliable messages as it would if it were not
+in the finishing state. Once these conditions are met for a receiver,
+the receiver must finalizing finishing.
+
+
+
+
+
+
+
+For a sender to initiate an attempt to
+gracefully finish its channel, it must send a SentUnreliable frame
+
+
+ When a sender attempts to gracefully
+finish a channel, it must 
+
+
+An application may attempt to trigger a sender to attempt to gracefully
+finish its channel. When a sender attempts to gracefully 
+A sender may attempt to gracefully 
+
+## Cascading loss detection
+
+A local sender is either in the "not reachable" state or the "reachable"
+state. When a sender is created, if its channel ID was minted locally,
+it initializes in the "not reachable" state, with the exception of the
+entrypoint sender, which initializes in the "reachable" state. If a
+sender is created with a channel ID that was minted remotely, it
+initializes in the "reachable" state.
+
+
+
+
+
+
 
 
 
