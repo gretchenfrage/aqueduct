@@ -961,15 +961,35 @@ channel control stream attached, it must be reset with a
 
 ### Acking and nacking
 
-When a SentReliable frame is received on its channel control stream
+When a receiver processes a reliable message (a Message frame received
+from a stream), it may ack it by sending an AckReliable frame on the
+control stream. The Aqueduct implementation must ack a message within a
+reasonable amount of time after processing it, such as within 1 second.
+Excessive waiting risks exacerbating sender-side memory usage, and
+potentially triggering the sender to throttle the connection. 
 
+TODO throttling
 
+When a receiver processes an unreliable message (a Message frame
+received from a datagram), it may ack it by sending an AckNackUnreliable
+frame, so long as it has not previously nacked it. When a receiver
+receives a SentUnreliable frame from the channel control stream
+indicating that the sender sent some additional unreliable messages, the
+receiver must ack or nack all of them within a reasonable amount of time
+after receiving the SentUnreliable frame, such as 1 second or twice the
+estimated RTT. Excessive waiting risk being directly apparent to the
+remote application as excessive delays in loss detection, as well as
+exacerbating sender-side memory usage, and potentially triggering the
+sender to throttle the connection.
 
+The Aqueduct implementation may avoid acking a message immediately in
+the hopes that further received messages would be possible to ack
+simultaneously. A receiver may wait to ack a message for a longer period
+of time if it cannot ack the message due to the channel control stream
+not yet being attached.
 
-
-
-
-
+It is a protocol violation to ack or nack a message that has already
+been acked or nacked.
 
 
 
