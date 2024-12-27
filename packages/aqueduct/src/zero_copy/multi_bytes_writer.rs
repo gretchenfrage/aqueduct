@@ -8,7 +8,11 @@ use std::{
 use bytes::Bytes;
 
 
+// size that the buf starts at without any doublings.
 const START_CAPACITY: usize = 64;
+
+// if write_zc is called with a Bytes smaller than this, it will just be copied in in a non-zc way.
+const MIN_ZC_BYTES: usize = 64;
 
 
 /// Utility for writing bytes in memory build a [`MultiBytes`].
@@ -56,10 +60,15 @@ impl MultiBytesWriter {
     }
 
     /// Extend the byte collection by appending `bytes` in a zero-copy fashion.
-    pub fn write_zc(&mut self, bytes: Bytes) {
-        self.inner.extend(once(Bytes::from(take(&mut self.buf))));
-        self.doublings = 0;
-        self.inner.extend(once(bytes));
+    pub fn write_zc<B: Into<Bytes>>(&mut self, bytes: B) {
+        let bytes = bytes.into();
+        if bytes.len() < MIN_ZC_BYTES {
+            self.write(&bytes);
+        } else {
+            self.inner.extend(once(Bytes::from(take(&mut self.buf))));
+            self.doublings = 0;
+            self.inner.extend(once(bytes));
+        }
     }
 
     /// Construct the final resultant [`MultiBytes`].

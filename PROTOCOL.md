@@ -55,7 +55,7 @@ as-soon-as-possible abandonment of all sent sent on the channel, even
 currently buffered messages. This is implemented in an efficient way by
 using QUIC's stream resetting functionality
 
-An Aqueduct connection starts with a single "entrypoing channel", going
+An Aqueduct connection starts with a single "entrypoint channel", going
 from the client to the server. Subsequent channels, in either direction,
 are created by "attaching" a sender or receiver for the channel to a
 message sent on a different channel. This is analogous to how, when
@@ -70,7 +70,7 @@ When the Aqueduct client and server initialize, their applications have
 the ability to exchange multimaps of headers, similar to HTTP or Email
 headers. The addition of this feature is inspired by Gordon Brander's
 essay "If headers did not exist, it would be necessary to invent them"
-[1]. The main excepted use case is for the client and server's
+[1]. The main expected use case is for the client and server's
 serialization middleware to use headers to agree on a serialization
 format. They can be useful for other things too, such as telemetry.
 
@@ -754,17 +754,16 @@ A ClosedChannelLost frame is encoded as:
 It is a protocol error for a ClosedChannelLost frame to occur elsewhere
 than in the connection control stream.
 
----
+## Reset error codes
 
+The following error codes might be used when resetting a QUIC stream:
 
+- 1: "sender cancelled"
+- 2: "sender lost"
+- 3: "receiver dropped"
+- 4: "receiver lost"
 
-
-
-
-
-
-
-# 3.9. Connection control stream
+## Connection control stream
 
 When the Aqueduct client creates the Aqueduct connection, it creates a
 QUIC connection to the server. As soon as it can, it opens up a
@@ -822,7 +821,9 @@ protocol error if the server sends a ConnectionControl frame on anything
 other than the control stream, as the second frame on that stream,
 wherein the first frame on that stream is a Version frame.
 
-# 3.10. Senders and receivers
+## Sending and receiving messages
+
+### Senders and receivers
 
 At a given point in time, the client and the server both have a set of
 senders and receivers. Each sender/receiver uniquely corresponds to a
@@ -831,24 +832,84 @@ creation of a sender on the client for which the channel ID indicates
 that the client should be the receiver, or vice versa for receivers, or
 vice versa for servers.
 
-A sender might have the following data attached:
-
-- 
-
 When the client first initializes, it begins with a single sender, for
 the entrypoint channel, and no receivers. When the server first
 initializes, it begins with no senders or receivers. After the server
 processes the client's ConnectionHeaders, it creates a receiver for the
 entrypoint channel.
 
-NEEDS WORK
+### Sending a message
 
-# 
+On either side, the application can send a message on a channel for
+which a sender exists on that side. It does so by sending a Message
+frame. It may send multiple message frames on the same unidirectional
+stream to send them in an ordered fashion, or on different
+unidirectional streams to send them in an unordered fashion, or in
+datagrams to send them in an unreliable fashion.
 
+After a sender sends a Message frame, it must send a SentReliable or
+SentUnreliable frame indicating that that relevant message number was
+sent within a reasonable amount of time, such as 0.1 seconds, or half
+the estimated RTT. It may wait for such a delay in anticipation of more
+messages potentially being sent soon, in the hopes that only a single
+"sent" frame would have to be sent to cover a larger range of packet
+numbers.
 
+If a SentReliable or SentUnreliable frame cannot be sent because the
+sender's channel control stream is not attached, it must be sent once
+the sender's channel control stream becomes attached.
 
+### Routing a received message
 
+When a Message frame is received, the side attempts to find an existing
+receiver for the channel the message was sent on. If such a receiver
+exists, it must route the message to it. If not, it must create the a
+new receiver for that channel, and route the message to it.
 
+An Aqueduct implementation may keep a record of recently discarded
+receivers, and drop a received Message frame without processing it if
+it was sent on a channel for which the receiver was recently dropped.
+Such a filter may have false negatives, but not false positives.
+
+### Processing a routed message
+
+Once the Message frame has been routed to its receiver, the receiver
+must process it.
+
+For each sender/receiver attached to the message, a sender/receiver must
+be created locally. If a sender was attached for which a local sender
+already exists, that implies that the same sender was attached to
+multiple messages, which is a protocol error. The same implicature does
+not hold for receivers.
+
+The message must be conveyed to the local application. This may be done
+by enqueueing it to an application-facing queue. Application-provided
+deserialization middleware may run at enqueueing time or at dequeueing
+time. The application must have the ability to discern what channel the
+message came from. The application must be given the message's binary
+payload. For each attached sender, the application must be given the
+ability to send messages on its channel, and to finish or cancel its
+channel, and to observe channel error states. For each attached
+receiver, the application must be given the ability to receive messages
+from the channel, to observe the finishing of the channel, to abandon
+the receiver, and to observe channel error states. For each attachment
+conveyed to the application, the application must have the ability to
+tell its index within the message's array of attachments.
+
+Conveying attached senders and receivers to the application can be done
+by giving the application some sort of sender handle or receiver
+handles. When this is done, care should be taken to mitigate resource
+leak hazards caused by the presence of attachments that the message
+receiver did not expect.
+
+If local sender or receiver experiences a handle being taken from it to
+be given to an application multiple times, this implies that the sender
+or receiver was attached to multiple different messages, which is a
+protocol error.
+
+### Creating a receiver
+
+### Creating a sender
 
 
 
