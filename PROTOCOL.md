@@ -847,6 +847,16 @@ stream to send them in an ordered fashion, or on different
 unidirectional streams to send them in an unordered fashion, or in
 datagrams to send them in an unreliable fashion.
 
+An Aqueduct implementation must provide an API for the application to
+send messages on local senders. The application must be given the
+ability to control the message's binary payload, and also to create new
+channels by having their sender or receiver attached to the message at a
+particular index within the message's array of attachments.
+
+When the sender creates a new channel to attach the new channel's sender
+or receiver to a message, it must mint a new channel ID for the new
+channel. Also, it must locally create a local receiver or sender.
+
 After a sender sends a Message frame, it must send a SentReliable or
 SentUnreliable frame indicating that that relevant message number was
 sent within a reasonable amount of time, such as 0.1 seconds, or half
@@ -859,12 +869,19 @@ If a SentReliable or SentUnreliable frame cannot be sent because the
 sender's channel control stream is not attached, it must be sent once
 the sender's channel control stream becomes attached.
 
+NEEDS WORK closing
+
 ### Routing a received message
 
 When a Message frame is received, the side attempts to find an existing
-receiver for the channel the message was sent on. If such a receiver
-exists, it must route the message to it. If not, it must create the a
-new receiver for that channel, and route the message to it.
+receiver for the channel the message was sent on. If a receiver locally
+exists for the message's channel ID, it must route the message to it. If
+a receiver does not locally exist for the message's channel ID, and the
+channel ID was minted by the remote side, it must create a new receiver
+for the channel ID, and route the message to it. If a receiver does not
+locally exist for the message's channel ID, and the channel ID was
+minted by the local side, it must discard the message without processing
+it.
 
 An Aqueduct implementation may keep a record of recently discarded
 receivers, and drop a received Message frame without processing it if
@@ -876,11 +893,21 @@ Such a filter may have false negatives, but not false positives.
 Once the Message frame has been routed to its receiver, the receiver
 must process it.
 
+If the receiver has previously sent a nack for the message, it must not
+process it beyond detecting that it has been nacked and then ceasing
+further processing. This requirement is satisfied vacuously for messages
+sent reliably, since nacking of reliable messages always corresponds to
+discarding the receiver. This requirement does not apply to nacks
+potentially sent by other local receivers that previously existed with
+the same channel ID (see notes on "ghost receivers").
+
 For each sender/receiver attached to the message, a sender/receiver must
 be created locally. If a sender was attached for which a local sender
 already exists, that implies that the same sender was attached to
 multiple messages, which is a protocol error. The same implicature does
-not hold for receivers.
+not hold for receivers. It is a protocol error if message's attached
+channel IDs indicate that they were minted by the side that received
+them.
 
 The message must be conveyed to the local application. This may be done
 by enqueueing it to an application-facing queue. Application-provided
@@ -907,9 +934,34 @@ be given to an application multiple times, this implies that the sender
 or receiver was attached to multiple different messages, which is a
 protocol error.
 
-### Creating a receiver
+## Channel control
 
-### Creating a sender
+### Creating senders, receivers, and the channel control stream
+
+When a sender or receiver is created locally, if the channel ID was
+minted by the remote side, the local side must create a bidirectional
+stream, attach it as the sender/receiver's channel control stream, and
+send on it a ChannelControl frame. If the channel ID was minted by the
+local side, the sender/receiver initializes without a channel control
+stream.
+
+When a side receives a ChannelControl frame, if a local sender/receiver
+exists with its channel ID, and the local sender/receiver does not
+currently have a channel control stream attached, it must attach the
+stream the ChannelControl frame was received on as the local
+sender/receiver's channel control stream. It is a protocol error if the
+ChannelControl frame is received from something other than a
+bidirectional QUIC stream. It is a protocol error if the ChannelControl
+frame has a channel ID that indicates that it was minted by the remote
+side. If a local sender/receiver does not exist with its channel ID, the
+stream must be reset with a "sender lost"/"receiver lost" error code. If
+a local sender/receiver exists with its channel ID, but it already has a
+channel control stream attached, it must be reset with a
+"sender lost"/"receiver lost" error code.
+
+### Acking and nacking
+
+When a SentReliable frame is received on its channel control stream
 
 
 
