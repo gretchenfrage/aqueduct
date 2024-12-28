@@ -287,6 +287,7 @@ impl<T> Sender<T> {
         send_error(self.channel.send_state())
     }
 
+    /* TODO
     /// Await the senders of this channel entering a terminal state, then get that terminal state
     ///
     /// This is like [`terminal_state`](Self::terminal_state), but it only resolves once it is
@@ -301,7 +302,7 @@ impl<T> Sender<T> {
         }
 
         self.channel.watch_send_state().
-    }
+    }*/
 
     // TODO: buffered, bound
 

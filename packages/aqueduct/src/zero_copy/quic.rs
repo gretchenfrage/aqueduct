@@ -11,7 +11,7 @@ const MAX_CHUNK_LENGTH: usize = 16384;
 
 // wrapper around a quinn `RecvStream` which provides a `MultiBytes` cursor-like API
 #[derive(Debug)]
-pub struct QuicMultiBytesReader {
+pub(crate) struct QuicMultiBytesReader {
     stream: RecvStream,
     chunk: Bytes,
     chunk_offset: usize,
@@ -19,7 +19,7 @@ pub struct QuicMultiBytesReader {
 
 impl QuicMultiBytesReader {
     // construct around a QUIC stream
-    pub fn new(stream: RecvStream) -> Self {
+    pub(crate) fn new(stream: RecvStream) -> Self {
         QuicMultiBytesReader {
             stream,
             chunk: Bytes::new(),
@@ -28,7 +28,7 @@ impl QuicMultiBytesReader {
     }
     
     // read the next buf.len() bytes from the stream and copy them to buf
-    pub async fn read(&mut self, mut buf: &mut [u8]) -> Result<(), Error> {
+    pub(crate) async fn read(&mut self, mut buf: &mut [u8]) -> Result<(), Error> {
         while !buf.is_empty() {
             if self.chunk_offset == self.chunk.len() {
                 self.chunk = self.stream
@@ -55,7 +55,7 @@ impl QuicMultiBytesReader {
     }
     
     // read the next n bytes in a zero-copy fashion and return them as a MultiBytes
-    pub async fn read_zc(&mut self, mut n: usize) -> Result<MultiBytes, Error> {
+    pub(crate) async fn read_zc(&mut self, mut n: usize) -> Result<MultiBytes, Error> {
         let mut out = MultiBytes::default();
         while n > 0 {
             if self.chunk_offset == self.chunk.len() {
@@ -83,7 +83,7 @@ impl QuicMultiBytesReader {
     }
     
     // determine whether the stream finishes after the bytes that have been taken
-    pub async fn is_done(&mut self) -> Result<bool, Error> {
+    pub(crate) async fn is_done(&mut self) -> Result<bool, Error> {
         while self.chunk_offset == self.chunk.len() {
             if let Some(chunk) = self.stream
                 .read_chunk(MAX_CHUNK_LENGTH, true).await
@@ -100,35 +100,11 @@ impl QuicMultiBytesReader {
         Ok(false)
     }
     
-    // read a single u8
-    pub async fn read_u8(&mut self) -> Result<u8, Error> {
+    // read a single byte
+    pub(crate) async fn read_byte(&mut self) -> Result<u8, Error> {
         let mut buf = [0];
         self.read(&mut buf).await?;
         let [b] = buf;
         Ok(b)
-    }
-    
-    // read a variable-length encoded u64
-    pub async fn read_var_len_u64(&mut self) -> Result<u64, Error> {
-        const MASK: u8 = 0b01111111;
-        const MORE: u8 = 0b10000000;
-        
-        let mut out: u64 = 0;
-        let mut shift = 0;
-        loop {
-            ensure!(shift < 64, "too many bytes in var len u64");
-            let b = self.read_u8().await?;
-            out |= ((b & MASK) as u64) << shift;
-            shift += 7;
-            if (b & MORE) == 0 { break; }
-        }
-        Ok(out)
-    }
-    
-    // read a variable-length encoded u64, then checked-convert it to `usize`
-    pub async fn read_var_len_usize(&mut self) -> Result<usize, Error> {
-        Ok(self.read_var_len_u64().await?
-            .try_into()
-            .map_err(|_| anyhow!("encoded u64 cannot fit into usize"))?)
     }
 }

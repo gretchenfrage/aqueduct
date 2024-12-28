@@ -1,5 +1,5 @@
 #![allow(dead_code)] // TODO
-//#![doc = include_str!("../../../README.md")] // TODO: fix links
+#![doc = include_str!("../../../README.md")] // TODO: fix links
 
 pub extern crate bytes;
 #[cfg(feature = "futures")]
@@ -9,6 +9,7 @@ pub mod docs;
 pub mod zero_copy;
 
 mod channel;
+mod proto;
 
 pub use crate::channel::api::*;
 

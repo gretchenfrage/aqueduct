@@ -672,9 +672,9 @@ A Message frame is encoded as:
   are assigned sequentially by the sender starting at 0 within the space
   defined by the channel and whether the Message frame is being written
   to a stream or a datagram.
-- The message payload: A var len byte array
 - The message attachments: A var len byte array, containing 0 or more
   channel IDs encoded back-to-back.
+- The message payload: A var len byte array
 
 It is a protocol error for a Message frame to occur in a bidirectional
 stream.
@@ -745,6 +745,8 @@ A CloseReceiver frame is encoded as:
 - Final reliable acks and nacks: Pos-neg range data, starting at zero, 
   wherein positive ranges represent acks, and negative ranges represent
   nacks.
+
+NEEDS WORK: not starting at zero!
 
 It is a protocol error for a CloseReceiver frame to occur elsewhere than
 as the final frame in a channel control stream in the receiver-to-sender
@@ -1175,14 +1177,6 @@ messages / have had a handle to send / receive taken by something else
 
 NEEDS WORK maybe it is best to avoid running deserialization middleware
 on received messages until...? 
-
-
-
-
-
-
-
-
 
 # Error handling
 

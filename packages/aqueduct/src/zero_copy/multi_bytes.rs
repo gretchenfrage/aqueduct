@@ -4,6 +4,7 @@ use std::{
     io::{self, Read},
     slice,
 };
+use thiserror::Error;
 use bytes::Bytes;
 use smallvec::SmallVec;
 
@@ -36,10 +37,17 @@ impl MultiBytes {
         }
     }
     
+    // TODO: these ought to be public
+    pub(crate) fn into_chunks(self) -> impl Iterator<Item=Bytes> {
+        self.pages.into_iter()
+    }
+
     pub(crate) fn chunks_mut(&mut self) -> &mut [Bytes] {
         &mut self.pages
     }
 }
+
+// TODO: explicit transitive implementations of From<String>, etc
 
 impl From<Bytes> for MultiBytes {
     fn from(bytes: Bytes) -> Self {
@@ -65,6 +73,9 @@ impl Extend<Bytes> for MultiBytes {
             .inspect(|page| self.len += page.len()));
     }
 }
+
+// TODO: eq impls with MultiBytes and contiguous bufs
+
 
 /// Cursor for scanning and reading through a [`MultiBytes`].
 #[derive(Debug, Clone)]
@@ -115,6 +126,14 @@ impl<'a> Cursor<'a> {
             }
         }
         Ok(())
+    }
+
+    /// Convenience method to [`read`](Self::read) a single byte.
+    pub fn read_byte(&mut self) -> Result<u8, TooFewBytesError> {
+        let mut buf = [0];
+        self.read(&mut buf)?;
+        let [b] = buf;
+        Ok(b)
     }
 
     /// Construct a [`MultiBytes`] from the next `n` bytes in a zero-copy fashion and advance past
@@ -172,7 +191,8 @@ impl<'a> Cursor<'a> {
 }
 
 /// Error type for trying to read more bytes than remain in a collection of bytes.
-#[derive(Debug, Copy, Clone)]
+#[derive(Error, Debug, Copy, Clone)]
+#[error("too few bytes")]
 pub struct TooFewBytesError;
 
 /// Convenience implementation for compatibility.

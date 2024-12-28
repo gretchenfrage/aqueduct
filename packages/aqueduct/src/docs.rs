@@ -1,4 +1,4 @@
-//! Aqueduct's docs, baked into Rust modules
+//! Aqueduct's docs, baked into Rust modules so they appear in API docs
 //!
 //! # Aqueduct documentation
 //! 

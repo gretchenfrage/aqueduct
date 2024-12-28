@@ -60,14 +60,19 @@ impl MultiBytesWriter {
     }
 
     /// Extend the byte collection by appending `bytes` in a zero-copy fashion.
-    pub fn write_zc<B: Into<Bytes>>(&mut self, bytes: B) {
+    pub fn write_zc<B: Into<MultiBytes>>(&mut self, bytes: B) {
         let bytes = bytes.into();
         if bytes.len() < MIN_ZC_BYTES {
-            self.write(&bytes);
+            for chunk in bytes.into_chunks() {
+                // TODO: make this mesh better with capacity reservation
+                self.write(&chunk);
+            }
         } else {
-            self.inner.extend(once(Bytes::from(take(&mut self.buf))));
-            self.doublings = 0;
-            self.inner.extend(once(bytes));
+            for chunk in bytes.into_chunks() {
+                self.inner.extend(once(Bytes::from(take(&mut self.buf))));
+                self.doublings = 0;
+                self.inner.extend(once(chunk));
+            }
         }
     }
 
