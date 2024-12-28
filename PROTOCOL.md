@@ -972,7 +972,7 @@ reasonable amount of time after processing it, such as within 1 second.
 Excessive waiting risks exacerbating sender-side memory usage, and
 potentially triggering the sender to throttle the connection. 
 
-TODO throttling
+NEEDS WORK throttling
 
 When a receiver processes an unreliable message (a Message frame
 received from a datagram), it may ack it by sending an AckNackUnreliable
@@ -994,6 +994,9 @@ not yet being attached.
 
 It is a protocol violation to ack or nack a message that has already
 been acked or nacked by the same receiver.
+
+A sender must listen on its channel control stream for AckNackUnreliable
+frames, and process the acks and nacks contained therein.
 
 ## Channel shutdown
 
@@ -1063,7 +1066,10 @@ through the same queue, handle, or equivalent as those processed by the
 original receiver.
 
 When a sender receives a CloseReceiver frame on the channel control
-stream 
+stream, it must process the acks and nacks contained therein. Then, it
+must consider any messages which it has sent which have not been acked
+or nacked to be implicitly nacked, and process their nacks as such.
+After this, the sender ceases to exist.
 
 NEEDS WORK
 
@@ -1114,6 +1120,50 @@ it initializes in the "not reachable" state, with the exception of the
 entrypoint sender, which initializes in the "reachable" state. If a
 sender is created with a channel ID that was minted remotely, it
 initializes in the "reachable" state.
+
+When a sender ("original sender") is used to send a message with an
+attached sender/receiver, it must somehow store a "creation link" from
+the sent message to the attached sender/receiver.
+
+Whenever it first becomes the case that a sender has processed an ack
+for a message it sent and also the sender is in the reachable state, the
+sender must traverse all creation links going from the acked message to
+its attachments. If such a link links to a sender, it must transition
+the sender to the "reachable" state. Then, whether the link is to a
+sender or to a receiver, the link must be destroyed so it no longer
+consumes memory.
+
+When a sender processes a nack for a message it sent, whether or not the
+sender is in the reachable state, the sender must traverse all creation
+links goign from the nacked message to its attachments. It must run the
+"cascading loss detection" on the attached sender/receiver, and then
+destroy the link so it no longer consumes memory.
+
+When the cascading loss detection procedure runs on a receiver, the
+receiver must reset its channel control stream in the receiver-to-sender
+direction with the "lost" error code if the channel control stream is
+attached. Then, the receiver must cease to exist.
+
+When the cascading loss detection procedure runs on a sender, the sender
+must reset its channel control stream in the sender-to-receiver
+direction direction with the "lost" error code if the channel control
+stream exists. The sender should reset any streams on which it is solely
+sending Message frames with the "lost" error code, if handles to those
+streams are still accessible. Then, the cascading loss detection
+procedure must be run recursively on all creation links going from
+messages sent on that channel to other sender/receivers. It is not
+possible for the cascading loss detection procedure to reach a sender
+which is in the reachable state.
+
+
+
+
+
+
+
+
+
+
 
 
 
