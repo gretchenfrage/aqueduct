@@ -758,7 +758,8 @@ A ClosedChannelLost frame is encoded as:
 - The channel ID: A channel ID
 
 It is a protocol error for a ClosedChannelLost frame to occur elsewhere
-than in the connection control stream.
+than in a unidirectional QUIC stream, and as the only frame in that
+stream, other than possibly a Version frame.
 
 ## Reset error codes
 
@@ -1114,12 +1115,12 @@ by closing its local receiver, if the channel has not yet closed.
 
 ## Cascading loss detection
 
-A local sender is either in the "not reachable" state or the "reachable"
-state. When a sender is created, if its channel ID was minted locally,
-it initializes in the "not reachable" state, with the exception of the
-entrypoint sender, which initializes in the "reachable" state. If a
-sender is created with a channel ID that was minted remotely, it
-initializes in the "reachable" state.
+A local sender/receiver is either in the "not reachable" state or the
+"reachable" state. When a sender/receiver is created, if its channel ID
+was minted locally, it initializes in the "not reachable" state, with
+the exception of the entrypoint sender, which initializes in the
+"reachable" state. If a sender/receiver is created with a channel ID
+that was minted remotely, it initializes in the "reachable" state.
 
 When a sender ("original sender") is used to send a message with an
 attached sender/receiver, it must somehow store a "creation link" from
@@ -1128,10 +1129,9 @@ the sent message to the attached sender/receiver.
 Whenever it first becomes the case that a sender has processed an ack
 for a message it sent and also the sender is in the reachable state, the
 sender must traverse all creation links going from the acked message to
-its attachments. If such a link links to a sender, it must transition
-the sender to the "reachable" state. Then, whether the link is to a
-sender or to a receiver, the link must be destroyed so it no longer
-consumes memory.
+its attachments. For each such link, it must transition the linked
+sender/receiver to the "reachable" state. Then, the link must be
+destroyed so that it no longer consumes memory.
 
 When a sender processes a nack for a message it sent, whether or not the
 sender is in the reachable state, the sender must traverse all creation
@@ -1146,16 +1146,26 @@ attached. Then, the receiver must cease to exist.
 
 When the cascading loss detection procedure runs on a sender, the sender
 must reset its channel control stream in the sender-to-receiver
-direction direction with the "lost" error code if the channel control
-stream exists. The sender should reset any streams on which it is solely
+direction with the "lost" error code if the channel control stream
+exists. The sender should reset any streams on which it is solely
 sending Message frames with the "lost" error code, if handles to those
 streams are still accessible. Then, the cascading loss detection
 procedure must be run recursively on all creation links going from
-messages sent on that channel to other sender/receivers. It is not
-possible for the cascading loss detection procedure to reach a sender
-which is in the reachable state.
+messages sent on that channel to other sender/receivers.
 
-
+If a sender or a receiver ceases to exist while still in the "not
+reachable" state, it must preserve its creation link state so that it
+can be found if a creation link is traversed to it, and preserves any
+links it has to other senders/receivers so that they may be recursively
+traversed. When the loss detection procedure runs on a sender/receiver
+which has ceased to exist, rather than trying to close the
+sender/receiver's channel control stream (which no longer exists), the
+local side must open a new unidirectional stream and use it to send a
+LostChannelClosed frame with the channel ID of the channel which the
+cascading loss detection procedure is being run on, and then finish the
+stream. It is possibly for recursive calls to the cascading loss
+detection procedure to go back and forth through between
+senders/receivers which still exist and which have ceased to exist.
 
 
 
