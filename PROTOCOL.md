@@ -618,8 +618,8 @@ The following frame type bytes and corresponding frame types exist:
 - 4: SentUnreliable
 - 5: AckReliable
 - 6: AckNackUnreliable
-- 7: FinishSender // NEEDS WORK: rename to like, FinishSender, CloseReceiver
-- 8: FinalAckNack
+- 7: FinishSender
+- 8: CloseReceiver
 - 9: ClosedChannelLost
 
 ### Version frames
@@ -737,20 +737,16 @@ in a channel control stream in the sender-to-receiver direction, and as
 the final frame in that stream in that direction before it finishes or
 resets.
 
-### FinalAckNack frames
+### CloseReceiver frames
 
-A FinalAckNack frame is encoded as:
+A CloseReceiver frame is encoded as:
 
 - The frame type byte: 8
-- Final reliable acks and nacks: Pos-neg range data, positive ranges
-  represent acks, negative ranges represent nacks, and the start is the
-  highest message number in the channel's reliable message space for
-  which all message numbers less than it have been acked.
-- Final unreliable acks and nacks: Pos-neg range of data, positive
-  ranges represent acks, negative ranges represent nacks, and the start
-  is where the last AckNackUnreliable for this channel left off.
+- Final reliable acks and nacks: Pos-neg range data, starting at zero, 
+  wherein positive ranges represent acks, and negative ranges represent
+  nacks.
 
-It is a protocol error for a FinalAckNack frame to occur elsewhere than
+It is a protocol error for a CloseReceiver frame to occur elsewhere than
 as the final frame in a channel control stream in the receiver-to-sender
 direction.
 
@@ -768,10 +764,8 @@ than in the connection control stream.
 
 The following error codes might be used when resetting a QUIC stream:
 
-- 1: "sender cancelled"
-- 2: "sender lost"
-- 3: "receiver dropped"
-- 4: "receiver lost"
+- 1: "cancelled"
+- 2: "lost"
 
 ## Connection control stream
 
@@ -1003,7 +997,7 @@ been acked or nacked by the same receiver.
 
 ## Channel shutdown
 
-### Finishing
+### Finishing a sender
 
 The application must be provided an API to attempt to gracefully finish
 a channel via its local sender. For a sender to attempt to gracefully a
@@ -1020,35 +1014,97 @@ finishing state. If it is possible for the application to request this
 be done, an error should be returned to the application.
 
 When a receiver receives a FinishSender frame, the receiver must enter
-the "finishing" state. Once in the finishing state, the receiver can
-finalize finishing once all declared messages have been acked or nacked.
-The receiver must wait for all declared reliable messages to have been
-received. The receiver must wait for all declared unreliable messages to
-either have been received, or to have been nacked. The receiver must not
-nack unaccounted-for unreliable messages immediately merely because it
-has entered the finishing state--it must give them a fair chance to
-arrive. A receiver in the finishing state should follow similar waiting
-logic in terms of nacking unreliable messages as it would if it were not
-in the finishing state. Once these conditions are met for a receiver,
-the receiver must finalizing finishing.
+the "finishing" state. When in the finishing state, the receiver must
+close once all declared messages have been acked or nacked. Before the
+receiver closes due to the sender finishing, it must wait for all
+declared reliable messages to have been received, and for all declared
+unreliable messages to either have been received or to have been nacked.
+The receiver must not nack unaccounted-for unreliable messages
+immediately merely because it has entered the finishing state--it must
+give them a fair chance to arrive. A receiver in the finishing state
+should follow similar waiting logic in terms of nacking unreliable
+messages as it would if it were not in the finishing state. Once these
+conditions are met for a receiver, the receiver must close if it has not
+already closed.
 
+If a receiver closes due to the sender finishing, the application must
+have the ability to receive all messages acked prior to it closing,
+followed by observing the fact that the channel has finished.
 
+### Closing a receiver
 
+Several things can trigger a receiver to close. The actual closing of a
+receiver does not itself require waiting for declared messages to be
+received or declared lost--those are requirements of the finishing
+procedure, which can result in the calling of the closing procedure.
 
+If something other than the receiver being in the finishing state causes
+the receiver to be closed, the closing of the receiver may be performed
+despite the conditions for graceful shutdown not yet being met.
 
+A receiver must not and cannot be closed until its channel control
+stream is attached.
 
+When a receiver closes, it must send an AckNackUnreliable frame on its
+connection control stream that acks all unreliable messages still
+needing acks, unless there are no unreliable messages needing acks. It
+does not have to transmit trailing nacks with no acks beyond them. Then,
+the receiver must send a CloseReceiver frame. The CloseReceiver frame
+must ack all reliable messages still needing acks. Then, the channel
+control stream must be finished in the receiver-to-sender direction.
 
-For a sender to initiate an attempt to
-gracefully finish its channel, it must send a SentUnreliable frame
+After this, the receiver must cease to exist. The Aqueduct
+implementation must not process any further messages on that receiver.
+Due to the "ghost receiver" phenomenon, it may be possible that a
+different receiver could be created with the same channel ID, and that
+it could process messages--however, the Aqueduct implementation must
+ensure that those messages would not be visible to the application
+through the same queue, handle, or equivalent as those processed by the
+original receiver.
 
+When a sender receives a CloseReceiver frame on the channel control
+stream 
 
- When a sender attempts to gracefully
-finish a channel, it must 
+NEEDS WORK
 
+### Cancelling a sender
 
-An application may attempt to trigger a sender to attempt to gracefully
-finish its channel. When a sender attempts to gracefully 
-A sender may attempt to gracefully 
+The application must be provided an API to attempt to abruptly cancel a
+channel via its local sender. For a sender to attempt to gracefully a
+finish its channel, it must first wait for the channel control stream to
+become attached if it is not already attached. Then, the sender must
+reset the channel control stream in the sender-to-receiver direction
+with the "cancelled" error code.
+
+A sender must not send any additional messages after cancelling. If the
+application tries to send additional messages on a sender after it has
+cancelled, an error should be returned to the application. 
+
+The sender should reset any streams on which it is solely sending
+Message frames for the channel immediately upon beginning the cancelling
+procedure, if handles to those streams are still accessible, even if the
+channel control stream has not yet been attached.
+
+NEEDS WORK what if immediate reset is not observed by remote side because it never
+observes stream opening / being attached in first place?
+
+TODO only assign message numbers to messages with attachments? an
+     optimization along those lines may work but it may need to become a
+     bit more complicated.
+
+When a receiver observes its channel control stream being reset in the
+sender-to-receiver direction with the "cancelled" error code, it must
+immediately close. Messages enqueued for delivery to the application but
+not yet observed by the application should be discarded. The application
+must be able to observe that the channel was cancelled.
+
+TODO try to cancel sender after channel state has been almost totally
+     discarded? eh, probably not this one, too weird. maybe though?
+
+### Application closing a receiver
+
+The application must be provided an API to immediately close a channel
+by closing its local receiver, if the channel has not yet closed.
 
 ## Cascading loss detection
 
