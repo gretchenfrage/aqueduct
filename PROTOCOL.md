@@ -959,10 +959,9 @@ ChannelControl frame is received from something other than a
 bidirectional QUIC stream. It is a protocol error if the ChannelControl
 frame has a channel ID that indicates that it was minted by the remote
 side. If a local sender/receiver does not exist with its channel ID, the
-stream must be reset with a "sender lost"/"receiver lost" error code. If
-a local sender/receiver exists with its channel ID, but it already has a
-channel control stream attached, it must be reset with a
-"sender lost"/"receiver lost" error code.
+stream must be reset with a "lost" error code. If a local
+sender/receiver exists with its channel ID, but it already has a channel
+control stream attached, it must be reset with a "lost" error code.
 
 ### Acking and nacking
 
@@ -1167,9 +1166,15 @@ stream. It is possibly for recursive calls to the cascading loss
 detection procedure to go back and forth through between
 senders/receivers which still exist and which have ceased to exist.
 
+If a sender/receiver observes its channel control stream being reset
+with a "lost" error code, the sender/receiver must immediately cease to
+exist.
 
+NEEDS WORK elaborate on what that means for channels which have queued
+messages / have had a handle to send / receive taken by something else
 
-
+NEEDS WORK maybe it is best to avoid running deserialization middleware
+on received messages until...? 
 
 
 
