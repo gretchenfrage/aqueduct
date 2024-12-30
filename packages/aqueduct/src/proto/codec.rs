@@ -1,7 +1,12 @@
 // encoding/decoding things on the wire
 
-use crate::zero_copy::{*, quic::*};
-use bytes::*;
+use crate::zero_copy::{
+    quic::QuicStreamReader,
+    MultiBytes,
+    Cursor,
+    MultiBytesWriter,
+};
+use bytes::Bytes;
 use anyhow::*;
 
 
@@ -52,75 +57,405 @@ impl ChanId {
     }
 }
 
+pub(crate) enum QuicReader<'a> {
+    Stream(QuicStreamReader),
+    // TODO: adapt this to be able to just be a MultiBytes directly instead
+    Datagram(Cursor<'a>),
+}
+
+impl<'a> QuicReader<'a> {
+    pub(crate) fn stream(stream: quinn::RecvStream) -> Self {
+        QuicReader::Stream(QuicStreamReader::new(stream))
+    }
+
+    pub(crate) fn datagram(datagram: &'a MultiBytes) -> Self {
+        QuicReader::Datagram(datagram.cursor())
+    }
+
+    async fn read(&mut self, buf: &mut [u8]) -> Result<()> {
+        Ok(match self {
+            &mut QuicReader::Stream(ref mut inner) => inner.read(buf).await?,
+            &mut QuicReader::Datagram(ref mut inner) => inner.read(buf)?,
+        })
+    }
+
+    async fn read_byte(&mut self) -> Result<u8> {
+        Ok(match self {
+            &mut QuicReader::Stream(ref mut inner) => inner.read_byte().await?,
+            &mut QuicReader::Datagram(ref mut inner) => inner.read_byte()?,
+        })
+    }
+
+    async fn read_zc(&mut self, mut n: usize) -> Result<MultiBytes> {
+        Ok(match self {
+            &mut QuicReader::Stream(ref mut inner) => inner.read_zc(n).await?,
+            &mut QuicReader::Datagram(ref mut inner) => inner.read_zc(n)?,
+        })
+    }
+
+    async fn is_done(&mut self) -> Result<bool> {
+        Ok(match self {
+            &mut QuicReader::Stream(ref mut inner) => inner.is_done().await?,
+            &mut QuicReader::Datagram(ref mut inner) => inner.remaining_len() == 0,
+        })
+    }
+
+    async fn read_vli_with_limit(&mut self, mut limit: Option<&mut usize>) -> Result<u64> {
+        let mut i: u64 = 0;
+        for x in 0..8 {
+            if let Some(limit) = limit.as_mut() {
+                ensure!(**limit >= 0, "expected more bytes");
+                **limit -= 1;
+            }
+            let b = self.read_byte().await?;
+            i |= ((b & VLI_MASK) as u64) << (x * 7);
+            if (b & VLI_MORE) == 0 {
+                return Ok(i);
+            }
+        }
+        debug_assert!((i & (0xffu64 << VLI_FINAL_SHIFT)) == 0);
+        if let Some(limit) = limit.as_mut() {
+            ensure!(**limit >= 0, "expected more bytes");
+            **limit -= 1;
+        }
+        let b = self.read_byte().await?;
+        i |= (b as u64) << VLI_FINAL_SHIFT;
+        Ok(i)
+    }
+
+    async fn read_vli(&mut self) -> Result<u64> {
+        Ok(self.read_vli_with_limit(None).await?)
+    }
+
+    async fn read_vli_usize(&mut self) -> Result<usize> {
+        let n = self.read_vli().await?;
+        n.try_into().map_err(|_| anyhow!("overflow casting var len int to usize: {}", n))
+    }
+
+    async fn read_chan_id(&mut self) -> Result<ChanId> {
+        self.read_vli().await.map(ChanId)
+    }
+}
+
 const VLI_MASK: u8 = 0b01111111;
 const VLI_MORE: u8 = 0b10000000;
 const VLI_FINAL_SHIFT: u8 = 56;
 
-// encode a variable length integer
-fn encode_vli(mut i: u64, w: &mut MultiBytesWriter) {
-    for _ in 0..8 {
-        let mut b = (i as u8 & VLI_MASK) as u8;
-        i >>= 7;
-        b |= ((i != 0) as u8) << 7;
-        w.write(&[b]);
-        if i == 0 {
-            return;
+/*
+
+    // encode a variable length integer
+    pub(crate) fn encode_vli(mut i: u64, w: &mut MultiBytesWriter) {
+        for _ in 0..8 {
+            let mut b = (i as u8 & VLI_MASK) as u8;
+            i >>= 7;
+            b |= ((i != 0) as u8) << 7;
+            w.write(&[b]);
+            if i == 0 {
+                return;
+            }
         }
+        debug_assert!(i != 0 && (i >> 8) == 0);
+        w.write(&[i as u8]);
     }
-    debug_assert!(i != 0 && (i >> 8) == 0);
-    w.write(&[i as u8]);
-}
 
-// encode a variable length byte array
-fn encode_vlba(b: MultiBytes, w: &mut MultiBytesWriter) {
-    encode_vli(b.len().try_into().expect("usize overflowed u64"), w);
-    w.write_zc(b);
-}
+    // encode a variable length byte array
+    pub(crate) fn encode_vlba(b: MultiBytes, w: &mut MultiBytesWriter) {
+        encode_vli(b.len().try_into().expect("usize overflowed u64"), w);
+        w.write_zc(b);
+    }
 
-// decode a variable length integer from already-in-memory bytes
-fn decode_vli(r: &mut Cursor) -> Result<u64> {        
-    let mut i: u64 = 0;
-    for x in 0..8 {
+    // decode a variable length integer from already-in-memory bytes
+    pub(crate) fn decode_vli(r: &mut Cursor) -> Result<u64> {        
+        let mut i: u64 = 0;
+        for x in 0..8 {
+            let b = r.read_byte()?;
+            i |= ((b & VLI_MASK) as u64) << (x * 7);
+            if (b & VLI_MORE) == 0 {
+                return Ok(i);
+            }
+        }
+        debug_assert!((i & (0xffu64 << VLI_FINAL_SHIFT)) == 0);
         let b = r.read_byte()?;
-        i |= ((b & VLI_MASK) as u64) << (x * 7);
-        if (b & VLI_MORE) == 0 {
-            return Ok(i);
-        }
+        i |= (b as u64) << VLI_FINAL_SHIFT;
+        Ok(i)
     }
-    debug_assert!((i & (0xffu64 << VLI_FINAL_SHIFT)) == 0);
-    let b = r.read_byte()?;
-    i |= (b as u64) << VLI_FINAL_SHIFT;
-    Ok(i)
-}
 
-// decode a variable length byte array from already-in-memory bytes
-fn decode_vlba(r: &mut Cursor) -> Result<MultiBytes> {
-    let len = decode_vli(r)?.try_into().map_err(|_| anyhow!("u64 overflowed usize"))?;
-    Ok(r.read_zc(len)?)
-}
+    // decode a variable length byte array from already-in-memory bytes
+    pub(crate) fn decode_vlba(r: &mut Cursor) -> Result<MultiBytes> {
+        let len = decode_vli(r)?.try_into().map_err(|_| anyhow!("u64 overflowed usize"))?;
+        Ok(r.read_zc(len)?)
+    }
 
-// asynchronously read and decode a variable length integer from a QUIC stream
-async fn decode_vli_async(r: &mut QuicMultiBytesReader) -> Result<u64> {        
-    let mut i: u64 = 0;
-    for x in 0..8 {
+    // asynchronously read and decode a variable length integer from a QUIC stream
+    pub(crate) async fn decode_vli_async(r: &mut QuicReader) -> Result<u64> {        
+        let mut i: u64 = 0;
+        for x in 0..8 {
+            let b = r.read_byte().await?;
+            i |= ((b & VLI_MASK) as u64) << (x * 7);
+            if (b & VLI_MORE) == 0 {
+                return Ok(i);
+            }
+        }
+        debug_assert!((i & (0xffu64 << VLI_FINAL_SHIFT)) == 0);
         let b = r.read_byte().await?;
-        i |= ((b & VLI_MASK) as u64) << (x * 7);
-        if (b & VLI_MORE) == 0 {
-            return Ok(i);
+        i |= (b as u64) << VLI_FINAL_SHIFT;
+        Ok(i)
+    }
+
+    // asynchronously read and decode a variable length byte array from a QUIC stream
+    pub(crate) async fn decode_vlba_async(r: &mut QuicReader) -> Result<MultiBytes> {
+        let len = decode_vli_async(r).await?.try_into().map_err(|_| anyhow!("u64 overflowed usize"))?;
+        Ok(r.read_zc(len).await?)
+    }
+
+    pub(crate) enum FrameType {
+        Version,
+        ConnectionControl,
+        ChannelControl,
+        Message,
+        SentUnreliable,
+        AckReliable,
+        AckNackUnreliable,
+        FinishSender,
+        CloseReceiver,
+        ClosedChannelLost,
+    }
+
+    impl FrameType {
+        pub(crate) async fn read(r: &mut QuicReader) -> Result<Self> {
+            use FrameType::*;
+            Ok(match r.read_byte().await? {
+                239 => Version,
+                1 => ConnectionControl,
+                2 => ChannelControl,
+                3 => Message,
+                4 => SentUnreliable,
+                5 => AckReliable,
+                6 => AckNackUnreliable,
+                7 => FinishSender,
+                8 => CloseReceiver,
+                9 => ClosedChannelLost,
+                b => bail!("invalid frame type byte: {}", b),
+            })
         }
     }
-    debug_assert!((i & (0xffu64 << VLI_FINAL_SHIFT)) == 0);
-    let b = r.read_byte().await?;
-    i |= (b as u64) << VLI_FINAL_SHIFT;
-    Ok(i)
+    */
+
+pub(crate) struct FramesReader<'a>(QuicReader<'a>);
+
+impl<'a> FramesReader<'a> {
+    pub(crate) fn new(r: QuicReader<'a>) -> Self {
+        FramesReader(r)
+    }
+
+    pub(crate) async fn read_frame(mut self) -> Result<FrameReader<'a>> {
+        Ok(match self.0.read_byte().await? {
+            239 => FrameReader::Version(FrameReaderVersion(self.0)),
+            1 => FrameReader::ConnectionControl(FrameReaderConnectionControl(self.0)),
+            2 => FrameReader::ChannelControl(FrameReaderChannelControl(self.0)),
+            3 => FrameReader::Message(FrameReaderMessage(self.0)),
+            4 => FrameReader::SentUnreliable(FrameReaderSentUnreliable(self.0)),
+            5 => FrameReader::AckReliable(FrameReaderAckReliable(self.0)),
+            6 => FrameReader::AckNackUnreliable(FrameReaderAckNackUnreliable(self.0)),
+            7 => FrameReader::FinishSender(FrameReaderFinishSender(self.0)),
+            8 => FrameReader::CloseReceiver(FrameReaderCloseReceiver(self.0)),
+            9 => FrameReader::ClosedChannelLost(FrameReaderClosedChannelLost(self.0)),
+            b => bail!("invalid frame type byte: {}", b),
+        })
+    }
 }
 
-// asynchronously read and decode a variable length byte array from a QUIC stream
-async fn decode_vlba_async(r: &mut QuicMultiBytesReader) -> Result<MultiBytes> {
-    let len = decode_vli_async(r).await?.try_into().map_err(|_| anyhow!("u64 overflowed usize"))?;
-    Ok(r.read_zc(len).await?)
+pub(crate) enum FrameReader<'a> {
+    Version(FrameReaderVersion<'a>),
+    ConnectionControl(FrameReaderConnectionControl<'a>),
+    ChannelControl(FrameReaderChannelControl<'a>),
+    Message(FrameReaderMessage<'a>),
+    SentUnreliable(FrameReaderSentUnreliable<'a>),
+    AckReliable(FrameReaderAckReliable<'a>),
+    AckNackUnreliable(FrameReaderAckNackUnreliable<'a>),
+    FinishSender(FrameReaderFinishSender<'a>),
+    CloseReceiver(FrameReaderCloseReceiver<'a>),
+    ClosedChannelLost(FrameReaderClosedChannelLost<'a>),
 }
 
+pub(crate) struct FrameReaderVersion<'a>(QuicReader<'a>);
+
+impl<'a> FrameReaderVersion<'a> {
+    pub(crate) async fn read_validate(mut self) -> Result<FramesReader<'a>> {
+        let mut buf = [0; 15];
+        self.0.read(&mut buf).await?;
+        ensure!(&buf[..7] == &[80, 95, 166, 96, 15, 64, 142], "wrong version frame magic bytes");
+        ensure!(&buf[7..] == b"AQUEDUCT", "wrong version frame human text");
+        let version_len = self.0.read_vli().await?;
+        ensure!(version_len <= 64, "unreasonably long version length");
+        let version = self.0.read_zc(version_len as usize).await?;
+        ensure!(version == b"0.0.0-AFTER"[..], "unknown version: {:?}", version);
+        Ok(FramesReader(self.0))
+    }
+}
+
+pub(crate) struct FrameReaderConnectionControl<'a>(QuicReader<'a>);
+
+impl<'a> FrameReaderConnectionControl<'a> {
+    pub(crate) async fn read_headers_len(mut self) -> Result<(FrameReaderConnectionControlPart2<'a>, usize)> {
+        let len = self.0.read_vli_usize().await?;
+        Ok((FrameReaderConnectionControlPart2(self.0, len), len))
+    }
+}
+
+pub(crate) struct FrameReaderConnectionControlPart2<'a>(QuicReader<'a>, usize);
+
+impl<'a> FrameReaderConnectionControlPart2<'a> {
+    pub(crate) async fn read_headers(mut self) -> Result<(FramesReader<'a>, MultiBytes)> {
+        let o = self.0.read_zc(self.1).await?;
+        Ok((FramesReader(self.0), o))
+    }
+}
+
+pub(crate) struct FrameReaderChannelControl<'a>(QuicReader<'a>);
+
+impl<'a> FrameReaderChannelControl<'a> {
+    pub(crate) async fn read_chan_id(mut self) -> Result<(FramesReader<'a>, ChanId)> {
+        let o = self.0.read_chan_id().await?;
+        Ok((FramesReader(self.0), o))
+    }
+}
+
+pub(crate) struct FrameReaderMessage<'a>(QuicReader<'a>);
+
+impl<'a> FrameReaderMessage<'a> {
+    pub(crate) async fn read_chan_id(mut self) -> Result<(FrameReaderMessagePart2<'a>, ChanId)> {
+        let o = self.0.read_chan_id().await?;
+        Ok((FrameReaderMessagePart2(self.0), o))
+    }
+}
+
+pub(crate) struct FrameReaderMessagePart2<'a>(QuicReader<'a>);
+
+impl<'a> FrameReaderMessagePart2<'a> {
+    pub(crate) async fn read_message_num(mut self) -> Result<(FrameReaderMessagePart3<'a>, u64)> {
+        let o = self.0.read_vli().await?;
+        Ok((FrameReaderMessagePart3(self.0), o))
+    }
+}
+
+pub(crate) struct FrameReaderMessagePart3<'a>(QuicReader<'a>);
+
+impl<'a> FrameReaderMessagePart3<'a> {
+    pub(crate) async fn read_attachments_len(mut self) -> Result<(FrameReaderMessagePart4<'a>, usize)> {
+        let len = self.0.read_vli_usize().await?;
+        Ok((FrameReaderMessagePart4(self.0, len), len))
+    }
+}
+
+pub(crate) struct FrameReaderMessagePart4<'a>(QuicReader<'a>, usize);
+
+impl<'a> FrameReaderMessagePart4<'a> {
+    pub(crate) async fn read_attachments(mut self) -> Result<(FrameReaderMessagePart5<'a>, MultiBytes)> {
+        let o = self.0.read_zc(self.1).await?;
+        Ok((FrameReaderMessagePart5(self.0), o))
+    }
+}
+
+pub(crate) struct FrameReaderMessagePart5<'a>(QuicReader<'a>);
+
+impl<'a> FrameReaderMessagePart5<'a> {
+    pub(crate) async fn read_payload_len(mut self) -> Result<(FrameReaderMessagePart6<'a>, usize)> {
+        let len = self.0.read_vli_usize().await?;
+        Ok((FrameReaderMessagePart6(self.0, len), len))
+    }
+}
+
+pub(crate) struct FrameReaderMessagePart6<'a>(QuicReader<'a>, usize);
+
+impl<'a> FrameReaderMessagePart6<'a> {
+    pub(crate) async fn read_payload(mut self) -> Result<(FramesReader<'a>, MultiBytes)> {
+        let o = self.0.read_zc(self.1).await?;
+        Ok((FramesReader(self.0), o))
+    }
+}
+
+
+pub(crate) struct FrameReaderSentUnreliable<'a>(QuicReader<'a>);
+
+impl<'a> FrameReaderSentUnreliable<'a> {
+    pub(crate) async fn read_sent_unreliable_diff(mut self) -> Result<(FramesReader<'a>, u64)> {
+        let o = self.0.read_vli().await?;
+        Ok((FramesReader(self.0), o))
+    }
+}
+
+pub(crate) struct FrameReaderAckReliable<'a>(QuicReader<'a>);
+
+/*
+
+impl<'a> FrameReaderAckReliable<'a> {
+    pub(crate) async fn read_acks_beginning(mut self) -> Result<FrameReaderAckReliableAck<'a>> {
+        let len = self.0.read_vli_usize().await?;
+        Ok(FrameReaderAckReliableAck { r: self.0, remaining_len: len })
+    }
+}
+
+pub(crate) struct FrameReaderAckReliableAck<'a> {
+    r: QuicReader<'a>,
+    remaining_len: usize,
+}
+
+impl<'a> FrameReaderAckReliableAck<'a> {
+    pub(crate) async fn read_ack(
+        mut self,
+    ) -> Result<(FrameReaderAckReliableNotYetAckOrEnd<'a>, u64)> {
+        let o = self.r.read_vli_with_limit(Some(&mut self.remaining_len)).await?;
+        let next = if self.remaining_len == 0 {
+            FrameReaderAckReliableNotYetAckOrEnd::End(FramesReader(self.r))
+        } else {
+            FrameReaderAckReliableNotYetAckOrEnd::NotYetAck(self)
+        };
+    }
+}
+
+pub(crate) enum FrameReaderAckReliableAckOrEnd<'a> {
+    Ack(FrameReaderAckReliableAck<'a>),
+    End(FramesReader<'a>),
+}
+
+pub(crate) struct FrameReaderAckReliableNotYetAck<'a> {
+    r: QuicReader<'a>,
+    remaining_len: usize,
+}
+
+pub(crate) enum FrameReaderAckReliableNotYetAckOrEnd<'a> {
+    NotYetAck(FrameReaderAckReliableNotYetAck<'a>),
+    End(FramesReader<'a>),
+}
+*/
+pub(crate) struct FrameReaderAckNackUnreliable<'a>(QuicReader<'a>);
+
+impl<'a> FrameReaderAckNackUnreliable<'a> {
+
+}
+
+pub(crate) struct FrameReaderFinishSender<'a>(QuicReader<'a>);
+
+impl<'a> FrameReaderFinishSender<'a> {
+
+}
+
+pub(crate) struct FrameReaderCloseReceiver<'a>(QuicReader<'a>);
+
+impl<'a> FrameReaderCloseReceiver<'a> {
+
+}
+
+pub(crate) struct FrameReaderClosedChannelLost<'a>(QuicReader<'a>);
+
+impl<'a> FrameReaderClosedChannelLost<'a> {
+
+}
+
+
+
+/*
 // aqueduct frame that could appear on a datagram / stream that has not yet been established as a
 // channel control stream
 pub(crate) enum NoCtxFrame {
@@ -142,9 +477,10 @@ pub(crate) enum NoCtxFrame {
     },
 }
 
-const VERSION_FRAME_MAGIC_BYTES: [u8; 8] = [239, 80, 95, 166, 96, 15, 64, 142];
-const VERSION_FRAME_HUMAN_TEXT: [u8; 8] = *b"AQUEDUCT";
-const VERSION_FRAME_VERSION: &[u8] = b"0.0.0-AFTER";
+pub(crate) const VERSION_FRAME_MAGIC_BYTES: [u8; 8] = [239, 80, 95, 166, 96, 15, 64, 142];
+pub(crate) const VERSION_FRAME_HUMAN_TEXT: [u8; 8] = *b"AQUEDUCT";
+pub(crate) const VERSION_FRAME_VERSION: &[u8] = b"0.0.0-AFTER";
+
 
 impl NoCtxFrame {
     fn encode(self, w: &mut MultiBytesWriter) {
@@ -176,7 +512,7 @@ impl NoCtxFrame {
         }
     }
 
-    async fn decode(r: &mut QuicMultiBytesReader) -> Result<Self> {
+    async fn decode(r: &mut QuicReader) -> Result<Self> {
         Ok(match r.read_byte().await? {
             b if b == VERSION_FRAME_MAGIC_BYTES[0] => {
                 let mut buf = [0; 15];
@@ -315,7 +651,7 @@ impl ChanCtrlFrame {
         }
     }
 
-    async fn decode(r: &mut QuicMultiBytesReader) -> Result<Self> {
+    async fn decode(r: &mut QuicReader) -> Result<Self> {
         Ok(match r.read_byte().await? {
             b if b == VERSION_FRAME_MAGIC_BYTES[0] => bail!("Version frame in chan ctrl stream"),
             1 => bail!("ConnectionControl frame in chan ctrl stream"),
@@ -340,7 +676,7 @@ impl ChanCtrlFrame {
             b => bail!("invalid frame type byte: {}", b),
         })
     }
-}
+}*/
 
 #[cfg(test)]
 mod tests {

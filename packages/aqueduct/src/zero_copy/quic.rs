@@ -11,16 +11,16 @@ const MAX_CHUNK_LENGTH: usize = 16384;
 
 // wrapper around a quinn `RecvStream` which provides a `MultiBytes` cursor-like API
 #[derive(Debug)]
-pub(crate) struct QuicMultiBytesReader {
+pub(crate) struct QuicStreamReader {
     stream: RecvStream,
     chunk: Bytes,
     chunk_offset: usize,
 }
 
-impl QuicMultiBytesReader {
+impl QuicStreamReader {
     // construct around a QUIC stream
     pub(crate) fn new(stream: RecvStream) -> Self {
-        QuicMultiBytesReader {
+        QuicStreamReader {
             stream,
             chunk: Bytes::new(),
             chunk_offset: 0,
@@ -52,6 +52,14 @@ impl QuicMultiBytesReader {
             }
         }
         Ok(())
+    }
+    
+    // read a single byte
+    pub(crate) async fn read_byte(&mut self) -> Result<u8, Error> {
+        let mut buf = [0];
+        self.read(&mut buf).await?;
+        let [b] = buf;
+        Ok(b)
     }
     
     // read the next n bytes in a zero-copy fashion and return them as a MultiBytes
@@ -98,13 +106,5 @@ impl QuicMultiBytesReader {
             }
         }
         Ok(false)
-    }
-    
-    // read a single byte
-    pub(crate) async fn read_byte(&mut self) -> Result<u8, Error> {
-        let mut buf = [0];
-        self.read(&mut buf).await?;
-        let [b] = buf;
-        Ok(b)
     }
 }

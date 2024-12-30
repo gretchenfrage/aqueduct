@@ -74,6 +74,20 @@ impl Extend<Bytes> for MultiBytes {
     }
 }
 
+impl PartialEq<[u8]> for MultiBytes {
+    fn eq(&self, mut rhs: &[u8]) -> bool {
+        if self.len() != rhs.len() {
+            return false;
+        }
+        for page in &self.pages {
+            if *page != rhs[..page.len()] {
+                return false;
+            }
+            rhs = &rhs[page.len()..];
+        }
+        true
+    }
+}
 // TODO: eq impls with MultiBytes and contiguous bufs
 
 

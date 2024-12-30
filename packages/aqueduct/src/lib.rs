@@ -1,6 +1,9 @@
 #![allow(dead_code)] // TODO
 #![doc = include_str!("../../../README.md")] // TODO: fix links
 
+#[macro_use]
+extern crate tracing;
+
 pub extern crate bytes;
 #[cfg(feature = "futures")]
 pub extern crate futures;
