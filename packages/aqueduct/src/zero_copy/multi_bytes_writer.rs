@@ -63,12 +63,12 @@ impl MultiBytesWriter {
     pub fn write_zc<B: Into<MultiBytes>>(&mut self, bytes: B) {
         let bytes = bytes.into();
         if bytes.len() < MIN_ZC_BYTES {
-            for chunk in bytes.into_chunks() {
+            for chunk in bytes.into_pages() {
                 // TODO: make this mesh better with capacity reservation
                 self.write(&chunk);
             }
         } else {
-            for chunk in bytes.into_chunks() {
+            for chunk in bytes.into_pages() {
                 self.inner.extend(once(Bytes::from(take(&mut self.buf))));
                 self.doublings = 0;
                 self.inner.extend(once(chunk));
@@ -85,6 +85,12 @@ impl MultiBytesWriter {
     /// Number of bytes written so far.
     pub fn len(&self) -> usize {
         self.inner.len() + self.buf.len()
+    }
+}
+
+impl From<MultiBytesWriter> for MultiBytes {
+    fn from(writer: MultiBytesWriter) -> MultiBytes {
+        writer.build()
     }
 }
 

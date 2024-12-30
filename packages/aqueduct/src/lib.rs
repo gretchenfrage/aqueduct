@@ -12,6 +12,7 @@ pub mod docs;
 pub mod zero_copy;
 
 mod channel;
+mod codec;
 mod proto;
 
 pub use crate::channel::api::*;

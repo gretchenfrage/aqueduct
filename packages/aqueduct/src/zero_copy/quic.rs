@@ -54,14 +54,6 @@ impl QuicStreamReader {
         Ok(())
     }
     
-    // read a single byte
-    pub(crate) async fn read_byte(&mut self) -> Result<u8, Error> {
-        let mut buf = [0];
-        self.read(&mut buf).await?;
-        let [b] = buf;
-        Ok(b)
-    }
-    
     // read the next n bytes in a zero-copy fashion and return them as a MultiBytes
     pub(crate) async fn read_zc(&mut self, mut n: usize) -> Result<MultiBytes, Error> {
         let mut out = MultiBytes::default();

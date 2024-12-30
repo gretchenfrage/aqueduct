@@ -1,11 +1,7 @@
 
-use std::{
-    iter::{Peekable, once},
-    io::{self, Read},
-    slice,
-};
+use std::iter::once;
 use thiserror::Error;
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use smallvec::SmallVec;
 
 const MULTI_BYTES_INLINE: usize = 2;
@@ -16,8 +12,14 @@ const MULTI_BYTES_INLINE: usize = 2;
 /// additional allocation. Empty segments are automatically filtered out.
 #[derive(Debug, Clone, Default)]
 pub struct MultiBytes {
+    // empty pages are alwasys filtered out
     pages: SmallVec<[Bytes; MULTI_BYTES_INLINE]>,
-    // total length
+    // offset page idx
+    // handles to pages before the offset are cleared so their memory can be reclaimed
+    offset_page: usize,
+    // offset byte index into offset page
+    offset_bytes: usize,
+    // total byte length starting at offset
     len: usize,
 }
 
@@ -27,22 +29,115 @@ impl MultiBytes {
         self.len
     }
 
-    /// Get a cursor for scanning and reading through these bytes.
-    pub fn cursor(&self) -> Cursor<'_> {
-        Cursor {
-            inner: self,
-            offset: 0,
-            page_iter: self.pages.iter().peekable(),
-            page_offset: 0,
+    /// Copy the next `buf.len()` bytes to `buf` and advance `self` past them.
+    ///
+    /// Errors if not that many bytes remain.
+    pub fn read(&mut self, mut buf: &mut [u8]) -> Result<(), TooFewBytesError> {
+        self.len = self.len.checked_sub(buf.len()).ok_or(TooFewBytesError)?;
+        loop {
+            let page_rem = &self.pages[self.offset_page][self.offset_bytes..];
+
+            if buf.len() >= page_rem.len() {
+                let (buf1, buf2) = buf.split_at_mut(page_rem.len());
+                buf1.copy_from_slice(page_rem);
+                self.pages[self.offset_page].clear();
+                self.offset_page += 1;
+                self.offset_bytes = 0;
+                buf = buf2;
+            } else {
+                buf.copy_from_slice(&page_rem[..buf.len()]);
+                self.offset_bytes += buf.len();
+                break;
+            }
         }
+        Ok(())
     }
-    
-    // TODO: these ought to be public
-    pub(crate) fn into_chunks(self) -> impl Iterator<Item=Bytes> {
+
+    /// Construct a [`MultiBytes`] from the next `n` bytes in a zero-copy fashion and advance
+    /// `self` past them.
+    ///
+    /// Errors if not that many bytes remain.
+    pub fn read_zc(&mut self, mut n: usize) -> Result<MultiBytes, TooFewBytesError> {
+        self.len = self.len.checked_sub(n).ok_or(TooFewBytesError)?;
+        let mut out = MultiBytes::default();
+        // you may wonder, why do we `loop` in `read` but add this redundant `n > 0` check here?
+        // it's because slicing an array is free, but `.slice`ing a `Bytes` isn't quite.
+        while n > 0 {
+            let mut page_rem = self.pages[self.offset_page].slice(self.offset_bytes..);
+
+            if n >= page_rem.len() {
+                n -= page_rem.len();
+                out.extend(once(page_rem));
+                self.pages[self.offset_page].clear();
+                self.offset_page += 1;
+                self.offset_bytes = 0;
+            } else {
+                page_rem.truncate(n);
+                out.extend(once(page_rem));
+                self.offset_bytes += n;
+                break;
+            }
+        }
+        Ok(out)
+    }
+
+    /// Advance `self` past the next `n` bytes without copying them to anywhere.
+    ///
+    /// Errors if not that many bytes remain.
+    pub fn skip(&mut self, mut n: usize) -> Result<(), TooFewBytesError> {
+        self.len = self.len.checked_sub(n).ok_or(TooFewBytesError)?;
+        loop {
+            let page_rem = self.pages[self.offset_page].len() - self.offset_bytes;
+
+            if n >= page_rem {
+                n -= page_rem;
+                self.pages[self.offset_page].clear();
+                self.offset_page += 1;
+                self.offset_bytes = 0;
+            } else {
+                self.offset_bytes += n;
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    /// Iterate over pages.
+    ///
+    /// It is strongly recommended not to ascribe any particular meaning to page boundaries. They
+    /// are considered an optimizations and may be automatically mangled in various cases.
+    pub fn iter_pages(&self) -> impl Iterator<Item=&Bytes> {
+        todo!();
+        self.pages.iter()
+    }
+
+    /// Convert into an iterator over pages.
+    ///
+    /// It is strongly recommended not to ascribe any particular meaning to page boundaries. They
+    /// are considered an optimizations and may be automatically mangled in various cases.
+    pub fn into_pages(self) -> impl Iterator<Item=Bytes> {
+        todo!();
         self.pages.into_iter()
     }
 
-    pub(crate) fn chunks_mut(&mut self) -> &mut [Bytes] {
+    /// Convert into a single [`Bytes`], copying as necessary.
+    pub fn defragment(self) -> Bytes {
+        let mut out = BytesMut::new();
+        for page in self.pages {
+            if out.is_empty() && page.is_unique() {
+                out = page.try_into_mut().ok().unwrap();
+            } else {
+                if out.is_empty() {
+                    out.reserve(self.len);
+                }
+                out.extend(page);
+            }
+        }
+        out.into()
+    }
+
+    // TODO: should be made public somehow
+    pub(crate) fn pages_mut(&mut self) -> &mut [Bytes] {
         &mut self.pages
     }
 }
@@ -55,6 +150,18 @@ impl From<Bytes> for MultiBytes {
     }
 }
 
+macro_rules! transitive_from {
+    ($($t:ty),*)=>{$(
+        impl From<$t> for MultiBytes {
+            fn from(t: $t) -> Self {
+                MultiBytes::from(Bytes::from(t))
+            }
+        }
+    )*};
+}
+
+transitive_from!(&'static [u8], &'static str, Box<[u8]>, String, Vec<u8>);
+
 impl FromIterator<Bytes> for MultiBytes {
     fn from_iter<I: IntoIterator<Item = Bytes>>(pages: I) -> Self {
         let mut len = 0;
@@ -62,7 +169,12 @@ impl FromIterator<Bytes> for MultiBytes {
             .filter(|page| !page.is_empty())
             .inspect(|page| len += page.len())
             .collect();
-        MultiBytes { pages, len }
+        MultiBytes {
+            pages,
+            offset_page: 0,
+            offset_bytes: 0,
+            len,
+        }
     }
 }
 
@@ -88,119 +200,42 @@ impl PartialEq<[u8]> for MultiBytes {
         true
     }
 }
-// TODO: eq impls with MultiBytes and contiguous bufs
 
-
-/// Cursor for scanning and reading through a [`MultiBytes`].
-#[derive(Debug, Clone)]
-pub struct Cursor<'a> {
-    inner: &'a MultiBytes,
-    offset: usize,
-    page_iter: Peekable<slice::Iter<'a, Bytes>>,
-    // offset into page_iter's next page
-    page_offset: usize,
-}
-
-impl<'a> Cursor<'a> {
-    /// How many bytes have already been advanced past.
-    ///
-    /// Begins at 0.
-    pub fn offset(&self) -> usize {
-        self.offset
-    }
-
-    /// How many bytes may still be advanced past before running out of bytes.
-    ///
-    /// Begins at `multi_bytes.len()`.
-    pub fn remaining_len(&self) -> usize {
-        self.inner.len() - self.offset
-    }
-
-    /// Copy the next `buf.len()` bytes to `buf` and advance past them.
-    ///
-    /// Errors if not that many bytes remain.
-    pub fn read(&mut self, mut buf: &mut [u8]) -> Result<(), TooFewBytesError> {
-        if buf.len() > self.remaining_len() {
-            return Err(TooFewBytesError);
+impl PartialEq<MultiBytes> for MultiBytes {
+    fn eq(&self, rhs: &MultiBytes) -> bool {
+        if self.len() != rhs.len() {
+            return false;
         }
-        self.offset += buf.len();
-        loop {
-            let page_rem = &self.page_iter.peek().unwrap()[self.page_offset..];
+        let mut pages_1 = self.iter_pages().peekable();
+        let mut offset_1 = 0;
+        let mut pages_2 = rhs.iter_pages().peekable();
+        let mut offset_2 = 0;
+        while pages_1.peek().is_some() {
+            let page_1 = pages_1.peek().unwrap();
+            let page_2 = pages_2.peek().unwrap();
+            let page_1_len = page_1.len() - offset_1;
+            let page_2_len = page_2.len() - offset_2;
+            let common_len = page_1_len.min(page_2_len);
+            if page_1[offset_1..][..common_len] != page_2[offset_2..][..common_len] {
+                return false;
+            }
 
-            if buf.len() >= page_rem.len() {
-                let (buf1, buf2) = buf.split_at_mut(page_rem.len());
-                buf1.copy_from_slice(page_rem);
-                self.page_iter.next().unwrap();
-                self.page_offset = 0;
-                buf = buf2;
+            if page_1_len > common_len {
+                offset_1 += page_1_len;
             } else {
-                buf.copy_from_slice(&page_rem[..buf.len()]);
-                self.page_offset += buf.len();
-                break;
+                offset_1 = 0;
+                pages_1.next().unwrap();
+            }
+
+            if page_2_len > common_len {
+                offset_2 += page_2_len;
+            } else {
+                offset_2 = 0;
+                pages_2.next().unwrap();
             }
         }
-        Ok(())
-    }
-
-    /// Convenience method to [`read`](Self::read) a single byte.
-    pub fn read_byte(&mut self) -> Result<u8, TooFewBytesError> {
-        let mut buf = [0];
-        self.read(&mut buf)?;
-        let [b] = buf;
-        Ok(b)
-    }
-
-    /// Construct a [`MultiBytes`] from the next `n` bytes in a zero-copy fashion and advance past
-    /// them.
-    ///
-    /// Errors if not that many bytes remain.
-    pub fn read_zc(&mut self, mut n: usize) -> Result<MultiBytes, TooFewBytesError> {
-        if n > self.remaining_len() {
-            return Err(TooFewBytesError);
-        }
-        self.offset += n;
-        let mut out = MultiBytes::default();
-        // you may wonder, why do we `loop` in `read` but add this redundant `n > 0` check here?
-        // it's because slicing an array is free, but `.slice`ing a `Bytes` isn't quite.
-        while n > 0 {
-            let mut page_rem = self.page_iter.peek().unwrap().slice(self.page_offset..);
-
-            if n >= page_rem.len() {
-                n -= page_rem.len();
-                out.extend(once(page_rem));
-                self.page_iter.next().unwrap();
-                self.page_offset = 0;
-            } else {
-                page_rem.truncate(n);
-                out.extend(once(page_rem));
-                self.page_offset += n;
-                break;
-            }
-        }
-        Ok(out)
-    }
-
-    /// Advance past the next `n` bytes without copying them to anywhere.
-    ///
-    /// Errors if not that many bytes remain.
-    pub fn skip(&mut self, mut n: usize) -> Result<(), TooFewBytesError> {
-        if n > self.remaining_len() {
-            return Err(TooFewBytesError);
-        }
-        self.offset += n;
-        loop {
-            let page_rem = self.page_iter.peek().unwrap().len() - self.page_offset;
-
-            if n >= page_rem {
-                n -= page_rem;
-                self.page_iter.next().unwrap();
-                self.page_offset = 0;
-            } else {
-                self.page_offset += n;
-                break;
-            }
-        }
-        Ok(())
+        debug_assert!(pages_2.peek().is_none());
+        true
     }
 }
 
@@ -208,12 +243,3 @@ impl<'a> Cursor<'a> {
 #[derive(Error, Debug, Copy, Clone)]
 #[error("too few bytes")]
 pub struct TooFewBytesError;
-
-/// Convenience implementation for compatibility.
-impl<'a> Read for Cursor<'a> {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        let n = buf.len().min(self.remaining_len());
-        self.read(&mut buf[..n]).unwrap();
-        Ok(n)
-    }
-}
