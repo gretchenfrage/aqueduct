@@ -57,9 +57,13 @@ struct Shared<T> {
     //   error (or "finished" value in the case of RecvState::Finished).
     recv_state: AtomicU8,
 
+    // ==== state that is not depended on for core correctness ====
+
     // tokio watch channels for send_state and recv_state
     watch_send_state: (watch::Sender<u8>, watch::Receiver<u8>),
     watch_recv_state: (watch::Sender<u8>, watch::Receiver<u8>),
+    // used to store whether channel is reliable / unreliable / unordered
+    delivery_guarantees_byte: AtomicU8,
 }
 
 // channel lockable state.
@@ -137,6 +141,7 @@ impl<T> Channel<T> {
             recv_state: AtomicU8::new(RecvState::Normal as u8),
             watch_send_state: watch::channel(SendState::Normal as u8),
             watch_recv_state: watch::channel(RecvState::Normal as u8),
+            delivery_guarantees_byte: AtomicU8::new(0),
         }))
     }
 
@@ -173,6 +178,11 @@ impl<T> Channel<T> {
     // get the watch receiver for the recv state byte.
     pub(crate) fn watch_recv_state(&self) -> &watch::Receiver<u8> {
         &self.0.watch_recv_state.1
+    }
+
+    // get the delivery guarantees atomic byte.
+    pub(crate) fn delivery_guarantees_byte(&self) -> &AtomicU8 {
+        &self.0.delivery_guarantees_byte
     }
 
     // lock the channel.

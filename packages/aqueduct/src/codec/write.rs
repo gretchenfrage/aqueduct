@@ -132,7 +132,7 @@ impl Frames {
         self.0.send_datagram(conn).await
     }
 
-    // write a version frame
+    // write a Version frame.
     pub(crate) fn version(&mut self) {
         self.0.write(&[FrameType::Version as u8]);
         self.0.write(&VERSION_FRAME_MAGIC_BYTES);
@@ -140,10 +140,42 @@ impl Frames {
         self.0.write_vlba(VERSION);
     }
 
-    // write a connection control frame
+    // write a ConnectionControl frame.
     pub(crate) fn connection_control(&mut self) {
         // TODO
         self.0.write(&[FrameType::ConnectionControl as u8]);
         self.0.write(&[0]);
+    }
+
+    // write a ChannelControl frame.
+    pub(crate) fn channel_control(&mut self, chan_id: ChanId) {
+        self.0.write(&[FrameType::ChannelControl as u8]);
+        self.0.write_chan_id(chan_id);
+    }
+
+    // write a Message frame.
+    pub(crate) fn message(
+        &mut self,
+        sent_on: ChanId,
+        message_num: u64,
+        attachments: Attachments,
+        payload: MultiBytes,
+    ) {
+        self.0.write(&[FrameType::Message as u8]);
+        self.0.write_chan_id(sent_on);
+        self.0.write_vli(message_num);
+        self.0.write_vlba(attachments.0);
+        self.0.write_vlba(payload);
+    }
+}
+
+// typed API for writing a sequence of message attachments.
+#[derive(Default)]
+pub(crate) struct Attachments(Writer);
+
+impl Attachments {
+    // write an attachment
+    pub(crate) fn attachment(&mut self, chan_id: ChanId) {
+        self.0.write_chan_id(chan_id);
     }
 }

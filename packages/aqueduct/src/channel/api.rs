@@ -104,6 +104,27 @@ fn recv_terminal_state(recv_state_byte: u8) -> Option<RecvTerminalState> {
     }
 }
 
+// what delivery guarantees the sender has converted into
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum DeliveryGuarantees {
+    Unconverted = 0,
+    Ordered = 1,
+    Unordered = 2,
+    Unreliable = 3,
+}
+
+impl DeliveryGuarantees {
+    fn from_byte(byte: u8) -> Self {
+        match byte {
+            0 => DeliveryGuarantees::Unconverted,
+            1 => DeliveryGuarantees::Ordered,
+            2 => DeliveryGuarantees::Unordered,
+            3 => DeliveryGuarantees::Unreliable,
+            n => unreachable!("invalid DeliveryGuarantees byte: {}", n)
+        }
+    }
+}
 
 // ==== the exposed API ====
 
@@ -132,7 +153,9 @@ pub struct IntoSender<T> {
 impl<T> IntoSender<T> {
     /// Convert into an ordered, reliable, bounded sender
     pub fn into_ordered(mut self, bound: usize) -> Sender<T> {
+        self.channel.delivery_guarantees_byte().store(DeliveryGuarantees::Ordered as u8, Relaxed);
         self.channel.lock().set_bound(bound);
+        self.channel.send_count().fetch_add(1, Relaxed);
         Sender {
             channel: clone_sender(&self.channel),
             cancel_on_drop: take(&mut self.cancel_on_drop),
@@ -141,6 +164,8 @@ impl<T> IntoSender<T> {
 
     /// Convert into an ordered, reliable, unbounded sender
     pub fn into_ordered_unbounded(mut self) -> NonBlockingSender<T> {
+        self.channel.delivery_guarantees_byte().store(DeliveryGuarantees::Ordered as u8, Relaxed);
+        self.channel.send_count().fetch_add(1, Relaxed);
         NonBlockingSender {
             channel: clone_sender(&self.channel),
             cancel_on_drop: take(&mut self.cancel_on_drop),
@@ -150,6 +175,8 @@ impl<T> IntoSender<T> {
 
     /// Convert into an unordered, reliable, bounded sender
     pub fn into_unordered(mut self, bound: usize) -> Sender<T> {
+        self.channel.delivery_guarantees_byte()
+            .store(DeliveryGuarantees::Unordered as u8, Relaxed);
         self.channel.lock().set_bound(bound);
         self.channel.send_count().fetch_add(1, Relaxed);
         Sender {
@@ -160,6 +187,8 @@ impl<T> IntoSender<T> {
 
     /// Convert into an unordered, reliable, unbounded sender
     pub fn into_unordered_unbounded(mut self) -> NonBlockingSender<T> {
+        self.channel.delivery_guarantees_byte()
+            .store(DeliveryGuarantees::Unordered as u8, Relaxed);
         self.channel.send_count().fetch_add(1, Relaxed);
         NonBlockingSender {
             channel: clone_sender(&self.channel),
@@ -173,6 +202,8 @@ impl<T> IntoSender<T> {
     /// The send buffer may be bounded, but this does not create backpressure, because overflowing
     /// the buffer is handled by dropping the oldest buffered message.
     pub fn into_unreliable(mut self, bound: Option<usize>) -> NonBlockingSender<T> {
+        self.channel.delivery_guarantees_byte()
+            .store(DeliveryGuarantees::Unreliable as u8, Relaxed);
         self.channel.send_count().fetch_add(1, Relaxed);
         NonBlockingSender {
             channel: clone_sender(&self.channel),
@@ -476,6 +507,10 @@ impl<T> Receiver<T> {
     /// state, and all attempts to send will return a corresponding error.
     pub fn terminal_state(&self) -> Option<RecvTerminalState> {
         recv_terminal_state(self.0.recv_state())
+    }
+
+    pub(crate) fn delivery_guarantees(&self) -> DeliveryGuarantees {
+        DeliveryGuarantees::from_byte(self.0.delivery_guarantees_byte().load(Relaxed))
     }
 
     // TODO: debug

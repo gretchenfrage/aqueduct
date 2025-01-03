@@ -343,6 +343,8 @@ impl CloseReceiver {
 pub(crate) struct ClosedChannelLost(QuicReader);
 
 impl ClosedChannelLost {
-
+    pub(crate) async fn chan_id(mut self) -> Result<(Frames, ChanId)> {
+        let o = self.0.read_chan_id().await?;
+        Ok((Frames(self.0), o))
+    }
 }
-

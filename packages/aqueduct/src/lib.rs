@@ -13,9 +13,19 @@ pub mod zero_copy;
 
 mod channel;
 mod codec;
+//mod ser;
 mod proto;
 
-pub use crate::channel::api::*;
+pub use crate::{
+    channel::api::*,
+    proto::{
+        EncoderAttacher,
+        DecoderDetacher,
+        AttachTarget,
+        DetachTarget,
+    },
+    //ser::*,
+};
 
 /// Error types
 pub mod error {

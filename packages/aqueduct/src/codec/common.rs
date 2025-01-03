@@ -11,6 +11,24 @@ pub(crate) enum Side {
     Server = 1,
 }
 
+impl Side {
+    pub(crate) fn dir_to(self) -> Dir {
+        match self {
+            Side::Server => Dir::ToServer,
+            Side::Client => Dir::ToClient,
+        }
+    }
+
+
+    pub(crate) fn opposite(self) -> Self {
+        use Side::*;
+        match self {
+            Client => Server,
+            Server => Client,
+        }
+    }
+}
+
 // direction between client and server
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 #[repr(u8)]
@@ -109,4 +127,22 @@ pub(crate) fn ascii_to_str(b: &[u8]) -> Result<&str> {
     ensure!(b.is_ascii(), "expected ASCII string");
     // safety: all valid ASCII strings are valid UTF-8 strings
     Ok(std::str::from_utf8(b).unwrap())
+}
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+#[repr(u32)]
+pub(crate) enum ResetErrorCode {
+    Cancelled = 1,
+    Lost = 2,
+}
+
+impl ResetErrorCode {
+    pub(crate) fn from_u64(n: u64) -> Result<Self> {
+        use ResetErrorCode::*;
+        Ok(match n {
+            1 => Cancelled,
+            2 => Lost,
+            n => bail!("invalid reset error code: {}", n),
+        })
+    }
 }
