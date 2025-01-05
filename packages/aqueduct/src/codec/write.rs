@@ -63,7 +63,7 @@ impl Writer {
     }
 
     // send written data on the provided QUIC stream (zero-copy-ly).
-    async fn send_stream(mut self, stream: &mut SendStream) -> Result<()> {
+    async fn send_stream(self, stream: &mut SendStream) -> Result<()> {
         let mut bytes = self.0.build();
         let mut pages = bytes.pages_mut();
         while !pages.is_empty() {
@@ -74,7 +74,7 @@ impl Writer {
     }
 
     // open new unidirectional QUIC stream, send written data on it, finish stream.
-    async fn send_new_stream(mut self, conn: &Connection) -> Result<()> {
+    async fn send_new_stream(self, conn: &Connection) -> Result<()> {
         let mut stream = conn.open_uni().await?;
         self.send_stream(&mut stream).await?;
         stream.finish().unwrap();
@@ -82,7 +82,7 @@ impl Writer {
     }
 
     // send written data in a QUIC datagram, or fall back to send_new_stream if too large.
-    async fn send_datagram(mut self, conn: &Connection) -> Result<()> {
+    async fn send_datagram(self, conn: &Connection) -> Result<()> {
         let max_datagram_size = conn.max_datagram_size()
             .ok_or_else(|| anyhow!("datagrams disabled"))?;
         if self.0.len() > max_datagram_size {
@@ -118,17 +118,17 @@ pub(crate) struct Frames(Writer);
 
 impl Frames {
     // send written data on QUIC stream.
-    pub(crate) async fn send_stream(mut self, stream: &mut SendStream) -> Result<()> {
+    pub(crate) async fn send_stream(self, stream: &mut SendStream) -> Result<()> {
         self.0.send_stream(stream).await
     }
 
     // open new unidirectional QUIC stream, send written data on it, finish stream.
-    pub(crate) async fn send_new_stream(mut self, conn: &Connection) -> Result<()> {
+    pub(crate) async fn send_new_stream(self, conn: &Connection) -> Result<()> {
         self.0.send_new_stream(conn).await
     }
 
     // send written data in a QUIC datagram, or fall back to send_new_stream if too large.
-    pub(crate) async fn send_datagram(mut self, conn: &Connection) -> Result<()> {
+    pub(crate) async fn send_datagram(self, conn: &Connection) -> Result<()> {
         self.0.send_datagram(conn).await
     }
 
@@ -167,6 +167,42 @@ impl Frames {
         self.0.write_vlba(attachments.0);
         self.0.write_vlba(payload);
     }
+
+    // write a SentUnreliable frame.
+    pub(crate) fn sent_unreliable(&mut self, delta: u64) {
+        self.0.write(&[FrameType::SentUnreliable as u8]);
+        self.0.write_vli(delta);
+    }
+
+    // write an AckReliable frame.
+    pub(crate) fn ack_reliable(&mut self, acks: PosNegRanges) {
+        self.0.write(&[FrameType::AckReliable as u8]);
+        self.0.write_vlba(acks.0);
+    }
+
+    // write an AckNackUnreliable frame.
+    pub(crate) fn ack_nack_unreliable(&mut self, ack_nacks: PosNegRanges) {
+        self.0.write(&[FrameType::AckNackUnreliable as u8]);
+        self.0.write_vlba(ack_nacks.0);
+    }
+
+    // write a FinishSender frame.
+    pub(crate) fn finish_sender(&mut self, reliable_count: u64) {
+        self.0.write(&[FrameType::FinishSender as u8]);
+        self.0.write_vli(reliable_count);
+    }
+
+    // write a CloseReceiver frame.
+    pub(crate) fn close_receiver(&mut self, reliable_ack_nacks: PosNegRanges) {
+        self.0.write(&[FrameType::CloseReceiver as u8]);
+        self.0.write_vlba(reliable_ack_nacks.0);
+    }
+
+    // write a ClosedChannelLost frame.
+    pub(crate) fn closed_channel_lost(&mut self, chan_id: ChanId) {
+        self.0.write(&[FrameType::ClosedChannelLost as u8]);
+        self.0.write_chan_id(chan_id);
+    }
 }
 
 // typed API for writing a sequence of message attachments.
@@ -177,5 +213,16 @@ impl Attachments {
     // write an attachment
     pub(crate) fn attachment(&mut self, chan_id: ChanId) {
         self.0.write_chan_id(chan_id);
+    }
+}
+
+// typed API for writing pos-neg ranges.
+#[derive(Default)]
+pub(crate) struct PosNegRanges(Writer);
+
+impl PosNegRanges {
+    // write a delta
+    pub(crate) fn delta(&mut self, delta: u64) {
+        self.0.write_vli(delta);
     }
 }

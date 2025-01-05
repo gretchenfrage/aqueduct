@@ -17,12 +17,61 @@ use std::sync::{
     Arc,
     Mutex,
 };
-use bytes::Bytes;
-use dashmap::{
-    mapref::entry::Entry,
-    DashMap,
-};
+use dashmap::DashMap;
 use anyhow::*;
+
+
+// frame that can occur on a unidirectional stream or datagram
+enum NonBidiFrame {
+    Version(read::Version),
+    Message(read::Message),
+    ClosedChannelLost(read::ClosedChannelLost),
+}
+
+impl NonBidiFrame {
+    fn try_from(frame: read::Frame) -> Result<Self> {
+        Ok(match frame {
+            read::Frame::Version(r) => NonBidiFrame::Version(r),
+            read::Frame::Message(r) => NonBidiFrame::Message(r),
+            read::Frame::ClosedChannelLost(r) => NonBidiFrame::ClosedChannelLost(r),
+            r => bail!("unexpected NonBidiFrame frame: {:?}", r.frame_type()),
+        })
+    }
+}
+
+// frame that can occur in a channel control stream in the sender-to-receiver direction 
+enum CtrlFrameToReceiver {
+    SentUnreliable(read::SentUnreliable),
+    FinishSender(read::FinishSender),
+}
+
+impl CtrlFrameToReceiver {
+    fn try_from(frame: read::Frame) -> Result<Self> {
+        Ok(match frame {
+            read::Frame::SentUnreliable(r) => CtrlFrameToReceiver::SentUnreliable(r),
+            read::Frame::FinishSender(r) => CtrlFrameToReceiver::FinishSender(r),
+            r => bail!("unexpected CtrlFrameToReceiver frame: {:?}", r.frame_type()),
+        })
+    }
+}
+
+// frame that can occur in a channel control stream in the receiver-to-sender direction
+enum CtrlFrameToSender {
+    AckReliable(read::AckReliable),
+    AckNackUnreliable(read::AckNackUnreliable),
+    CloseReceiver(read::CloseReceiver),
+}
+
+impl CtrlFrameToSender {
+    fn try_from(frame: read::Frame) -> Result<Self> {
+        Ok(match frame {
+            read::Frame::AckReliable(r) => CtrlFrameToSender::AckReliable(r),
+            read::Frame::AckNackUnreliable(r) => CtrlFrameToSender::AckNackUnreliable(r),
+            read::Frame::CloseReceiver(r) => CtrlFrameToSender::CloseReceiver(r),
+            r => bail!("unexpected CtrlFrameToSender frame: {:?}", r.frame_type()),
+        })
+    }
+}
 
 
 // shared state for side of an aqueduct connection
@@ -43,35 +92,15 @@ impl Conn {
     // handle an incoming QUIC unidirectional stream or datagram
     async fn handle_frames(self: &Arc<Self>, mut rframes: read::Frames) -> Result<()> {
         while let Some(r) = rframes.frame().await? {
+            let r = NonBidiFrame::try_from(r)?;
             match r {
-                read::Frame::Version(r) => {
+                NonBidiFrame::Version(r) => {
                     rframes = r.validate().await?;
                 }
-                read::Frame::ConnectionControl(_) => {
-                    bail!("ConnectionControl frame past handshake");
-                }
-                read::Frame::ChannelControl(_) => {
-                    bail!("ChannelControl frame not on bidi stream");
-                }
-                read::Frame::Message(r) => {
+                NonBidiFrame::Message(r) => {
                     rframes = self.handle_message_frame(r).await?;
                 }
-                read::Frame::SentUnreliable(_) => {
-                    bail!("SentUnreliable frame not on chan ctrl stream");
-                }
-                read::Frame::AckReliable(_) => {
-                    bail!("AckReliable frame not on chan ctrl stream");
-                }
-                read::Frame::AckNackUnreliable(_) => {
-                    bail!("AckNackUnreliable frame not on chan ctrl stream");
-                }
-                read::Frame::FinishSender(_) => {
-                    bail!("FinishSender frame not on chan ctrl stream");
-                }
-                read::Frame::CloseReceiver(_) => {
-                    bail!("CloseReceiver frame not on chan ctrl stream");
-                }
-                read::Frame::ClosedChannelLost(r) => {
+                NonBidiFrame::ClosedChannelLost(r) => {
                     let (r, chan_id) = r.chan_id().await?;
                     rframes = r;
                     todo!()
@@ -162,28 +191,76 @@ impl Conn {
         Ok(())
     }
 
+    // read frames from a channel control stream and forward them to the receiver task.
+    async fn relay_ctrl_to_receiver(
+        self: Arc<Self>,
+        mut rframes: read::Frames,
+        send_task_msg: tokio::sync::mpsc::UnboundedSender<ReceiverTaskMsg>,
+    ) -> Result<()> {
+        match self.relay_ctrl_to_receiver_inner(rframes, &send_task_msg) {
+            Ok(()) => (),
+            Err(ReadError::Reset(code)) => {
+                let _ = send_task_msg.send(ReceiverTaskMsg::ChanCtrlReset(code));
+            }
+            Err(ReadError::Other(e)) => return Err(e),
+        }
+        Ok(())
+    }
+
+    async fn relay_ctrl_to_receiver_inner(
+        self: &Arc<Self>,
+        mut rframes: read::Frames,
+        send_task_msg: &tokio::sync::mpsc::UnboundedSender<ReceiverTaskMsg>,
+    ) -> read::Result<()> {
+        while let Some(r) = rframes.frame().await? {
+            let r = CtrlFrameToReceiver::try_from(r)?;
+            match r {
+                CtrlFrameToReceiver::SentUnreliable(r) => {
+                    let (r, delta) = r.delta().await?;
+                    rframes = r;
+                    let _ = send_task_msg.send(ReceiverTaskMsg::SentUnreliable(delta));
+                }
+                CtrlFrameToReceiver::FinishSender(r) => {
+                    let (r, reliable_count) = r.reliable_count().await?;
+                    rframes = r;
+                    let _ = send_task_msg.send(ReceiverTaskMsg::FinishSender(reliable_count));
+                }
+            }
+        }
+        Ok(())
+    }
+
     // task for a networked receiver
     async fn receiver_task<M, D: DecoderDetacher<M>>(
         self: Arc<Self>,
         chan_id: ChanId,
+        send_task_msg: tokio::sync::mpsc::UnboundedSender<ReceiverTaskMsg>,
         mut recv_task_msg: tokio::sync::mpsc::UnboundedReceiver<ReceiverTaskMsg>,
         app_decoder: D,
         gateway: IntoSender<M>,
     ) -> Result<()> {
         debug_assert!(chan_id.dir().side_to() == self.side);
         let gateway = gateway.into_ordered_unbounded();
+
+        // create the channel control stream, if it's our side's responsibility
         let mut chan_ctrl = None;
         if chan_id.minted_by() != self.side {
+            // open stream
             let (mut stream_send, stream_recv) = self.quic_conn.open_bi().await?;
-            let mut rframes = read::Frames::from_bidi_stream(stream_recv);
+            let rframes = read::Frames::from_bidi_stream(stream_recv);
 
+            // write the frames that triggers the remote side to initialize it
             let mut wframes = write::Frames::default();
             debug_assert!(!self.send_version.load(Relaxed));
             wframes.channel_control(chan_id);
             wframes.send_stream(&mut stream_send).await?;
 
-            chan_ctrl = Some((rframes, stream_send));
+            // locally install it
+            chan_ctrl = Some(stream_send);
+            spawn(Arc::clone(&self).relay_ctrl_to_receiver(rframes, send_task_msg.clone()));
         }
+
+        // enter the receiver task loop
         while let Some(task_msg) = recv_task_msg.recv().await {
             match task_msg {
                 ReceiverTaskMsg::DecodedMessageFrame(mut msg_frame) => {
@@ -196,12 +273,18 @@ impl Conn {
                     // TODO: catch this
                     gateway.send(app_msg).ok().unwrap();
                 }
-                ReceiverTaskMsg::ChanCtrl(rframes, mut stream_send) => {
-                    if chan_ctrl.is_some() {
-                        stream_send.reset((ResetErrorCode::Lost as u32).into()).unwrap();
-                    } else {
-                        chan_ctrl = Some((rframes, stream_send));
-                    }
+                ReceiverTaskMsg::ChanCtrl(stream_send) => {
+                    debug_assert!(chan_ctrl.is_none());
+                    chan_ctrl = Some(stream_send);
+                }
+                ReceiverTaskMsg::SentUnreliable(delta) => {
+
+                }
+                ReceiverTaskMsg::FinishSender(reliable_count) => {
+
+                }
+                ReceiverTaskMsg::ChanCtrlReset(code) => {
+
                 }
             }
         }
@@ -222,7 +305,7 @@ impl Conn {
         for message_num in 0.. {
             // TODO: catch both unwraps
             let app_msg = gateway.recv().await.unwrap().unwrap();
-            
+
             if delivery_guarantees == DeliveryGuarantees::Unconverted {
                 delivery_guarantees = gateway.delivery_guarantees();
             }
@@ -305,6 +388,7 @@ impl Conn {
 struct ReceiverTaskMpsc {
     send_task_msg: tokio::sync::mpsc::UnboundedSender<ReceiverTaskMsg>,
     recv_task_msg: Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<ReceiverTaskMsg>>>,
+    chan_ctrl_frame_found: AtomicBool,
 }
 
 impl Default for ReceiverTaskMpsc {
@@ -313,6 +397,7 @@ impl Default for ReceiverTaskMpsc {
         ReceiverTaskMpsc {
             send_task_msg,
             recv_task_msg: Mutex::new(Some(recv_task_msg)),
+            chan_ctrl_frame_found: false.into(),
         }
     }
 }
@@ -321,8 +406,14 @@ impl Default for ReceiverTaskMpsc {
 enum ReceiverTaskMsg {
     // a message frame was received and decoded and routed to the receiver
     DecodedMessageFrame(DecodedMessageFrame),
-    // a stream was identified as the channel control stream
-    ChanCtrl(read::Frames, quinn::SendStream),
+    // the channel control stream was found
+    ChanCtrl(quinn::SendStream),
+    // a SentUnreliable frame was received from the channel control stream
+    SentUnreliable(u64),
+    // the FinishSender frame was received from the channel control stream
+    FinishSender(u64),
+    // the channel control stream was reset
+    ChanCtrlReset(ResetErrorCode),
 }
 
 // fully decoded message frame
@@ -340,7 +431,7 @@ struct DecodedMessageFrame {
 // stored in DecodedMessageFrame
 enum DecodedAttachment {
     Sender(ChanId),
-    // when an attached received is decoded, its receiver task mpsc is preemtively created / the
+    // when an attached received is decoded, its receiver task mpsc is preemptively created / the
     // recv_task_msg taken. this frontruns double-attachment errors before application decoder is
     // invoked.
     Receiver(ChanId, tokio::sync::mpsc::UnboundedReceiver<ReceiverTaskMsg>),
@@ -479,7 +570,7 @@ impl<'a> DetachTarget<'a> {
         ) -> Result<OneshotReceiver<M>, MissingAttachment> {
             todo!()
         }
-        
+
         pub fn remaining_attachments(&self) -> usize {
             self.remaining_attachments
         }

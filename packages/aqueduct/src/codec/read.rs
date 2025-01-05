@@ -1,12 +1,67 @@
 // typed API for reading frames from quic streams and datagrams
 
 use crate::{
-    zero_copy::{MultiBytes, quic::QuicStreamReader},
+    zero_copy::{
+        quic::{QuicStreamReader, QuicStreamReadError},
+        MultiBytes,
+        TooFewBytesError,
+    },
     codec::common::*,
 };
 use bytes::Bytes;
-use quinn::RecvStream;
-use anyhow::*;
+use anyhow::{anyhow, Error};
+
+
+// ==== read module error handling ====
+
+// error for reading aqueduct frames.
+#[derive(Debug)]
+pub(crate) enum ReadError {
+    // QUIC stream was reset before finishing.
+    Reset(ResetCode),
+    // any other error (unrecoverable).
+    Other(Error),
+}
+
+impl From<Error> for ReadError {
+    fn from(e: Error) -> Self {
+        ReadError::Other(e)
+    }
+}
+
+impl From<TooFewBytesError> for ReadError {
+    fn from(TooFewBytesError: TooFewBytesError) -> Self {
+        Error::msg("too few bytes").into()
+    }
+}
+
+impl From<QuicStreamReadError> for ReadError {
+    fn from(e: QuicStreamReadError) -> Self {
+        match e {
+            QuicStreamReadError::Quic(e) => match e {
+                quinn::ReadError::Reset(code) => match ResetCode::from_u64(code.into_inner()) {
+                    Some(code) => ReadError::Reset(code),
+                    None => anyhow!("invalid reset code: {}", code).into(),
+                }
+                e => Error::from(e).into(),
+            }
+            QuicStreamReadError::TooFewBytes => TooFewBytesError.into(),
+        }
+    }
+}
+
+pub(crate) type Result<T> = Result<T, ReadError>;
+
+macro_rules! ensure {
+    ($cond:expr, $($t:tt)*)=>{
+        if !$cond {
+            return Err(anyhow::anyhow!($($t)*).into());
+        }
+    };
+}
+
+
+// ==== rest of read module ====
 
 
 // utility internal to frame reading module:
@@ -42,7 +97,7 @@ struct QuicReaderStats {
 
 impl QuicReader {
     // read bytes and copy to buf
-    async fn read(&mut self, buf: &mut [u8]) -> Result<(), Error> {
+    async fn read(&mut self, buf: &mut [u8]) -> Result<()> {
         Ok(match &mut self.source {
             &mut QuicReaderSource::Stream(ref mut inner) => inner.read(buf).await?,
             &mut QuicReaderSource::Datagram(ref mut inner) => inner.read(buf)?,
@@ -50,7 +105,7 @@ impl QuicReader {
     }
     
     // read bytes zero-copy-ly
-    async fn read_zc(&mut self, n: usize) -> Result<MultiBytes, Error> {
+    async fn read_zc(&mut self, n: usize) -> Result<MultiBytes> {
         Ok(match &mut self.source {
             &mut QuicReaderSource::Stream(ref mut inner) => inner.read_zc(n).await?,
             &mut QuicReaderSource::Datagram(ref mut inner) => inner.read_zc(n)?,
@@ -58,7 +113,7 @@ impl QuicReader {
     }
 
     // whether the data source ends immediately after bytes read so far
-    async fn is_done(&mut self) -> Result<bool, Error> {
+    async fn is_done(&mut self) -> Result<bool> {
         Ok(match &mut self.source {
             &mut QuicReaderSource::Stream(ref mut inner) => inner.is_done().await?,
             &mut QuicReaderSource::Datagram(ref inner) => inner.len() == 0,
@@ -83,7 +138,7 @@ impl QuicReader {
         let mut i: u64 = 0;
         for x in 0..8 {
             if let Some(limit) = limit.as_mut() {
-                ensure!(**limit > 0, "expected more bytes");
+                ensure!(**limit > 0, "too few bytes");
                 **limit -= 1;
             }
             let b = self.read_byte().await?;
@@ -94,7 +149,7 @@ impl QuicReader {
         }
         debug_assert!((i & (0xffu64 << VLI_FINAL_SHIFT)) == 0);
         if let Some(limit) = limit.as_mut() {
-            ensure!(**limit > 0, "expected more bytes");
+            ensure!(**limit > 0, "too few bytes");
             **limit -= 1;
         }
         let b = self.read_byte().await?;
@@ -195,6 +250,23 @@ pub(crate) enum Frame {
     FinishSender(FinishSender),
     CloseReceiver(CloseReceiver),
     ClosedChannelLost(ClosedChannelLost),
+}
+
+impl Frame {
+    pub(crate) fn frame_type(&self) -> FrameType {
+        match self {
+            &Frame::Version => FrameType::Version,
+            &Frame::ConnectionControl => FrameType::ConnectionControl,
+            &Frame::ChannelControl => FrameType::ChannelControl,
+            &Frame::Message => FrameType::Message,
+            &Frame::SentUnreliable => FrameType::SentUnreliable,
+            &Frame::AckReliable => FrameType::AckReliable,
+            &Frame::AckNackUnreliable => FrameType::AckNackUnreliable,
+            &Frame::FinishSender => FrameType::FinishSender,
+            &Frame::CloseReceiver => FrameType::CloseReceiver,
+            &Frame::ClosedChannelLost => FrameType::ClosedChannelLost,
+        }
+    }
 }
 
 // typed API for reading this frame type.
@@ -308,14 +380,16 @@ impl Message6 {
 pub(crate) struct SentUnreliable(QuicReader);
 
 impl SentUnreliable {
-
+    pub(crate) async fn delta(mut self) -> Result<(Frames, u64)> {
+        let o = self.0.read_vli().await?;
+        Ok((Frames(self.0), o))
+    }
 }
 
 // typed API for reading this frame type.
 pub(crate) struct AckReliable(QuicReader);
 
 impl AckReliable {
-
 }
 
 // typed API for reading this frame type.
@@ -329,7 +403,10 @@ impl AckNackUnreliable {
 pub(crate) struct FinishSender(QuicReader);
 
 impl FinishSender {
-
+    pub(crate) async fn reliable_count(mut self) -> Result<(Frames, u64)> {
+        let o = self.0.read_vli().await?;
+        Ok((Frames(self.0), o))
+    }
 }
 
 // typed API for reading this frame type.

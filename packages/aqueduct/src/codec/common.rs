@@ -3,7 +3,7 @@
 use anyhow::*;
 
 
-// side of a connection
+// side of a connection.
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 #[repr(u8)]
 pub(crate) enum Side {
@@ -29,7 +29,7 @@ impl Side {
     }
 }
 
-// direction between client and server
+// direction between client and server.
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 #[repr(u8)]
 pub(crate) enum Dir {
@@ -46,7 +46,7 @@ impl Dir {
     }
 }
 
-// channel ID
+// channel ID.
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
 pub(crate) struct ChanId(pub(crate) u64);
 
@@ -77,7 +77,7 @@ impl ChanId {
     }
 }
 
-// aqueduct frame type, with conversion between frame type byte
+// aqueduct frame type, with conversion between frame type byte.
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 #[repr(u8)]
 pub(crate) enum FrameType {
@@ -112,37 +112,38 @@ impl FrameType {
     }
 }
 
-// constants for variable length integer coding
+// constants for variable length integer coding.
 pub(crate) const VLI_MASK: u8 = 0b01111111;
 pub(crate) const VLI_MORE: u8 = 0b10000000;
 pub(crate) const VLI_FINAL_SHIFT: u8 = 56;
 
-// constants for version frame coding
+// constants for version frame coding.
 pub(crate) const VERSION_FRAME_MAGIC_BYTES: [u8; 7] = [80, 95, 166, 96, 15, 64, 142];
 pub(crate) const VERSION_FRAME_HUMAN_TEXT: [u8; 8] = *b"AQUEDUCT";
 pub(crate) const VERSION: &str = "0.0.0-AFTER";
 
-// validate that a byte string is ASCII and cast to a str
+// validate that a byte string is ASCII and cast to a str.
 pub(crate) fn ascii_to_str(b: &[u8]) -> Result<&str> {
     ensure!(b.is_ascii(), "expected ASCII string");
     // safety: all valid ASCII strings are valid UTF-8 strings
     Ok(std::str::from_utf8(b).unwrap())
 }
 
+// a reset error code.
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 #[repr(u32)]
-pub(crate) enum ResetErrorCode {
+pub(crate) enum ResetCode {
     Cancelled = 1,
     Lost = 2,
 }
 
-impl ResetErrorCode {
-    pub(crate) fn from_u64(n: u64) -> Result<Self> {
-        use ResetErrorCode::*;
-        Ok(match n {
+impl ResetCode {
+    pub(crate) fn from_u64(n: u64) -> Option<Self> {
+        use ResetCode::*;
+        Some(match n {
             1 => Cancelled,
             2 => Lost,
-            n => bail!("invalid reset error code: {}", n),
+            _ => None,
         })
     }
 }

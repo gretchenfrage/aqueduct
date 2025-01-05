@@ -2,24 +2,25 @@
 
 use crate::zero_copy::MultiBytes;
 use std::iter::once;
-use quinn::RecvStream;
 use bytes::Bytes;
 use anyhow::*;
 
 
 const MAX_CHUNK_LENGTH: usize = 16384;
 
+pub(crate) type Result<T> = Result<T, QuicStreamReadError>;
+
 // wrapper around a quinn `RecvStream` which provides a `MultiBytes` cursor-like API
 #[derive(Debug)]
 pub(crate) struct QuicStreamReader {
-    stream: RecvStream,
+    stream: quinn::RecvStream,
     chunk: Bytes,
     chunk_offset: usize,
 }
 
 impl QuicStreamReader {
     // construct around a QUIC stream
-    pub(crate) fn new(stream: RecvStream) -> Self {
+    pub(crate) fn new(stream: quinn::RecvStream) -> Self {
         QuicStreamReader {
             stream,
             chunk: Bytes::new(),
@@ -28,13 +29,12 @@ impl QuicStreamReader {
     }
     
     // read the next buf.len() bytes from the stream and copy them to buf
-    pub(crate) async fn read(&mut self, mut buf: &mut [u8]) -> Result<(), Error> {
+    pub(crate) async fn read(&mut self, mut buf: &mut [u8]) -> Result<()> {
         while !buf.is_empty() {
             if self.chunk_offset == self.chunk.len() {
                 self.chunk = self.stream
-                    .read_chunk(MAX_CHUNK_LENGTH, true).await
-                    .context("QUIC error")?
-                    .ok_or(Error::msg("expected more bytes in QUIC stream"))?
+                    .read_chunk(MAX_CHUNK_LENGTH, true).await?
+                    .ok_or(QuicStreamReadError::TooFewBytes)?
                     .bytes;
                 self.chunk_offset = 0;
             }
@@ -55,14 +55,13 @@ impl QuicStreamReader {
     }
     
     // read the next n bytes in a zero-copy fashion and return them as a MultiBytes
-    pub(crate) async fn read_zc(&mut self, mut n: usize) -> Result<MultiBytes, Error> {
+    pub(crate) async fn read_zc(&mut self, mut n: usize) -> Result<MultiBytes> {
         let mut out = MultiBytes::default();
         while n > 0 {
             if self.chunk_offset == self.chunk.len() {
                 self.chunk = self.stream
-                    .read_chunk(MAX_CHUNK_LENGTH, true).await
-                    .context("QUIC error")?
-                    .ok_or(Error::msg("expected more bytes in QUIC stream"))?
+                    .read_chunk(MAX_CHUNK_LENGTH, true).await?
+                    .ok_or(QuicStreamReadError::TooFewBytes)?
                     .bytes;
                 self.chunk_offset = 0;
             }
@@ -83,11 +82,10 @@ impl QuicStreamReader {
     }
     
     // determine whether the stream finishes after the bytes that have been taken
-    pub(crate) async fn is_done(&mut self) -> Result<bool, Error> {
+    pub(crate) async fn is_done(&mut self) -> Result<bool> {
         while self.chunk_offset == self.chunk.len() {
             if let Some(chunk) = self.stream
-                .read_chunk(MAX_CHUNK_LENGTH, true).await
-                .context("QUIC error")?
+                .read_chunk(MAX_CHUNK_LENGTH, true).await?;
             {
                 self.chunk = chunk.bytes;
                 self.chunk_offset = 0;
@@ -98,5 +96,20 @@ impl QuicStreamReader {
             }
         }
         Ok(false)
+    }
+}
+
+// error for reading from a QUIC stream.
+#[derive(Debug)]
+pub(crate) enum QuicStreamReadError {
+    // underlying QUIC error.
+    Quic(quinn::ReadError),
+    // expected more bytes.
+    TooFewBytes,
+}
+
+impl From<quinn::ReadError> for QuicStreamReadError {
+    fn from(e: quinn::ReadError) -> Self {
+        QuicStreamReadError::Quic(e)
     }
 }
