@@ -30,6 +30,11 @@ impl Writer {
         self.0.write_zc(bytes);
     }
 
+    // whether no bytes have been written
+    fn is_empty(&self) -> bool {
+        self.0.len() == 0
+    }
+
     // write a var len int.
     fn write_vli(&mut self, mut i: u64) {
         for _ in 0..8 {
@@ -177,13 +182,13 @@ impl Frames {
     // write an AckReliable frame.
     pub(crate) fn ack_reliable(&mut self, acks: PosNegRanges) {
         self.0.write(&[FrameType::AckReliable as u8]);
-        self.0.write_vlba(acks.0);
+        self.0.write_vlba(acks.finalize);
     }
 
     // write an AckNackUnreliable frame.
     pub(crate) fn ack_nack_unreliable(&mut self, ack_nacks: PosNegRanges) {
         self.0.write(&[FrameType::AckNackUnreliable as u8]);
-        self.0.write_vlba(ack_nacks.0);
+        self.0.write_vlba(ack_nacks.finalize());
     }
 
     // write a FinishSender frame.
@@ -217,12 +222,61 @@ impl Attachments {
 }
 
 // typed API for writing pos-neg ranges.
+//
+// automatically filters out empty ranges, merges ranges, and inserts an initial empty ack if
+// necessary.
 #[derive(Default)]
-pub(crate) struct PosNegRanges(Writer);
+pub(crate) struct PosNegRanges {
+    written: Writer,
+    pending: Option<(bool, u64)>,
+}
 
 impl PosNegRanges {
-    // write a delta
-    pub(crate) fn delta(&mut self, delta: u64) {
-        self.0.write_vli(delta);
+    // write a positive delta.
+    pub(crate) fn pos_delta(&mut self, delta: u64) {
+        if delta == 0 { return; }
+        match &mut self.pending {
+            &mut None => {
+                self.pending = Some((true, delta));
+            }
+            &mut Some((true, ref mut pending_delta)) => {
+                *pending_delta += delta;
+            }
+            &mut Some((false, pending_delta)) => {
+                debug_assert!(!self.written.is_empty());
+                self.written.write_vli(pending_delta);
+                self.pending = Some((true, delta));
+            }
+        }
+    }
+
+    // write a negative delta.
+    pub(crate) fn neg_delta(&mut self, delta: u64) {
+        if delta == 0 { return; }
+        match &mut self.pending {
+            &mut None => {
+                if self.written.is_empty() {
+                    // initial empty ack
+                    self.written.write_vli(0);
+                }
+                self.pending = Some((false, delta));
+            }
+            &mut Some((false, ref mut pending_delta)) => {
+                debug_assert!(!self.written.is_empty());
+                *pending_delta += delta;
+            }
+            &mut Some((true, pending_delta)) => {
+                self.written.write_vli(pending_delta);
+                self.pending = Some((true, delta));
+            }
+        }
+    }
+
+    fn finalize(mut self) -> MultiBytes {
+        if let Some((_, pending_delta)) = self.pending {
+            self.written.write_vli(pending_delta);
+        }
+        assert!(!self.written.is_empty(), "writing empty PosNegRanges (this is a bug)");
+        self.written.into()
     }
 }

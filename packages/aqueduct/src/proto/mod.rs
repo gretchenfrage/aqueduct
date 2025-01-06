@@ -1,4 +1,16 @@
 
+mod ack_timer;
+mod frame_category;
+
+
+use self::{
+    ack_timer::Acktimer,
+    frame_category::{
+        NonBidiFrame,
+        CtrlFrameToReceiver,
+        CtrlFrameToSender,
+    },
+};
 use crate::{
     codec::{
         common::*,
@@ -17,61 +29,9 @@ use std::sync::{
     Arc,
     Mutex,
 };
+use tokio::{pin, select};
 use dashmap::DashMap;
 use anyhow::*;
-
-
-// frame that can occur on a unidirectional stream or datagram
-enum NonBidiFrame {
-    Version(read::Version),
-    Message(read::Message),
-    ClosedChannelLost(read::ClosedChannelLost),
-}
-
-impl NonBidiFrame {
-    fn try_from(frame: read::Frame) -> Result<Self> {
-        Ok(match frame {
-            read::Frame::Version(r) => NonBidiFrame::Version(r),
-            read::Frame::Message(r) => NonBidiFrame::Message(r),
-            read::Frame::ClosedChannelLost(r) => NonBidiFrame::ClosedChannelLost(r),
-            r => bail!("unexpected NonBidiFrame frame: {:?}", r.frame_type()),
-        })
-    }
-}
-
-// frame that can occur in a channel control stream in the sender-to-receiver direction 
-enum CtrlFrameToReceiver {
-    SentUnreliable(read::SentUnreliable),
-    FinishSender(read::FinishSender),
-}
-
-impl CtrlFrameToReceiver {
-    fn try_from(frame: read::Frame) -> Result<Self> {
-        Ok(match frame {
-            read::Frame::SentUnreliable(r) => CtrlFrameToReceiver::SentUnreliable(r),
-            read::Frame::FinishSender(r) => CtrlFrameToReceiver::FinishSender(r),
-            r => bail!("unexpected CtrlFrameToReceiver frame: {:?}", r.frame_type()),
-        })
-    }
-}
-
-// frame that can occur in a channel control stream in the receiver-to-sender direction
-enum CtrlFrameToSender {
-    AckReliable(read::AckReliable),
-    AckNackUnreliable(read::AckNackUnreliable),
-    CloseReceiver(read::CloseReceiver),
-}
-
-impl CtrlFrameToSender {
-    fn try_from(frame: read::Frame) -> Result<Self> {
-        Ok(match frame {
-            read::Frame::AckReliable(r) => CtrlFrameToSender::AckReliable(r),
-            read::Frame::AckNackUnreliable(r) => CtrlFrameToSender::AckNackUnreliable(r),
-            read::Frame::CloseReceiver(r) => CtrlFrameToSender::CloseReceiver(r),
-            r => bail!("unexpected CtrlFrameToSender frame: {:?}", r.frame_type()),
-        })
-    }
-}
 
 
 // shared state for side of an aqueduct connection
@@ -199,6 +159,7 @@ impl Conn {
     ) -> Result<()> {
         match self.relay_ctrl_to_receiver_inner(rframes, &send_task_msg) {
             Ok(()) => (),
+            // if the inner task fails due to stream reset, catch and handle gracefully
             Err(ReadError::Reset(code)) => {
                 let _ = send_task_msg.send(ReceiverTaskMsg::ChanCtrlReset(code));
             }
@@ -260,10 +221,145 @@ impl Conn {
             spawn(Arc::clone(&self).relay_ctrl_to_receiver(rframes, send_task_msg.clone()));
         }
 
+        // reliable ack-nacking state
+        let reliable_ack_timer = AckTimer::<()>::new();
+        pin!(reliable_ack_timer);
+
+        // ==== unreliable ack-nacking state ====
+        // all unreliable message nums below this have been acked
+        let mut unreliable_ack_nacked = 0;
+        // the sender has declared having sent all unreliable message nums below this
+        let mut unreliable_sent = 0;
+        // not-necessarily-sorted list of inclusive ranges of unreliable message nums that have
+        // been received and not yet acked
+        let mut unreliable_not_acked = Vec::<(u64, u64)>::new();
+        // the timer holds the value of unreliable_sent at the point when it started, and ticks
+        // down for the loss detection duration--thus, when it resolves, all unreliable message
+        // nums below that are acked or nacked.
+        let unreliable_ack_nack_timer = AckTimer::<u64>::new();
+        pin!(unreliable_ack_nack_timer);
+
         // enter the receiver task loop
-        while let Some(task_msg) = recv_task_msg.recv().await {
+        loop {
+            // get task msg, or process ack timer then continue
+            let task_msg = select! {
+                () = &mut reliable_ack_timer => {
+                    continue;
+                }
+                // we must ack or nack all unreliable message nums below this
+                must_ack_nack = &mut unreliable_ack_nack_timer => {
+                    // assertion safety:
+                    // - must_ack_nack equals what unreliable_sent was when the timer was started
+                    // - the timer is only started when unreliable_sent is greater than
+                    //   unreliable_ack_nacked
+                    // - unreliable_ack_nacked only changes when the timer stops, and only to a
+                    //   value less than or equal to unreliable_sent
+                    debug_assert!(must_ack_nack > unreliable_ack_nacked);
+                    
+                    // sort the ranges
+                    // if there are overlaps, that will be detected as a protocol error
+                    unreliable_not_acked.sort_unstable_by_key(|&(start, _)| start);
+
+                    // encode acks and nacks, increase unreliable_ack_nacked as we go
+                    let mut ack_nacks = write::PosNegRanges::default();
+
+                    let mut prev_end = None;
+                    let mut num_ranges_fully_ack = 0;
+
+                    for (
+                        i,
+                        &mut (ref mut start, end),
+                    ) = unreliable_not_acked.iter_mut().enumerate() {
+                        // assertion safety: this would've already been caught as a protocol error
+                        debug_assert!(start >= unreliable_ack_nacked);
+                        debug_assert(end >= start); // sanity check
+
+                        // detect overlapping ranges
+                        ensure!(
+                            prev_end.is_none_or(|prev_end| prev_end < start),
+                            "unreliable message number received in duplicate"
+                        );
+                        prev_end = Some(end);
+
+                        // decide how much of this range was declared long enough ago to ack
+                        debug_assert_eq!(num_ranges_fully_ack, i); // sanity check
+                        let ack_end = if end < must_ack_nack {
+                            // ack entire range
+                            num_ranges_fully_ack += 1;
+                            end
+                        } else if start < must_ack_nack {
+                            // ack part of range
+                            *start = must_ack_nack;
+                            must_ack_nack - 1
+                        } else {
+                            // ack none of range
+                            break;
+                        };
+
+                        // nack gap (the writer handles filtering & merging automatically)
+                        ack_nacks.neg_delta(start - unreliable_ack_nacked);
+                        unreliable_ack_nacked = start;
+
+                        // ack
+                        ack_nacks.pos_delta(ack_end + 1 - unreliable_ack_nacked);
+                        unreliable_ack_nacked = ack_end + 1;
+
+                        // break if we're only partially acking this range
+                        if num_ranges_fully_ack == i {
+                            break;
+                        }
+                    }
+
+                    // garbage collect fully acked ranges
+                    remove_first(&mut unreliable_not_acked, num_ranges_fully_ack);
+
+                    // trailing nack
+                    ack_nacks.neg_delta(must_ack_nack - unreliable_ack_nacked);
+                    unreliable_ack_nacked = must_ack_nack;
+
+                    // if additional messages were declared to have been sent since the timer was
+                    // started, immediately start it again
+                    if unreliable_sent > unreliable_ack_nacked {
+                        unreliable_ack_nack_timer.start(unreliable_sent);
+                    }
+
+                    // encode and send the ack-nack frame
+                    let mut wframes = write::Frames::default();
+                    debug_assert!(!self.send_version.load(Relaxed));
+                    wframes.ack_nack_unreliable(ack_nacks);
+                    // unwrap safety: the timer only runs when we receive a message from the chan
+                    //                ctrl frame, so the chan ctrl frame must be Some.
+                    wframes.send_stream(chan_ctrl.as_mut().unwrap()).await?;
+
+                    continue;
+                }
+                opt_task_msg = recv_task_msg.recv() => {
+                    opt_task_msg.unwrap(); // TODO?
+                }
+            };
+
+            // process ack message
             match task_msg {
                 ReceiverTaskMsg::DecodedMessageFrame(mut msg_frame) => {
+                    // received message on channel
+
+                    // update ack-nacking state
+                    if msg_frame.reliable {
+                        reliable_ack_timer.start(());
+                    } else {
+                        if let Some(&mut (_, ref mut end)) = unreliable_not_acked
+                            .iter_mut().rev().next()
+                            .filter(|&mut (_, end)| end + 1 == msg_frame.message_num)
+                        {
+                            // this "expand range" case is just an optimization
+                            *end = msg_frame.message_num;
+                        } else {
+                            let range = (msg_frame.message_num, msg_frame.message_num);
+                            unreliable_not_acked.push(range);
+                        }
+                    }
+
+                    // decode and detach and give to the application
                     let detach_target = DetachTarget {
                         conn: &self,
                         attachments: &mut msg_frame.attachments,
@@ -278,7 +374,10 @@ impl Conn {
                     chan_ctrl = Some(stream_send);
                 }
                 ReceiverTaskMsg::SentUnreliable(delta) => {
-
+                    unreliable_sent = unreliable_sent
+                        .checked_add(delta)
+                        .ok_or_else(|| anyhow!("SentUnreliable message num overflowed"))?;
+                    unreliable_ack_nack_timer.start(unreliable_sent);
                 }
                 ReceiverTaskMsg::FinishSender(reliable_count) => {
 

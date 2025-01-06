@@ -382,6 +382,7 @@ pub(crate) struct SentUnreliable(QuicReader);
 impl SentUnreliable {
     pub(crate) async fn delta(mut self) -> Result<(Frames, u64)> {
         let o = self.0.read_vli().await?;
+        ensure!(o > 0, "SentUnreliable with delta of 0");
         Ok((Frames(self.0), o))
     }
 }
