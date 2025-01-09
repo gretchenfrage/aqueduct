@@ -534,9 +534,7 @@ impl<T> Drop for Receiver<T> {
 // future types for channels.
 pub(crate) mod future {
     use super::*;
-    use crate::channel::{
-        polling::{Timeout, poll},
-    };
+    use crate::channel::polling::{Timeout, poll};
     use std::{
         task::{Poll, Context},
         future::Future,
@@ -703,13 +701,6 @@ pub(crate) mod future {
         }
     }
 
-    #[cfg(feature = "futures")]
-    impl<T> futures::future::FusedFuture for SendFut<T> {
-        fn is_terminated(&self) -> bool {
-            Self::is_terminated(self)
-        }
-    }
-
     impl<T> Drop for SendFut<T> {
         fn drop(&mut self) {
             // to make sure we trigger drop_sender if necessary
@@ -837,13 +828,6 @@ pub(crate) mod future {
         /// Whether this future has already resolved or aborted
         pub fn is_terminated(&self) -> bool {
             self.0.is_terminated()
-        }
-    }
-
-    #[cfg(feature = "futures")]
-    impl<T> futures::future::FusedFuture for RecvFut<T> {
-        fn is_terminated(&self) -> bool {
-            Self::is_terminated(self)
         }
     }
 

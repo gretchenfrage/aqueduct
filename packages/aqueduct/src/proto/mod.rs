@@ -224,11 +224,15 @@ impl Conn {
             spawn(Arc::clone(&self).relay_ctrl_to_receiver(rframes, send_task_msg.clone()));
         }
 
-        // reliable ack-nacking state
+        // acking state
         let reliable_ack_timer = AckTimer::<()>::new();
         pin!(reliable_ack_timer);
 
         // ==== unreliable ack-nacking state ====
+        let mut reliable_ack = ReceiverReliableAck::default();
+        let reliable_ack_timer = AckTimer::new();
+        pin!(reliable_ack_timer);
+
         let mut unreliable_ack = ReceiverUnreliableAck::default();
         let unreliable_ack_timer = AckTimer::new();
         pin!(unreliable_ack_timer);
@@ -238,7 +242,8 @@ impl Conn {
             // get task msg, or process ack timer then continue
             let task_msg = select! {
                 () = &mut reliable_ack_timer => {
-                    continue;
+                    reliable_ack.on_timer_zero(chan_ctrl.as_mut().unwrap()).await?;
+                    continue
                 }
                 timer_val = &mut unreliable_ack_timer => {
                     unreliable_ack
@@ -246,7 +251,7 @@ impl Conn {
                             timer_val,
                             &mut unreliable_ack_timer,
                             chan_ctrl.as_mut().unwrap(),
-                        );
+                        ).await?;
                     continue
                 }
                 opt_task_msg = recv_task_msg.recv() => {
@@ -261,9 +266,10 @@ impl Conn {
 
                     // update ack-nacking state
                     if msg_frame.reliable {
+                        reliable_ack.on_message(msg_frame.message_num, &mut unreliable_ack_timer);
                         reliable_ack_timer.start(());
                     } else {
-                        if unreliable_ack.on_message(msg_frame.message_num) {
+                        if unreliable_ack.on_message(msg_frame.message_num).is_err() {
                             continue;
                         }
                     }

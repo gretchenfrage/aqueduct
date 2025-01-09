@@ -56,16 +56,132 @@ impl<T> AckTimer<T> {
     }
 }
 
+#[derive(Default)]
+struct UnsortedRanges(Vec<(u64, u64)>);
+
+impl UnsortedRanges {
+    fn add(&mut self, n: u64) {
+        if let Some(&mut (_, ref mut end)) = self.0
+            .iter_mut().rev().next()
+            .filter(|&mut (_, end)| end + 1 == n)
+        {
+            // this "expand range" case is just an optimization
+            *end = msg_frame.n;
+        } else {
+            self.0.push((n, n));
+        }
+    }
+
+    fn sort(&mut self) {
+        // this is expected to probably be mostly sorted, therefore unstable-sort could be slower.
+        self.0.sort_by_key(|&(start, _)| start);
+    }
+}
+
+// receiver-side state for acking and nacking reliable messages, other than the timer.
+#derive(Default)
+pub(crate) struct ReceiverReliableAck {
+    // inclusive ranges of reliable message nums that have been acked, represented as map from
+    // start to end. invariant: continuous ranges are merged.
+    acked: BTreeMap<u64, u64>,    
+    // not-necessarily-sorted list of inclusive ranges of reliable message nums that have been
+    // received and not yet acked
+    not_acked: UnsortedRanges,
+}
+
+impl ReceiverReliableAck {
+    pub(crate) async fn on_timer_zero(
+        &mut self,
+        chan_ctrl: &mut quinn::SendStream,
+    ) -> Result<()> {
+        // all reliable message nums less than this have been acked
+        let mut fully_acked = self.acked
+            .first_key_value()
+            .filter(|&(&start, _)| start == 0)
+            .map(|(_, &end)| end + 1)
+            .unwrap_or(0);
+
+        // sort the ranges. if there are overlaps, that will be detected as a protocol error later
+        self.not_acked.sort();
+
+        // loop through the ranges and:
+        // - encode acks
+        // - update self.acked
+        // - detect duplicate message nums
+
+        let mut acks = write::PosNegRanges::default();
+        let mut prev_end = None;
+
+        for (start, end) in self.not_acked.0.drain(..) {
+            // validate not acked range
+            debug_assert!(end >= start, "negative length range");
+            ensure!(
+                prev_end.is_none_or(|prev_end| prev_end < start),
+                "reliable message number received in duplicate"
+            );
+            prev_end = Some(end);
+
+            // encode new ack
+            acks.neg_delta(start - fully_acked);
+            acks.pos_delta(end + 1 - start);
+            fully_acked = end + 1;
+
+            // merge into tree
+            let mut btree_range = self.acked.range_mut(..=end + 1)
+
+            if let Some((start2, end2)) = btree_range.last() {
+                debug_assert!(start2 >= end2, "negative length range");
+                if *start2 == end + 1 {
+                    // new range merges with existing range on its right
+                    *start2 = start;
+
+                    if let Some((start3, end3)) = btree_range.last() {
+                        debug_assert!(start3 >= end3, "negative length range");
+                        debug_assert!(end3 < start2 - 1, "non-merged ranges");
+                        ensure!(end3 < start, "reliable message number received in duplicate");
+                        if end3 == start - 1 {
+                            // new range also merges with existing range on its left
+                            *start2 = *start3;
+                            self.acked.remove(*start3).unwrap();
+                        }
+                    }
+                } else {
+                    ensure!(end2 < start, "reliable message number received in duplicate");
+                    if end2 == start - 1 {
+                        // new range merges with existing range on its left
+                        *end2 = end;
+                    }
+                }
+            } else {
+                // new range does not merge with any existing range
+                self.acked.insert(start, end);
+            }
+        }
+
+        // encode and send the ack frame
+        let mut wframes = write::Frames::default();
+        wframes.ack_reliable(acks);
+        wframes.send_stream(chan_ctrl).await?;
+
+        Ok(())
+    }
+
+    pub(crate) fn on_message(&mut self, message_num: u64, timer: &mut Pin<&mut AckTimer<()>>) {
+        self.not_acked.push(message_num);
+        timer.start(());
+    }
+}
+
 // receiver-side state for acking and nacking unreliable messages, other than the timer.
 #[derive(Default)]
 pub(crate) struct ReceiverUnreliableAck {
-    // all unreliable message nums below this have been acked or nacked
+    // all unreliable message nums below this have been acked or nacked (and none above have)
     ack_nacked: u64,
     // the sender has declared having sent all unreliable message nums below this
     declared_sent: u64,
     // not-necessarily-sorted list of inclusive ranges of unreliable message nums that have been
     // received and not yet acked
-    not_acked: Vec<(u64, u64)>,
+    not_acked: UnsortedRanges,
 }
 
 impl ReceiverUnreliableAck {
@@ -75,7 +191,7 @@ impl ReceiverUnreliableAck {
         timer_val: u64,
         timer: &mut Pin<&mut AckTimer>,
         chan_ctrl: &mut quinn::SendStream,
-    ) -> Result<()> {
+    ) -> Result<(), Error> {
         // the timer holds the value of declared_sent at the point when it was started, and
         // finishes after the loss detection duration. thus, when it finishes, all unreliable
         // message nums below that must be acked or nacked.
@@ -88,10 +204,8 @@ impl ReceiverUnreliableAck {
         //   to declared_sent
         debug_assert!(must_ack_nack > self.ack_nacked);
         
-        // sort the ranges. if there are overlaps, that will be detected as a protocol error later.
-        //
-        // this is expected to probably be mostly sorted, therefore unstable-sort could be slower.
-        self.not_acked.sort_by_key(|&(start, _)| start);
+        // sort the ranges. if there are overlaps, that will be detected as a protocol error later
+        self.not_acked.0.sort_by_key(|&(start, _)| start);
 
         // encode acks and nacks, increase ack_nacked as we go
         let mut ack_nacks = write::PosNegRanges::default();
@@ -99,7 +213,7 @@ impl ReceiverUnreliableAck {
         let mut prev_end = None;
         let mut num_ranges_fully_ack = 0;
 
-        for (i, &mut (ref mut start, end)) = self.not_acked.iter_mut().enumerate() {
+        for (i, &mut (ref mut start, end)) = self.not_acked.0.iter_mut().enumerate() {
             // assertion safety: this would've already been caught as a protocol error
             debug_assert!(start >= self.ack_nacked);
             debug_assert(end >= start); // sanity check
@@ -162,32 +276,21 @@ impl ReceiverUnreliableAck {
     }
 
     // call whenever a Message frame is received unreliably.
-    //
-    // if this returns false, the message has already been nacked, and must be discarded.
-    #[must_use = "message must be discarded if returns true"]
-    pub(crate) fn on_message(&mut self, message_num: u64) -> bool {
+    pub(crate) fn on_message(&mut self, message_num: u64) -> Result<(), AlreadyNacked> {
         if message_num < self.ack_nacked {
-            true
-        } else {
-            if let Some(&mut (_, ref mut end)) = self.not_acked
-                .iter_mut().rev().next()
-                .filter(|&mut (_, end)| end + 1 == message_num)
-            {
-                // this "expand range" case is just an optimization
-                *end = msg_frame.message_num;
-            } else {
-                self.not_acked.push((message_num, message_num));
-            }
-            false
+            return Err(AlreadyNacked);
         }
+
+        self.not_acked.push(message_num);
+        Ok(())
     }
 
     // call whenever a SentUnreliable frame is received.
     pub(crate) fn on_sent_unreliable(
         &mut self,
         delta: u64,
-        timer: &mut Pin<&mut AckTimer>,
-    ) -> Result<()> {
+        timer: &mut Pin<&mut AckTimer<u64>>,
+    ) -> Result<(), Error> {
         self.declared_sent = declared_sent
             .checked_add(delta)
             .ok_or_else(|| anyhow!("SentUnreliable message num overflowed"))?;
@@ -195,3 +298,6 @@ impl ReceiverUnreliableAck {
         Ok(())
     }
 }
+
+// error for receiving an unreliable message we have already nacked. it must be ignored.
+pub(crate) struct AlreadyNacked;
