@@ -23,6 +23,16 @@ pub(crate) enum ReadError {
     Other(Error),
 }
 
+impl ReadError {
+    // treat QUIC stream reset as an unrecoverable error.
+    pub(crate) fn cannot_reset(self) -> Error {
+        match self {
+            ReadError::Reset(code) => anyhow!("unexpected stream reset: {:?}", code),
+            ReadError::Other(e) => e,
+        }
+    }
+}
+
 impl From<Error> for ReadError {
     fn from(e: Error) -> Self {
         ReadError::Other(e)
@@ -50,7 +60,7 @@ impl From<QuicStreamReadError> for ReadError {
     }
 }
 
-pub(crate) type Result<T> = Result<T, ReadError>;
+pub(crate) type Result<T> = std::result::Result<T, ReadError>;
 
 macro_rules! ensure {
     ($cond:expr, $($t:tt)*)=>{
@@ -60,6 +70,15 @@ macro_rules! ensure {
     };
 }
 
+pub(crate) use ensure;
+
+macro_rules! bail {
+    ($($t:tt)*)=>{
+        return Err(anyhow::anyhow!($($t)*).into())
+    };
+}
+
+pub(crate) use bail;
 
 // ==== rest of read module ====
 
@@ -88,10 +107,12 @@ enum QuicReaderSource {
     Datagram(MultiBytes),
 }
 
-// stats field of QuicReader
+// stats field of QuicReader, used for validation
 #[derive(Default)]
 struct QuicReaderStats {
+    // whether a Version frame has been decoded
     version_frame: bool,
+    // whether a non-Version frame has been decoded
     non_version_frame: bool,
 }
 
@@ -103,7 +124,7 @@ impl QuicReader {
             &mut QuicReaderSource::Datagram(ref mut inner) => inner.read(buf)?,
         })
     }
-    
+
     // read bytes zero-copy-ly
     async fn read_zc(&mut self, n: usize) -> Result<MultiBytes> {
         Ok(match &mut self.source {
@@ -165,7 +186,7 @@ impl QuicReader {
     // read a var len int, then cast to usize or error if unable.
     async fn read_vli_usize(&mut self) -> Result<usize> {
         let n = self.read_vli().await?;
-        n.try_into().map_err(|_| anyhow!("overflow casting var len int to usize: {}", n))
+        n.try_into().map_err(|_| anyhow!("overflow casting var len int to usize: {}", n).into())
     }
 
     // read a channel id.
@@ -178,7 +199,7 @@ impl QuicReader {
 pub(crate) struct Frames(QuicReader);
 
 impl Frames {
-    pub(crate) fn from_uni_stream(stream: RecvStream) -> Self {
+    pub(crate) fn from_uni_stream(stream: quinn::RecvStream) -> Self {
         Frames(QuicReader {
             source_type: SourceType::UniStream,
             source: QuicReaderSource::Stream(QuicStreamReader::new(stream)),
@@ -186,7 +207,7 @@ impl Frames {
         })
     }
 
-    pub(crate) fn from_bidi_stream(stream: RecvStream) -> Self {
+    pub(crate) fn from_bidi_stream(stream: quinn::RecvStream) -> Self {
         Frames(QuicReader {
             source_type: SourceType::BidiStream,
             source: QuicReaderSource::Stream(QuicStreamReader::new(stream)),
@@ -202,6 +223,7 @@ impl Frames {
         })
     }
 
+    // begin reading the next frame
     pub(crate) async fn frame(mut self) -> Result<Option<Frame>> {
         if self.0.is_done().await? {
             ensure!(
@@ -211,7 +233,7 @@ impl Frames {
             return Ok(None);
         }
         let frame_type = FrameType::from_byte(self.0.read_byte().await?)?;
-        
+
         // misc validation and stats updating goes here:
         if frame_type == FrameType::Version {
             ensure!(
@@ -222,7 +244,7 @@ impl Frames {
         } else {
             self.0.stats.non_version_frame = true;
         }
-        
+
         Ok(Some(match frame_type {
             FrameType::Version => Frame::Version(Version(self.0)),
             FrameType::ConnectionControl => Frame::ConnectionControl(ConnectionControl(self.0)),
@@ -235,6 +257,14 @@ impl Frames {
             FrameType::CloseReceiver => Frame::CloseReceiver(CloseReceiver(self.0)),
             FrameType::ClosedChannelLost => Frame::ClosedChannelLost(ClosedChannelLost(self.0)),
         }))
+    }
+
+    // since it is a protocol error for a frame sequence to finish without a non-Version frame,
+    // this can be used to read a frame without an `Option`. panics if a non-Version frame has
+    // already been read.
+    pub(crate) async fn first_frame(self) -> Result<Frame> {
+        assert!(!self.0.stats.non_version_frame, "invalid usage of first frame");
+        Ok(self.frame().await?.unwrap())
     }
 }
 
@@ -255,16 +285,16 @@ pub(crate) enum Frame {
 impl Frame {
     pub(crate) fn frame_type(&self) -> FrameType {
         match self {
-            &Frame::Version => FrameType::Version,
-            &Frame::ConnectionControl => FrameType::ConnectionControl,
-            &Frame::ChannelControl => FrameType::ChannelControl,
-            &Frame::Message => FrameType::Message,
-            &Frame::SentUnreliable => FrameType::SentUnreliable,
-            &Frame::AckReliable => FrameType::AckReliable,
-            &Frame::AckNackUnreliable => FrameType::AckNackUnreliable,
-            &Frame::FinishSender => FrameType::FinishSender,
-            &Frame::CloseReceiver => FrameType::CloseReceiver,
-            &Frame::ClosedChannelLost => FrameType::ClosedChannelLost,
+            &Frame::Version(_) => FrameType::Version,
+            &Frame::ConnectionControl(_) => FrameType::ConnectionControl,
+            &Frame::ChannelControl(_) => FrameType::ChannelControl,
+            &Frame::Message(_) => FrameType::Message,
+            &Frame::SentUnreliable(_) => FrameType::SentUnreliable,
+            &Frame::AckReliable(_) => FrameType::AckReliable,
+            &Frame::AckNackUnreliable(_) => FrameType::AckNackUnreliable,
+            &Frame::FinishSender(_) => FrameType::FinishSender,
+            &Frame::CloseReceiver(_) => FrameType::CloseReceiver,
+            &Frame::ClosedChannelLost(_) => FrameType::ClosedChannelLost,
         }
     }
 }
@@ -312,6 +342,15 @@ impl ChannelControl {
 pub(crate) struct Message(QuicReader);
 
 impl Message {
+    // whether this message frame was sent reliably.
+    pub(crate) fn reliable(&self) -> bool {
+        match self.0.source_type {
+            SourceType::UniStream => true,
+            SourceType::BidiStream => panic!("Message frame sent on bidi stream"),
+            SourceType::Datagram => false,
+        }
+    }
+
     pub(crate) async fn sent_on(mut self) -> Result<(Message2, ChanId)> {
         let o = self.0.read_chan_id().await?;
         Ok((Message2(self.0), o))

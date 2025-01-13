@@ -1,5 +1,9 @@
 
-use std::mem::needs_drop;
+use std::{
+    mem::{MaybeUninit, needs_drop},
+    sync::atomic::{AtomicBool, Ordering},
+};
+
 
 
 // remove the first n elements of vec
@@ -28,5 +32,43 @@ pub(crate) fn remove_first<T>(vec: &mut Vec<T>, n: usize) {
         }
 
         vec.set_len(old_len - n);
+    }
+}
+
+// like an atomic Option<T> that can be `take`n once.
+pub(crate) struct AtomicTake<T> {
+    is_some: AtomicBool,
+    val: MaybeUninit<T>,
+}
+
+impl<T> AtomicTake<T> {
+    pub(crate) const fn some(val: T) -> Self {
+        AtomicTake {
+            is_some: AtomicBool::new(true),
+            val: MaybeUninit::new(val),
+        }
+    }
+
+    pub(crate) const fn none() -> Self {
+        AtomicTake {
+            is_some: Atomicbool::new(false),
+            val: MaybeUninit::uninit()
+        }
+    }
+
+    pub(crate) fn take(&self) -> Option<T> {
+        unsafe {
+            if self.is_some.store(false, Ordering::Relaxed) {
+                Some(self.val.as_ptr().read())
+            } else {
+                None
+            }
+        }
+    }
+}
+
+impl<T> Drop for AtomicTake<T> {
+    fn drop(&mut self) {
+        drop(self.take());
     }
 }

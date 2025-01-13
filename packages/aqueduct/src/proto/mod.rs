@@ -7,17 +7,17 @@ use self::{
     frame_category::{
         NonBidiFrame,
         CtrlFrameToReceiver,
-        CtrlFrameToSender,
     },
     ack::{
-        Acktimer,
+        AckTimer,
+        ReceiverReliableAck,
         ReceiverUnreliableAck,
     },
 };
 use crate::{
     codec::{
         common::*,
-        read,
+        read::{self, ReadError},
         write,
     },
     zero_copy::MultiBytes,
@@ -34,7 +34,7 @@ use std::sync::{
 };
 use tokio::{pin, select};
 use dashmap::DashMap;
-use anyhow::*;
+use anyhow::{Error, anyhow, ensure, bail};
 
 
 // shared state for side of an aqueduct connection
@@ -52,72 +52,111 @@ struct Conn {
 }
 
 impl Conn {
-    // handle an incoming QUIC unidirectional stream or datagram
-    async fn handle_frames(self: &Arc<Self>, mut rframes: read::Frames) -> Result<()> {
+    // shut down the connection due to an unrecoverable error.
+    async fn shutdown(&self, error: Option<Error>) {
+        if let Some(error) = error {
+            error!("shutting down connection: {}", error);
+        } else {
+            trace!("shutting down connection (no error)");
+        }
+        self.quic_conn.close(0.into(), b"");
+    }
+
+    // handle an incoming QUIC unidirectional stream or datagram.
+    async fn handle_uni_frames(self: &Arc<Self>, rframes: read::Frames) {
+        self.handle_frames_inner(rframes).await.or_else(|e| match e {
+            // unidirectional streams ignored when reset
+            ReadError::Reset(_) => Ok(()),
+            ReadError::Other(e) => self.shutdown(Some(e)),
+        })
+    }
+
+    // handle an incoming QUIC unidirectional stream or datagram, or error.
+    async fn try_handle_uni_frames(
+        self: &Arc<Self>,
+        mut rframes: read::Frames,
+    ) -> Result<(), ReadError> {
         while let Some(r) = rframes.frame().await? {
             let r = NonBidiFrame::try_from(r)?;
-            match r {
-                NonBidiFrame::Version(r) => {
-                    rframes = r.validate().await?;
-                }
-                NonBidiFrame::Message(r) => {
-                    rframes = self.handle_message_frame(r).await?;
-                }
+            rframes = match r {
+                NonBidiFrame::Version(r) => r.validate().await?,
+                NonBidiFrame::Message(r) => self.handle_message_frame(r).await?,
                 NonBidiFrame::ClosedChannelLost(r) => {
                     let (r, chan_id) = r.chan_id().await?;
                     rframes = r;
                     todo!()
                 }
-            }
+            };
         }
         Ok(())
     }
 
     // handle an incoming message frame
-    async fn handle_message_frame(self: &Arc<Self>, r: read::Message) -> Result<read::Frames> {
+    async fn handle_message_frame(
+        self: &Arc<Self>,
+        r: read::Message,
+    ) -> Result<read::Frames, ReadError> {
         // fully read and decode, validate as we go
+        let reliable = r.reliable();
         let (r, sent_on) = r.sent_on().await?;
-        ensure!(sent_on.dir().side_to() == self.side, "message chan id wrong dir");
+        read::ensure!(sent_on.dir().side_to() == self.side, "message chan id wrong dir");
         let (r, message_num) = r.message_num().await?;
         let (mut r, _attachments_len) = r.attachments_len().await?;
+
+        // decode attachments, and create sender / receiver tasks
         let mut attachments = Vec::new();
         while let Some(attachment) = r.next_attachment().await? {
-            ensure!(
+            read::ensure!(
                 attachment.minted_by() != self.side,
                 "attachment chan id minted by wrong side",
             );
             attachments.push(Some(if attachment.dir().side_to() == self.side {
+                // receiver was attached
                 let mpsc_entry = self.receivers
                     .get(&attachment)
                     .unwrap_or_else(|| self.receivers
                         .entry(attachment)
                         .or_default()
                         .downgrade());
-                let mut recv_task_msg_lock = mpsc_entry.recv_task_msg.lock().unwrap();
-                let recv_task_msg = recv_task_msg_lock.take()
+                let recv_task_msg = mpsc_entry
+                    .recv_task_msg.lock().unwrap()
+                    .take()
                     .ok_or_else(|| anyhow!("detected receiver attached twice by remote"))?;
-                DecodedAttachment::Receiver(attachment, recv_task_msg)
+                DecodedAttachment::Receiver {
+                    chan_id: attachment,
+                    send_task_msg: mpsc_entry.send_task_msg.clone(),
+                    recv_task_msg,
+                }
             } else {
+                // sender was attached
                 DecodedAttachment::Sender(attachment)
             }));
         }
+
         let r = r.done();
         let (r, _payload_len) = r.payload_len().await?;
         let (r, payload) = r.payload().await?;
         let msg_frame = DecodedMessageFrame {
-            reliable: todo!(),
+            reliable,
             sent_on,
             message_num,
             attachments,
             payload,
         };
 
-        // route to receiver, possiblye create receiver
+        // route to receiver, possibly create receiver
         let task_msg = ReceiverTaskMsg::DecodedMessageFrame(msg_frame);
+        if let Some(receiver) = self.receivers.get(&sent_on) {
+            // try to route to existing receiver with only a read-lock
+            receiver.send_task_msg.send(task_msg).unwrap();
+        } else if sent_on.minted_by() != self.side {
+
+        }
+
         if sent_on.minted_by() == self.side {
-            if let Some(receiver) = self.receivers.get(&sent_on) {
                 receiver.send_task_msg.send(task_msg).unwrap();
             }
+            // ignore messages for which we already closed the receiver
         } else {
             // TODO: optimize locking?
             self.receivers.entry(sent_on).or_default().send_task_msg.send(task_msg).unwrap();
@@ -131,10 +170,10 @@ impl Conn {
         self: &Arc<Self>,
         mut rframes: read::Frames,
         mut stream_send: quinn::SendStream,
-    ) -> Result<()> {
-        let r = rframes.frame().await?.unwrap();
+    ) -> Result<(), Error> {
+        let r = rframes.first_frame().await.map_err(ReadError::cannot_reset)?;
         let read::Frame::ChannelControl(r) = r else { bail!("expected ChannelControl frame") };
-        let (r, chan_id) = r.chan_id().await?;
+        let (r, chan_id) = r.chan_id().await.map_err(ReadError::cannot_reset)?;
         rframes = r;
 
         ensure!(chan_id.minted_by() == self.side, "ChannelControl frame minted by wrong side");
@@ -142,10 +181,10 @@ impl Conn {
             // receiver
             if let Some(task_mpsc) = self.receivers.get(&chan_id) {
                 task_mpsc.send_task_msg
-                    .send(ReceiverTaskMsg::ChanCtrl(rframes, stream_send))
+                    .send(ReceiverTaskMsg::ChanCtrl(stream_send))
                     .unwrap();
             } else {
-                stream_send.reset((ResetErrorCode::Lost as u32).into()).unwrap();
+                stream_send.reset((ResetCode::Lost as u32).into()).unwrap();
             }
         } else {
             // sender
@@ -159,8 +198,8 @@ impl Conn {
         self: Arc<Self>,
         mut rframes: read::Frames,
         send_task_msg: tokio::sync::mpsc::UnboundedSender<ReceiverTaskMsg>,
-    ) -> Result<()> {
-        match self.relay_ctrl_to_receiver_inner(rframes, &send_task_msg) {
+    ) -> Result<(), Error> {
+        match self.relay_ctrl_to_receiver_inner(rframes, &send_task_msg).await {
             Ok(()) => (),
             // if the inner task fails due to stream reset, catch and handle gracefully
             Err(ReadError::Reset(code)) => {
@@ -175,7 +214,7 @@ impl Conn {
         self: &Arc<Self>,
         mut rframes: read::Frames,
         send_task_msg: &tokio::sync::mpsc::UnboundedSender<ReceiverTaskMsg>,
-    ) -> read::Result<()> {
+    ) -> Result<(), ReadError> {
         while let Some(r) = rframes.frame().await? {
             let r = CtrlFrameToReceiver::try_from(r)?;
             match r {
@@ -202,7 +241,7 @@ impl Conn {
         mut recv_task_msg: tokio::sync::mpsc::UnboundedReceiver<ReceiverTaskMsg>,
         app_decoder: D,
         gateway: IntoSender<M>,
-    ) -> Result<()> {
+    ) -> Result<(), Error> {
         debug_assert!(chan_id.dir().side_to() == self.side);
         let gateway = gateway.into_ordered_unbounded();
 
@@ -221,7 +260,7 @@ impl Conn {
 
             // locally install it
             chan_ctrl = Some(stream_send);
-            spawn(Arc::clone(&self).relay_ctrl_to_receiver(rframes, send_task_msg.clone()));
+            tokio::spawn(Arc::clone(&self).relay_ctrl_to_receiver(rframes, send_task_msg.clone()));
         }
 
         // acking state
@@ -255,7 +294,7 @@ impl Conn {
                     continue
                 }
                 opt_task_msg = recv_task_msg.recv() => {
-                    opt_task_msg.unwrap(); // TODO?
+                    opt_task_msg.unwrap() // TODO?
                 }
             };
 
@@ -266,7 +305,7 @@ impl Conn {
 
                     // update ack-nacking state
                     if msg_frame.reliable {
-                        reliable_ack.on_message(msg_frame.message_num, &mut unreliable_ack_timer);
+                        reliable_ack.on_message(msg_frame.message_num, &mut reliable_ack_timer);
                         reliable_ack_timer.start(());
                     } else {
                         if unreliable_ack.on_message(msg_frame.message_num).is_err() {
@@ -289,7 +328,7 @@ impl Conn {
                     chan_ctrl = Some(stream_send);
                 }
                 ReceiverTaskMsg::SentUnreliable(delta) => {
-                    unreliable_ack.on_sent_unreliable(delta)?;
+                    unreliable_ack.on_sent_unreliable(delta, &mut unreliable_ack_timer)?;
                 }
                 ReceiverTaskMsg::FinishSender(reliable_count) => {
 
@@ -299,7 +338,6 @@ impl Conn {
                 }
             }
         }
-        todo!()
     }
 
     // task for a networked sender
@@ -308,7 +346,7 @@ impl Conn {
         chan_id: ChanId,
         app_encoder: E,
         gateway: IntoReceiver<M>,
-    ) -> Result<()> {
+    ) -> Result<(), Error> {
         debug_assert!(chan_id.dir().side_to() != self.side);
         let gateway = gateway.into_receiver();
         let mut delivery_guarantees = DeliveryGuarantees::Unconverted;
@@ -370,7 +408,7 @@ impl Conn {
     }
 
     // client-side Aqueduct handshake
-    async fn client_handshake(self: Arc<Self>) -> Result<()> {
+    async fn client_handshake(self: Arc<Self>) -> Result<(), Error> {
         let (mut stream_send, stream_recv) = self.quic_conn.open_bi().await?;
         let mut rframes = read::Frames::from_bidi_stream(stream_recv);
 
@@ -380,16 +418,19 @@ impl Conn {
         wframes.send_stream(&mut stream_send).await;
         stream_send.finish().unwrap();
 
-        let r = rframes.frame().await?.unwrap();
+        let r = rframes.first_frame().await.map_err(ReadError::cannot_reset)?;
         let read::Frame::Version(r) = r else { bail!("expected Version frame") };
-        rframes = r.validate().await?;
+        rframes = r.validate().await.map_err(ReadError::cannot_reset)?;
         self.send_version.store(false, Relaxed);
 
-        let r = rframes.frame().await?.unwrap();
+        let r = rframes.first_frame().await.map_err(ReadError::cannot_reset)?;
         let read::Frame::ConnectionControl(r) = r else { bail!("expected ConnectionControl frame") };
-        rframes = r.skip_headers().await?;
+        rframes = r.skip_headers().await.map_err(ReadError::cannot_reset)?;
 
-        ensure!(rframes.frame().await?.is_none(), "expected end of stream");
+        ensure!(
+            rframes.frame().await.map_err(ReadError::cannot_reset)?.is_none(),
+            "expected end of stream",
+        );
 
         Ok(())
     }
@@ -424,7 +465,7 @@ enum ReceiverTaskMsg {
     // the FinishSender frame was received from the channel control stream
     FinishSender(u64),
     // the channel control stream was reset
-    ChanCtrlReset(ResetErrorCode),
+    ChanCtrlReset(ResetCode),
 }
 
 // fully decoded message frame
@@ -445,17 +486,21 @@ enum DecodedAttachment {
     // when an attached received is decoded, its receiver task mpsc is preemptively created / the
     // recv_task_msg taken. this frontruns double-attachment errors before application decoder is
     // invoked.
-    Receiver(ChanId, tokio::sync::mpsc::UnboundedReceiver<ReceiverTaskMsg>),
+    Receiver {
+        chan_id: ChanId,
+        send_task_msg: tokio::sync::mpsc::UnboundedSender<ReceiverTaskMsg>,
+        recv_task_msg: tokio::sync::mpsc::UnboundedReceiver<ReceiverTaskMsg>,
+    },
 }
 
 /// Logic for encoding a message and attaching its attachments in some format.
 pub trait EncoderAttacher<M>: Send + Sync + 'static {
-    fn encode(&self, msg: M, attach: AttachTarget) -> Result<MultiBytes>;
+    fn encode(&self, msg: M, attach: AttachTarget) -> Result<MultiBytes, Error>;
 }
 
 /// Logic for decoding a message and detaching its attachments in some format.
 pub trait DecoderDetacher<M>: Send + Sync + 'static {
-    fn decode(&self, encoded: MultiBytes, detach: DetachTarget) -> Result<M>;
+    fn decode(&self, encoded: MultiBytes, detach: DetachTarget) -> Result<M, Error>;
 }
 
 /// Passed to an [`EncoderAttacher`] to attach attachments to.
@@ -485,14 +530,16 @@ impl<'a> AttachTarget<'a> {
         ) = self.attach_inner(self.conn.side.opposite().dir_to(), false);
         let (send_task_msg, recv_task_msg) = tokio::sync::mpsc::unbounded_channel();
         let task_mpsc = ReceiverTaskMpsc {
-            send_task_msg,
+            send_task_msg: send_task_msg.clone(),
             recv_task_msg: Mutex::new(None),
+            chan_ctrl_frame_found: false.into(),
         };
         let prev_val = self.conn.receivers.insert(chan_id, task_mpsc);
         // the way in which we locally mint it should make collision impossible
         debug_assert!(prev_val.is_none());
         tokio::spawn(
-            Arc::clone(&self.conn).receiver_task(chan_id, recv_task_msg, decoder, sender)
+            Arc::clone(&self.conn)
+                .receiver_task(chan_id, send_task_msg, recv_task_msg, decoder, sender)
         );
         attachment_idx
     }
@@ -548,19 +595,18 @@ impl<'a> DetachTarget<'a> {
     ) -> Result<IntoReceiver<M>, DetachError> {
         let slot = self.attachments.get_mut(attachment_idx)
             .ok_or(DetachError::IndexOutOfBounds)?;
-        if slot.as_ref().is_some_and(|attachment|
-            !matches!(attachment, DecodedAttachment::Receiver { .. })
-        ) {
+        if slot.as_ref()
+            .is_some_and(|attachment| !matches!(attachment, DecodedAttachment::Receiver { .. }))
+        {
             return Err(DetachError::WrongAttachmentType);
         }
         let attachment = slot.take().ok_or(DetachError::AlreadyDetached)?;
-        let DecodedAttachment::Receiver(
-            chan_id,
-            recv_task_msg,
-        ) = attachment else { unreachable!() };
+        let DecodedAttachment::Receiver { chan_id, send_task_msg, recv_task_msg } =
+            attachment
+            else { unreachable!() };
         let (gateway, receiver) = channel();
         tokio::spawn(
-            Arc::clone(&self.conn).receiver_task(chan_id, recv_task_msg, decoder, gateway)
+            Arc::clone(&self.conn).receiver_task(chan_id, send_task_msg, recv_task_msg, decoder, gateway)
         );
         // TODO: ugly
         std::result::Result::Ok(receiver)
@@ -595,17 +641,17 @@ pub enum DetachError {
 }
 
 // server-side Aqueduct connection handshake
-async fn server_handshake(conn: &quinn::Connection) -> Result<()> {
+async fn server_handshake(conn: &quinn::Connection) -> Result<(), Error> {
     let (mut stream_send, stream_recv) = conn.accept_bi().await?;
     let mut rframes = read::Frames::from_bidi_stream(stream_recv);
 
-    let r = rframes.frame().await?.unwrap();
+    let r = rframes.first_frame().await.map_err(ReadError::cannot_reset)?;
     let read::Frame::Version(r) = r else { bail!("expected Version frame") };
-    rframes = r.validate().await?;
+    rframes = r.validate().await.map_err(ReadError::cannot_reset)?;
 
-    let r = rframes.frame().await?.unwrap();
+    let r = rframes.first_frame().await.map_err(ReadError::cannot_reset)?;
     let read::Frame::ConnectionControl(r) = r else { bail!("expected ConnectionControl frame") };
-    rframes = r.skip_headers().await?;
+    rframes = r.skip_headers().await.map_err(ReadError::cannot_reset)?;
 
     let mut wframes = write::Frames::default();
     wframes.version();
@@ -613,7 +659,10 @@ async fn server_handshake(conn: &quinn::Connection) -> Result<()> {
     wframes.send_stream(&mut stream_send).await?;
     stream_send.finish().unwrap();
 
-    ensure!(rframes.frame().await?.is_none(), "expected end of stream");
+    ensure!(
+        rframes.frame().await.map_err(ReadError::cannot_reset)?.is_none(),
+        "expected end of stream",
+    );
 
     Ok(())
 }

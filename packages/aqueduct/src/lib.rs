@@ -5,8 +5,6 @@
 extern crate tracing;
 
 pub extern crate bytes;
-#[cfg(feature = "futures")]
-pub extern crate futures;
 
 pub mod docs;
 pub mod zero_copy;

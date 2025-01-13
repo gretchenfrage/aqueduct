@@ -182,7 +182,7 @@ impl Frames {
     // write an AckReliable frame.
     pub(crate) fn ack_reliable(&mut self, acks: PosNegRanges) {
         self.0.write(&[FrameType::AckReliable as u8]);
-        self.0.write_vlba(acks.finalize);
+        self.0.write_vlba(acks.finalize());
     }
 
     // write an AckNackUnreliable frame.
@@ -200,7 +200,7 @@ impl Frames {
     // write a CloseReceiver frame.
     pub(crate) fn close_receiver(&mut self, reliable_ack_nacks: PosNegRanges) {
         self.0.write(&[FrameType::CloseReceiver as u8]);
-        self.0.write_vlba(reliable_ack_nacks.0);
+        self.0.write_vlba(reliable_ack_nacks.written.0);
     }
 
     // write a ClosedChannelLost frame.

@@ -1,13 +1,18 @@
 
-use crate::misc::remove_first;
+use crate::{
+    misc::remove_first,
+    codec::write,
+};
 use std::{
     time::Duration,
     task::{Context, Poll},
     future::Future,
     pin::Pin,
+    collections::BTreeMap,
+    cell::Cell,
 };
 use tokio::time::{Sleep, sleep};
-use anyhow::*;
+use anyhow::{Error, ensure, anyhow};
 
 
 const ACK_DELAY: Duration = Duration::from_secs(1);
@@ -29,7 +34,7 @@ impl<T: Copy> Future for AckTimer<T> {
                 match Pin::new_unchecked(sleep).poll(cx) {
                     Poll::Pending => Poll::Pending,
                     Poll::Ready(()) => {
-                        this.sleep = None;
+                        this.0 = None;
                         Poll::Ready(val)
                     }
                 }
@@ -63,10 +68,10 @@ impl UnsortedRanges {
     fn add(&mut self, n: u64) {
         if let Some(&mut (_, ref mut end)) = self.0
             .iter_mut().rev().next()
-            .filter(|&mut (_, end)| end + 1 == n)
+            .filter(|&&mut (_, end)| end + 1 == n)
         {
             // this "expand range" case is just an optimization
-            *end = msg_frame.n;
+            *end = n;
         } else {
             self.0.push((n, n));
         }
@@ -79,11 +84,11 @@ impl UnsortedRanges {
 }
 
 // receiver-side state for acking and nacking reliable messages, other than the timer.
-#derive(Default)
+#[derive(Default)]
 pub(crate) struct ReceiverReliableAck {
     // inclusive ranges of reliable message nums that have been acked, represented as map from
     // start to end. invariant: continuous ranges are merged.
-    acked: BTreeMap<u64, u64>,    
+    acked: BTreeMap<Cell<u64>, u64>,
     // not-necessarily-sorted list of inclusive ranges of reliable message nums that have been
     // received and not yet acked
     not_acked: UnsortedRanges,
@@ -93,11 +98,11 @@ impl ReceiverReliableAck {
     pub(crate) async fn on_timer_zero(
         &mut self,
         chan_ctrl: &mut quinn::SendStream,
-    ) -> Result<()> {
+    ) -> Result<(), Error> {
         // all reliable message nums less than this have been acked
         let mut fully_acked = self.acked
             .first_key_value()
-            .filter(|&(&start, _)| start == 0)
+            .filter(|&(start, _)| start.get() == 0)
             .map(|(_, &end)| end + 1)
             .unwrap_or(0);
 
@@ -127,34 +132,39 @@ impl ReceiverReliableAck {
             fully_acked = end + 1;
 
             // merge into tree
-            let mut btree_range = self.acked.range_mut(..=end + 1)
+            let mut btree_range = self.acked.range_mut(..=Cell::new(end + 1));
 
-            if let Some((start2, end2)) = btree_range.last() {
-                debug_assert!(start2 >= end2, "negative length range");
-                if *start2 == end + 1 {
+            if let Some((start2, end2)) = btree_range.next_back() {
+                debug_assert!(start2.get() >= *end2, "negative length range");
+                if start2.get() == end + 1 {
                     // new range merges with existing range on its right
-                    *start2 = start;
 
-                    if let Some((start3, end3)) = btree_range.last() {
-                        debug_assert!(start3 >= end3, "negative length range");
-                        debug_assert!(end3 < start2 - 1, "non-merged ranges");
-                        ensure!(end3 < start, "reliable message number received in duplicate");
-                        if end3 == start - 1 {
+                    // modifying the key is ok because its maintains its order relative to other
+                    // present keys.
+                    start2.set(start);
+
+                    if let Some((start3, end3)) = btree_range.next_back() {
+                        debug_assert!(start3.get() >= *end3, "negative length range");
+                        debug_assert!(*end3 < start2.get() - 1, "non-merged ranges");
+                        ensure!(*end3 < start, "reliable message number received in duplicate");
+                        if *end3 == start - 1 {
                             // new range also merges with existing range on its left
-                            *start2 = *start3;
-                            self.acked.remove(*start3).unwrap();
+                            *end3 = *end2;
+
+                            let start2 = start2.clone();
+                            self.acked.remove(&start2);
                         }
                     }
                 } else {
-                    ensure!(end2 < start, "reliable message number received in duplicate");
-                    if end2 == start - 1 {
+                    ensure!(*end2 < start, "reliable message number received in duplicate");
+                    if *end2 == start - 1 {
                         // new range merges with existing range on its left
                         *end2 = end;
                     }
                 }
             } else {
                 // new range does not merge with any existing range
-                self.acked.insert(start, end);
+                self.acked.insert(Cell::new(start), end);
             }
         }
 
@@ -167,7 +177,7 @@ impl ReceiverReliableAck {
     }
 
     pub(crate) fn on_message(&mut self, message_num: u64, timer: &mut Pin<&mut AckTimer<()>>) {
-        self.not_acked.push(message_num);
+        self.not_acked.add(message_num);
         timer.start(());
     }
 }
@@ -189,7 +199,7 @@ impl ReceiverUnreliableAck {
     pub(crate) async fn on_timer_zero(
         &mut self,
         timer_val: u64,
-        timer: &mut Pin<&mut AckTimer>,
+        timer: &mut Pin<&mut AckTimer<u64>>,
         chan_ctrl: &mut quinn::SendStream,
     ) -> Result<(), Error> {
         // the timer holds the value of declared_sent at the point when it was started, and
@@ -203,7 +213,7 @@ impl ReceiverUnreliableAck {
         // - ack_nacked only changes when the timer stops, and only to a value less than or equal
         //   to declared_sent
         debug_assert!(must_ack_nack > self.ack_nacked);
-        
+
         // sort the ranges. if there are overlaps, that will be detected as a protocol error later
         self.not_acked.0.sort_by_key(|&(start, _)| start);
 
@@ -213,14 +223,14 @@ impl ReceiverUnreliableAck {
         let mut prev_end = None;
         let mut num_ranges_fully_ack = 0;
 
-        for (i, &mut (ref mut start, end)) = self.not_acked.0.iter_mut().enumerate() {
+        for (i, &mut (ref mut start, end)) in self.not_acked.0.iter_mut().enumerate() {
             // assertion safety: this would've already been caught as a protocol error
-            debug_assert!(start >= self.ack_nacked);
-            debug_assert(end >= start); // sanity check
+            debug_assert!(*start >= self.ack_nacked);
+            debug_assert!(end >= *start); // sanity check
 
             // detect overlapping ranges
             ensure!(
-                prev_end.is_none_or(|prev_end| prev_end < start),
+                prev_end.is_none_or(|prev_end| prev_end < *start),
                 "unreliable message number received in duplicate"
             );
             prev_end = Some(end);
@@ -231,7 +241,7 @@ impl ReceiverUnreliableAck {
                 // ack entire range
                 num_ranges_fully_ack += 1;
                 end
-            } else if start < must_ack_nack {
+            } else if *start < must_ack_nack {
                 // ack part of range
                 *start = must_ack_nack;
                 must_ack_nack - 1
@@ -241,8 +251,8 @@ impl ReceiverUnreliableAck {
             };
 
             // nack gap (the writer handles filtering & merging automatically)
-            ack_nacks.neg_delta(start - self.ack_nacked);
-            self.ack_nacked = start;
+            ack_nacks.neg_delta(*start - self.ack_nacked);
+            self.ack_nacked = *start;
 
             // ack
             ack_nacks.pos_delta(ack_end + 1 - self.ack_nacked);
@@ -255,7 +265,7 @@ impl ReceiverUnreliableAck {
         }
 
         // garbage collect fully acked ranges
-        remove_first(&mut self.not_acked, num_ranges_fully_ack);
+        remove_first(&mut self.not_acked.0, num_ranges_fully_ack);
 
         // trailing nack
         ack_nacks.neg_delta(must_ack_nack - self.ack_nacked);
@@ -281,7 +291,7 @@ impl ReceiverUnreliableAck {
             return Err(AlreadyNacked);
         }
 
-        self.not_acked.push(message_num);
+        self.not_acked.add(message_num);
         Ok(())
     }
 
@@ -291,7 +301,7 @@ impl ReceiverUnreliableAck {
         delta: u64,
         timer: &mut Pin<&mut AckTimer<u64>>,
     ) -> Result<(), Error> {
-        self.declared_sent = declared_sent
+        self.declared_sent = self.declared_sent
             .checked_add(delta)
             .ok_or_else(|| anyhow!("SentUnreliable message num overflowed"))?;
         timer.start(self.declared_sent);

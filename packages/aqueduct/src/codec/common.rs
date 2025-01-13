@@ -143,7 +143,30 @@ impl ResetCode {
         Some(match n {
             1 => Cancelled,
             2 => Lost,
-            _ => None,
+            _ => return None,
+        })
+    }
+}
+
+// a QUIC connection close error code.
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+#[repr(u32)]
+pub(crate) enum CloseCode {
+    // the closing side detected a violation of the Aqueduct protocol
+    ProtoError = 1,
+    // the closing side's application explicitly asked the connection to close
+    Explicit = 2,
+    // the closing side's application-provided (de)serialization logic errored
+    SerdeError = 3,
+}
+
+impl CloseCode {
+    pub(crate) fn from_u64(n: u64) -> Option<Self> {
+        use ClsoeCode::*;
+        Some(match n {
+            1 => ProtoError,
+            2 => Explicit,
+            3 => SerdeError,
         })
     }
 }

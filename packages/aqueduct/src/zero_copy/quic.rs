@@ -3,12 +3,11 @@
 use crate::zero_copy::MultiBytes;
 use std::iter::once;
 use bytes::Bytes;
-use anyhow::*;
 
 
 const MAX_CHUNK_LENGTH: usize = 16384;
 
-pub(crate) type Result<T> = Result<T, QuicStreamReadError>;
+pub(crate) type Result<T> = std::result::Result<T, QuicStreamReadError>;
 
 // wrapper around a quinn `RecvStream` which provides a `MultiBytes` cursor-like API
 #[derive(Debug)]
@@ -27,7 +26,7 @@ impl QuicStreamReader {
             chunk_offset: 0,
         }
     }
-    
+
     // read the next buf.len() bytes from the stream and copy them to buf
     pub(crate) async fn read(&mut self, mut buf: &mut [u8]) -> Result<()> {
         while !buf.is_empty() {
@@ -53,7 +52,7 @@ impl QuicStreamReader {
         }
         Ok(())
     }
-    
+
     // read the next n bytes in a zero-copy fashion and return them as a MultiBytes
     pub(crate) async fn read_zc(&mut self, mut n: usize) -> Result<MultiBytes> {
         let mut out = MultiBytes::default();
@@ -80,12 +79,12 @@ impl QuicStreamReader {
         }
         Ok(out)
     }
-    
+
     // determine whether the stream finishes after the bytes that have been taken
     pub(crate) async fn is_done(&mut self) -> Result<bool> {
         while self.chunk_offset == self.chunk.len() {
             if let Some(chunk) = self.stream
-                .read_chunk(MAX_CHUNK_LENGTH, true).await?;
+                .read_chunk(MAX_CHUNK_LENGTH, true).await?
             {
                 self.chunk = chunk.bytes;
                 self.chunk_offset = 0;
