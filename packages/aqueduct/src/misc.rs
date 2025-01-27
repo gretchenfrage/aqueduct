@@ -51,14 +51,14 @@ impl<T> AtomicTake<T> {
 
     pub(crate) const fn none() -> Self {
         AtomicTake {
-            is_some: Atomicbool::new(false),
+            is_some: AtomicBool::new(false),
             val: MaybeUninit::uninit()
         }
     }
 
     pub(crate) fn take(&self) -> Option<T> {
         unsafe {
-            if self.is_some.store(false, Ordering::Relaxed) {
+            if self.is_some.swap(false, Ordering::Relaxed) {
                 Some(self.val.as_ptr().read())
             } else {
                 None

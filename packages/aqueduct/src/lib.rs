@@ -12,17 +12,17 @@ pub mod zero_copy;
 mod channel;
 mod codec;
 //mod ser;
-mod proto;
+//mod proto;
 mod misc;
 
 pub use crate::{
     channel::api::*,
-    proto::{
+    /*proto::{
         EncoderAttacher,
         DecoderDetacher,
         AttachTarget,
         DetachTarget,
-    },
+    },*/
     //ser::*,
 };
 

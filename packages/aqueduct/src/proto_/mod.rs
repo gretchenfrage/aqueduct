@@ -39,12 +39,12 @@ use anyhow::{Error, anyhow, ensure, bail};
 
 // shared state for side of an aqueduct connection
 struct Conn {
+    // what side of the connection are we
+    side: Side,
     // the underlying QUIC connection
     quic_conn: quinn::Connection,
     // whether we need to precede outgoing frames with a Version frame
     send_version: AtomicBool,
-    // what side of the connection are we
-    side: Side,
     // next locally minted chan ids
     next_chan_ids: [[AtomicU64; 2]; 2],
     // mpsc channels to receiver tasks

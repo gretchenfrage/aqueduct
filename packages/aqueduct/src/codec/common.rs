@@ -140,11 +140,7 @@ pub(crate) enum ResetCode {
 impl ResetCode {
     pub(crate) fn from_u64(n: u64) -> Option<Self> {
         use ResetCode::*;
-        Some(match n {
-            1 => Cancelled,
-            2 => Lost,
-            _ => return None,
-        })
+        [Cancelled, Lost].into_iter().find(|&code| code as u64 == n)
     }
 }
 
@@ -162,11 +158,7 @@ pub(crate) enum CloseCode {
 
 impl CloseCode {
     pub(crate) fn from_u64(n: u64) -> Option<Self> {
-        use ClsoeCode::*;
-        Some(match n {
-            1 => ProtoError,
-            2 => Explicit,
-            3 => SerdeError,
-        })
+        use CloseCode::*;
+        [ProtoError, Explicit, SerdeError].into_iter().find(|&code| code as u64 == n)
     }
 }
