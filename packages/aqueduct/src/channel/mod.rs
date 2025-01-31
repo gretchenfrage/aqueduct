@@ -44,8 +44,6 @@
 // there is also the error module, which contains the relevant error types, which is also
 // re-exported publically.
 
-
-
 pub(crate) mod error;
 pub(crate) mod api;
 

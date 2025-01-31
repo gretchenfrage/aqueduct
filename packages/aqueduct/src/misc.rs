@@ -3,7 +3,6 @@ use std::{
     mem::{MaybeUninit, needs_drop},
     sync::atomic::{AtomicBool, Ordering},
 };
-use smallvec::SmallVec;
 
 
 // remove the first n elements of vec

@@ -34,7 +34,6 @@ dependencies = [
  "rand",
  "rand_pcg",
  "rcgen",
- "smallvec",
  "thiserror 2.0.9",
  "tokio",
  "tracing",

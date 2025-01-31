@@ -130,8 +130,6 @@ impl DeliveryGuarantees {
 
 
 /// Create a channel
-///
-/// See [channels docs](crate::docs::ch_1_01_channels).
 pub fn channel<T>() -> (IntoSender<T>, IntoReceiver<T>) {
     let channel_1 = core::Channel::new();
     let channel_2 = channel_1.clone();
@@ -141,8 +139,6 @@ pub fn channel<T>() -> (IntoSender<T>, IntoReceiver<T>) {
 }
 
 /// Unconverted sender half of a channel
-///
-/// See [channels docs](crate::docs::ch_1_01_channels).
 // TODO: comment in the middle of IntoSender and IntoReceiver docs explaining it better
 pub struct IntoSender<T> {
     channel: core::Channel<T>,
@@ -239,8 +235,6 @@ impl<T> Drop for IntoSender<T> {
 
 
 /// Sender handle to a possibly networked channel, with backpressure
-///
-/// See [channels docs](crate::docs::ch_1_01_channels).
 pub struct Sender<T> {
     channel: core::Channel<T>,
     cancel_on_drop: bool,
@@ -358,9 +352,7 @@ impl<T> Drop for Sender<T> {
 }
 
 
-/// Sender handle to a possibly networked channel, with no backpresure
-///
-/// See [channels docs](crate::docs::ch_1_01_channels).
+/// Sender handle to a possibly networked channel, with no backpresure.
 pub struct NonBlockingSender<T> {
     channel: core::Channel<T>,
     cancel_on_drop: bool,
@@ -368,7 +360,7 @@ pub struct NonBlockingSender<T> {
 }
 
 impl<T> NonBlockingSender<T> {
-    /// Send a message on this channel
+    /// Send a message on this channel.
     ///
     /// Errors are "sticky": If this returns an error, that error has become the terminal state for
     /// all of this channel's senders, and any further send operation will return the same error.
@@ -459,8 +451,6 @@ impl<T> Drop for NonBlockingSender<T> {
 
 
 /// Unconverted receiver half of a channel
-///
-/// See [channels docs](crate::docs::ch_1_01_channels).
 pub struct IntoReceiver<T>(core::Channel<T>);
 
 impl<T> IntoReceiver<T> {
@@ -478,8 +468,6 @@ impl<T> Drop for IntoReceiver<T> {
 
 
 /// Receiver handle to a possibly networked channel
-///
-/// See [channels docs](crate::docs::ch_1_01_channels).
 pub struct Receiver<T>(core::Channel<T>);
 
 impl<T> Receiver<T> {
