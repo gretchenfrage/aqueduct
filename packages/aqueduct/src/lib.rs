@@ -22,36 +22,3 @@ pub mod error {
 pub mod future {
     pub use crate::channel::api::future::*;
 }
-
-/*
-pub mod docs;
-pub mod zero_copy;
-
-mod codec;
-//mod ser;
-//mod proto;
-
-mod misc;
-mod util_small_queue;
-
-pub use crate::{
-    channel::api::*,
-    /*proto::{
-        EncoderAttacher,
-        DecoderDetacher,
-        AttachTarget,
-        DetachTarget,
-    },*/
-    //ser::*,
-};
-
-/// Error types
-pub mod error {
-    pub use crate::channel::error::*;
-}
-
-/// Future types
-pub mod future {
-    pub use crate::channel::api::future::*;
-}
-*/
