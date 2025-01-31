@@ -13,7 +13,9 @@ mod channel;
 mod codec;
 //mod ser;
 //mod proto;
+
 mod misc;
+mod util_small_queue;
 
 pub use crate::{
     channel::api::*,

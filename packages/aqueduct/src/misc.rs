@@ -3,7 +3,7 @@ use std::{
     mem::{MaybeUninit, needs_drop},
     sync::atomic::{AtomicBool, Ordering},
 };
-
+use smallvec::SmallVec;
 
 
 // remove the first n elements of vec
@@ -34,6 +34,7 @@ pub(crate) fn remove_first<T>(vec: &mut Vec<T>, n: usize) {
         vec.set_len(old_len - n);
     }
 }
+
 
 // like an atomic Option<T> that can be `take`n once.
 pub(crate) struct AtomicTake<T> {
