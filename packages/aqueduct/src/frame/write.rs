@@ -1,23 +1,19 @@
-// frame encoding
+//! Typed API for writing frames to quic streams and datagrams.
 
 use crate::{
-    zero_copy::{
-        MultiBytes,
-        MultiBytesWriter,
-    },
-    codec::common::*,
+    zero_copy::MultiBytes,
+    frame::common::*,
 };
 use quinn::{SendStream, Connection, SendDatagramError};
 use anyhow::*;
 
 
-// utility internal to frame writing module:
-//
-// - wraps around MultiBytes
-// - adds helper methods for writing common primitives
-// - adds helper methods for zero-copy writing to QUIC
+// ==== internal Writer utility ====
+
+
+// utility internal to this module that wraps around MultiBytes and adds some helper functions.
 #[derive(Default, Clone)]
-struct Writer(MultiBytesWriter);
+struct Writer(MultiBytes);
 
 impl Writer {
     // write bytes.
@@ -67,13 +63,10 @@ impl Writer {
         self.write_zc(bytes);
     }
 
-    // send written data on the provided QUIC stream (zero-copy-ly).
+    // send data written to `self` on the provided QUIC stream (zero-copy-ly).
     async fn send_stream(self, stream: &mut SendStream) -> Result<()> {
-        let mut bytes = self.0.build();
-        let mut pages = bytes.pages_mut();
-        while !pages.is_empty() {
-            let written = stream.write_chunks(pages).await?;
-            pages = &mut pages[written.chunks..];
+        for fragment in self.0.fragments() {
+            stream.write_chunk(fragment).await?;
         }
         Ok(())
     }
@@ -93,7 +86,7 @@ impl Writer {
         if self.0.len() > max_datagram_size {
             self.send_new_stream(conn).await
         } else {
-            let bytes = self.0.build().defragment();
+            let bytes = self.0.defragment();
             if let Err(e) = conn.send_datagram(bytes.clone()) {
                 if e == SendDatagramError::TooLarge {
                     let mut stream = conn.open_uni().await?;
@@ -112,54 +105,59 @@ impl Writer {
 
 impl Into<MultiBytes> for Writer {
     fn into(self) -> MultiBytes {
-        self.0.build()
+        self.0.into()
     }
 }
 
 
-// typed API for writing a sequence of frames.
+// ==== API for writing frames ====
+
+
+/// Typed API for writing a sequence of Aqueduct frames to a QUIC stream or datagram.
 #[derive(Default)]
-pub(crate) struct Frames(Writer);
+pub struct Frames(Writer);
 
 impl Frames {
-    // send written data on QUIC stream.
-    pub(crate) async fn send_stream(self, stream: &mut SendStream) -> Result<()> {
+    /// Send bytes written to `self` on an existing QUIC stream.
+    pub async fn send_stream(self, stream: &mut SendStream) -> Result<()> {
         self.0.send_stream(stream).await
     }
 
-    // open new unidirectional QUIC stream, send written data on it, finish stream.
-    pub(crate) async fn send_new_stream(self, conn: &Connection) -> Result<()> {
+    /// Open a new unidirectional QUIC stream, send bytes written to `self` on it, then finish the
+    /// stream.
+    pub async fn send_new_stream(self, conn: &Connection) -> Result<()> {
         self.0.send_new_stream(conn).await
     }
 
-    // send written data in a QUIC datagram, or fall back to send_new_stream if too large.
-    pub(crate) async fn send_datagram(self, conn: &Connection) -> Result<()> {
+    /// Send bytes written to `self` in a QUIC datagram, or fall back to `send_new_stream` if too
+    /// large.
+    pub async fn send_datagram(self, conn: &Connection) -> Result<()> {
         self.0.send_datagram(conn).await
     }
 
-    // write a Version frame.
-    pub(crate) fn version(&mut self) {
+    /// Write this frame type to `self`.
+    pub fn version(&mut self) {
         self.0.write(&[FrameType::Version as u8]);
         self.0.write(&VERSION_FRAME_MAGIC_BYTES);
         self.0.write(&VERSION_FRAME_HUMAN_TEXT);
         self.0.write_vlba(VERSION);
     }
 
-    // write a ConnectionControl frame.
-    pub(crate) fn connection_control(&mut self) {
+    /// Write this frame type to `self`.
+    pub fn connection_control(&mut self) {
         // TODO
         self.0.write(&[FrameType::ConnectionControl as u8]);
         self.0.write(&[0]);
     }
 
-    // write a ChannelControl frame.
-    pub(crate) fn channel_control(&mut self, chan_id: ChanId) {
+    /// Write this frame type to `self`.
+    pub fn channel_control(&mut self, chan_id: ChanId) {
         self.0.write(&[FrameType::ChannelControl as u8]);
         self.0.write_chan_id(chan_id);
     }
 
-    // write a Message frame.
-    pub(crate) fn message(
+    /// Write this frame type to `self`.
+    pub fn message(
         &mut self,
         sent_on: ChanId,
         message_num: u64,
@@ -173,67 +171,75 @@ impl Frames {
         self.0.write_vlba(payload);
     }
 
-    // write a SentUnreliable frame.
-    pub(crate) fn sent_unreliable(&mut self, delta: u64) {
+    /// Write this frame type to `self`.
+    pub fn sent_unreliable(&mut self, delta: u64) {
         self.0.write(&[FrameType::SentUnreliable as u8]);
         self.0.write_vli(delta);
     }
 
-    // write an AckReliable frame.
-    pub(crate) fn ack_reliable(&mut self, acks: PosNegRanges) {
+    /// Write this frame type to `self`.
+    pub fn ack_reliable(&mut self, acks: PosNegRanges) {
         self.0.write(&[FrameType::AckReliable as u8]);
         self.0.write_vlba(acks.finalize());
     }
 
-    // write an AckNackUnreliable frame.
-    pub(crate) fn ack_nack_unreliable(&mut self, ack_nacks: PosNegRanges) {
+    /// Write this frame type to `self`.
+    pub fn ack_nack_unreliable(&mut self, ack_nacks: PosNegRanges) {
         self.0.write(&[FrameType::AckNackUnreliable as u8]);
         self.0.write_vlba(ack_nacks.finalize());
     }
 
-    // write a FinishSender frame.
-    pub(crate) fn finish_sender(&mut self, reliable_count: u64) {
+    /// Write this frame type to `self`.
+    pub fn finish_sender(&mut self, reliable_count: u64) {
         self.0.write(&[FrameType::FinishSender as u8]);
         self.0.write_vli(reliable_count);
     }
 
-    // write a CloseReceiver frame.
-    pub(crate) fn close_receiver(&mut self, reliable_ack_nacks: PosNegRanges) {
+    /// Write this frame type to `self`.
+    pub fn close_receiver(&mut self, reliable_ack_nacks: PosNegRanges) {
         self.0.write(&[FrameType::CloseReceiver as u8]);
         self.0.write_vlba(reliable_ack_nacks.written.0);
     }
 
-    // write a ClosedChannelLost frame.
-    pub(crate) fn closed_channel_lost(&mut self, chan_id: ChanId) {
+    /// Write this frame type to `self`.
+    pub fn closed_channel_lost(&mut self, chan_id: ChanId) {
         self.0.write(&[FrameType::ClosedChannelLost as u8]);
         self.0.write_chan_id(chan_id);
     }
 }
 
-// typed API for writing a sequence of message attachments.
+/// Typed API for encoding a sequence of Aqueduct message attachments to be included within an
+/// Aqueduct frame.
 #[derive(Default)]
-pub(crate) struct Attachments(Writer);
+pub struct Attachments(Writer);
 
 impl Attachments {
-    // write an attachment
-    pub(crate) fn attachment(&mut self, chan_id: ChanId) {
+    /// Encode an attachment.
+    pub fn attachment(&mut self, chan_id: ChanId) {
         self.0.write_chan_id(chan_id);
     }
 }
 
-// typed API for writing pos-neg ranges.
-//
-// automatically filters out empty ranges, merges ranges, and inserts an initial empty ack if
-// necessary.
+/// Typed API for encoding an Aqueduct pos-neg range sequence be included within an Aqueduct frame.
+///
+/// Automatically:
+///
+/// - Filters filters out empty ranges.
+/// - Merges adjacent pos/neg ranges.
+/// - Inserts an initial empty ack range if necessary.
+///
+/// As such, this can _mostly_ be used in arbitrary ways without panicking. However, if the user
+/// attempts to pass `self` to a function to encode a frame, and `self` does not include _any_
+/// non-empty ranges, that will panic.
 #[derive(Default)]
-pub(crate) struct PosNegRanges {
+pub struct PosNegRanges {
     written: Writer,
     pending: Option<(bool, u64)>,
 }
 
 impl PosNegRanges {
-    // write a positive delta.
-    pub(crate) fn pos_delta(&mut self, delta: u64) {
+    /// Write a positive delta.
+    pub fn pos_delta(&mut self, delta: u64) {
         if delta == 0 { return; }
         match &mut self.pending {
             &mut None => {
@@ -250,8 +256,8 @@ impl PosNegRanges {
         }
     }
 
-    // write a negative delta.
-    pub(crate) fn neg_delta(&mut self, delta: u64) {
+    /// Write a negative delta.
+    pub fn neg_delta(&mut self, delta: u64) {
         if delta == 0 { return; }
         match &mut self.pending {
             &mut None => {

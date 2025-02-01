@@ -1,4 +1,4 @@
-// typed API for reading frames from quic streams and datagrams
+//! Typed API for reading frames from quic streams and datagrams.
 
 use crate::{
     zero_copy::{
@@ -6,26 +6,31 @@ use crate::{
         MultiBytes,
         TooFewBytesError,
     },
-    codec::common::*,
+    frame::common::*,
 };
 use bytes::Bytes;
 use anyhow::{anyhow, Error};
 
 
-// ==== read module error handling ====
+// ==== error handling ====
 
-// error for reading aqueduct frames.
+
+/// Aqueduct frame reading result type.
+pub type Result<T> = std::result::Result<T, ReadError>;
+
+
+/// Aqueduct frame reading error type.
 #[derive(Debug)]
-pub(crate) enum ReadError {
+pub enum ReadError {
     // QUIC stream was reset before finishing.
     Reset(ResetCode),
-    // any other error (unrecoverable).
+    // Any other error (unrecoverable).
     Other(Error),
 }
 
 impl ReadError {
-    // treat QUIC stream reset as an unrecoverable error.
-    pub(crate) fn cannot_reset(self) -> Error {
+    // Convert to `Error` by treating QUIC stream reset in the current scenario as unrecoverable.
+    pub fn cannot_reset(self) -> Error {
         match self {
             ReadError::Reset(code) => anyhow!("unexpected stream reset: {:?}", code),
             ReadError::Other(e) => e,
@@ -60,8 +65,8 @@ impl From<QuicStreamReadError> for ReadError {
     }
 }
 
-pub(crate) type Result<T> = std::result::Result<T, ReadError>;
 
+#[macro_export]
 macro_rules! ensure {
     ($cond:expr, $($t:tt)*)=>{
         if !$cond {
@@ -70,17 +75,21 @@ macro_rules! ensure {
     };
 }
 
-pub(crate) use ensure;
+/// Aqueduct frame reading anyhow-like ensure macro.
+pub use ensure;
 
+#[macro_export]
 macro_rules! bail {
     ($($t:tt)*)=>{
         return Err(anyhow::anyhow!($($t)*).into())
     };
 }
 
-pub(crate) use bail;
+/// Aqueduct frame reading anyhow-like bail macro.
+pub use bail;
 
-// ==== rest of read module ====
+
+// ==== the QuicReader internal utility ====
 
 
 // utility internal to frame reading module:
@@ -195,11 +204,22 @@ impl QuicReader {
     }
 }
 
-// typed API for reading a sequence of frames, with some validation done automatically.
-pub(crate) struct Frames(QuicReader);
+
+// ==== the actual API for reading frames ====
+
+
+/// Typed API for reading a sequence of frames from a QUIC stream or datagram.
+///
+/// - Async.
+/// - Zero-copy facilitating.
+/// - Facilitates defensiveness against DOS attacks by avoiding unbounded reads until the last
+///   point possible, so that validation can be performed as eagerly as possible.
+/// - Does some validation on its own.
+pub struct Frames(QuicReader);
 
 impl Frames {
-    pub(crate) fn from_uni_stream(stream: quinn::RecvStream) -> Self {
+    /// Wrap around a QUIC unidirectional stream.
+    pub fn from_uni_stream(stream: quinn::RecvStream) -> Self {
         Frames(QuicReader {
             source_type: SourceType::UniStream,
             source: QuicReaderSource::Stream(QuicStreamReader::new(stream)),
@@ -207,7 +227,8 @@ impl Frames {
         })
     }
 
-    pub(crate) fn from_bidi_stream(stream: quinn::RecvStream) -> Self {
+    /// Wrap around a QUIC bidirectional stream.
+    pub fn from_bidi_stream(stream: quinn::RecvStream) -> Self {
         Frames(QuicReader {
             source_type: SourceType::BidiStream,
             source: QuicReaderSource::Stream(QuicStreamReader::new(stream)),
@@ -215,7 +236,8 @@ impl Frames {
         })
     }
 
-    pub(crate) fn from_datagram(datagram: Bytes) -> Self {
+    /// Wrap around a QUIC datagram.
+    pub fn from_datagram(datagram: Bytes) -> Self {
         Frames(QuicReader {
             source_type: SourceType::Datagram,
             source: QuicReaderSource::Datagram(MultiBytes::from(datagram)),
@@ -223,8 +245,9 @@ impl Frames {
         })
     }
 
-    // begin reading the next frame
-    pub(crate) async fn frame(mut self) -> Result<Option<Frame>> {
+    /// Begin reading the next frame, or return `None` if this stream/datagram contains no more
+    /// frames.
+    pub async fn frame(mut self) -> Result<Option<Frame>> {
         if self.0.is_done().await? {
             ensure!(
                 self.0.stats.non_version_frame,
@@ -259,17 +282,17 @@ impl Frames {
         }))
     }
 
-    // since it is a protocol error for a frame sequence to finish without a non-Version frame,
-    // this can be used to read a frame without an `Option`. panics if a non-Version frame has
-    // already been read.
-    pub(crate) async fn first_frame(self) -> Result<Frame> {
+    /// Since it is a protocol error for a frame sequence to finish without a non-Version frame,
+    /// this can be used to read a frame without an `Option`. panics if a non-Version frame has
+    /// already been read.
+    pub async fn first_frame(self) -> Result<Frame> {
         assert!(!self.0.stats.non_version_frame, "invalid usage of first frame");
         Ok(self.frame().await?.unwrap())
     }
 }
 
-// typed API for reading one frame in a sequence.
-pub(crate) enum Frame {
+/// Typed API for reading a single Aqueduct frame.
+pub enum Frame {
     Version(Version),
     ConnectionControl(ConnectionControl),
     ChannelControl(ChannelControl),
@@ -283,7 +306,8 @@ pub(crate) enum Frame {
 }
 
 impl Frame {
-    pub(crate) fn frame_type(&self) -> FrameType {
+    /// Get the Aqueduct frame type.
+    pub fn frame_type(&self) -> FrameType {
         match self {
             &Frame::Version(_) => FrameType::Version,
             &Frame::ConnectionControl(_) => FrameType::ConnectionControl,
@@ -299,11 +323,11 @@ impl Frame {
     }
 }
 
-// typed API for reading this frame type.
-pub(crate) struct Version(QuicReader);
+/// Typed API for reading this frame type.
+pub struct Version(QuicReader);
 
 impl Version {
-    pub(crate) async fn validate(mut self) -> Result<Frames> {
+    pub async fn validate(mut self) -> Result<Frames> {
         ensure!(self.0.read_arr::<7>().await? == VERSION_FRAME_MAGIC_BYTES, "wrong magic bytes");
         ensure!(self.0.read_arr::<8>().await? == VERSION_FRAME_HUMAN_TEXT, "wrong human text");
         let mut version_buf = [0; 64];
@@ -316,34 +340,34 @@ impl Version {
     }
 }
 
-// typed API for reading this frame type.
-pub(crate) struct ConnectionControl(QuicReader);
+/// Typed API for reading this frame type.
+pub struct ConnectionControl(QuicReader);
 
 impl ConnectionControl {
     // TODO
-    pub(crate) async fn skip_headers(mut self) -> Result<Frames> {
+    pub async fn skip_headers(mut self) -> Result<Frames> {
         let len = self.0.read_vli_usize().await?;
         self.0.read_zc(len).await?;
         Ok(Frames(self.0))
     }
 }
 
-// typed API for reading this frame type.
-pub(crate) struct ChannelControl(QuicReader);
+/// Typed API for reading this frame type.
+pub struct ChannelControl(QuicReader);
 
 impl ChannelControl {
-    pub(crate) async fn chan_id(mut self) -> Result<(Frames, ChanId)> {
+    pub async fn chan_id(mut self) -> Result<(Frames, ChanId)> {
         let o = self.0.read_chan_id().await?;
         Ok((Frames(self.0), o))
     }
 }
 
-// typed API for reading this frame type.
-pub(crate) struct Message(QuicReader);
+/// Typed API for reading this frame type.
+pub struct Message(QuicReader);
 
 impl Message {
     // whether this message frame was sent reliably.
-    pub(crate) fn reliable(&self) -> bool {
+    pub fn reliable(&self) -> bool {
         match self.0.source_type {
             SourceType::UniStream => true,
             SourceType::BidiStream => panic!("Message frame sent on bidi stream"),
@@ -351,37 +375,37 @@ impl Message {
         }
     }
 
-    pub(crate) async fn sent_on(mut self) -> Result<(Message2, ChanId)> {
+    pub async fn sent_on(mut self) -> Result<(Message2, ChanId)> {
         let o = self.0.read_chan_id().await?;
         Ok((Message2(self.0), o))
     }
 }
 
-// typed API for reading this frame type.
-pub(crate) struct Message2(QuicReader);
+/// Typed API for reading this frame type.
+pub struct Message2(QuicReader);
 
 impl Message2 {
-    pub(crate) async fn message_num(mut self) -> Result<(Message3, u64)> {
+    pub async fn message_num(mut self) -> Result<(Message3, u64)> {
         let o = self.0.read_vli().await?;
         Ok((Message3(self.0), o))
     }
 }
 
-// typed API for reading this frame type.
-pub(crate) struct Message3(QuicReader);
+/// Typed API for reading this frame type.
+pub struct Message3(QuicReader);
 
 impl Message3 {
-    pub(crate) async fn attachments_len(mut self) -> Result<(Message4, usize)> {
+    pub async fn attachments_len(mut self) -> Result<(Message4, usize)> {
         let len = self.0.read_vli_usize().await?;
         Ok((Message4(self.0, len), len))
     }
 }
 
-// typed API for reading this frame type.
-pub(crate) struct Message4(QuicReader, usize);
+/// Typed API for reading this frame type.
+pub struct Message4(QuicReader, usize);
 
 impl Message4 {
-    pub(crate) async fn next_attachment(&mut self) -> Result<Option<ChanId>> {
+    pub async fn next_attachment(&mut self) -> Result<Option<ChanId>> {
         if self.1 == 0 {
             return Ok(None);
         }
@@ -389,78 +413,77 @@ impl Message4 {
         Ok(Some(ChanId(o)))
     }
 
-    pub(crate) fn done(self) -> Message5 {
+    pub fn done(self) -> Message5 {
         assert!(self.1 == 0, "Message4.done without reading all attachments");
         Message5(self.0)
     }
 }
 
-// typed API for reading this frame type.
-pub(crate) struct Message5(QuicReader);
+/// Typed API for reading this frame type.
+pub struct Message5(QuicReader);
 
 impl Message5 {
-    pub(crate) async fn payload_len(mut self) -> Result<(Message6, usize)> {
+    pub async fn payload_len(mut self) -> Result<(Message6, usize)> {
         let len = self.0.read_vli_usize().await?;
         Ok((Message6(self.0, len), len))
     }
 }
 
-// typed API for reading this frame type.
-pub(crate) struct Message6(QuicReader, usize);
+/// Typed API for reading this frame type.
+pub struct Message6(QuicReader, usize);
 
 impl Message6 {
-    pub(crate) async fn payload(mut self) -> Result<(Frames, MultiBytes)> {
+    pub async fn payload(mut self) -> Result<(Frames, MultiBytes)> {
         let o = self.0.read_zc(self.1).await?;
         Ok((Frames(self.0), o))
     }
 }
 
-// typed API for reading this frame type.
-pub(crate) struct SentUnreliable(QuicReader);
+/// Typed API for reading this frame type.
+pub struct SentUnreliable(QuicReader);
 
 impl SentUnreliable {
-    pub(crate) async fn delta(mut self) -> Result<(Frames, u64)> {
+    pub async fn delta(mut self) -> Result<(Frames, u64)> {
         let o = self.0.read_vli().await?;
         ensure!(o > 0, "SentUnreliable with delta of 0");
         Ok((Frames(self.0), o))
     }
 }
 
-// typed API for reading this frame type.
-pub(crate) struct AckReliable(QuicReader);
+/// Typed API for reading this frame type.
+pub struct AckReliable(QuicReader);
 
 impl AckReliable {
 }
 
-// typed API for reading this frame type.
-pub(crate) struct AckNackUnreliable(QuicReader);
+/// Typed API for reading this frame type.
+pub struct AckNackUnreliable(QuicReader);
 
 impl AckNackUnreliable {
 
 }
 
-// typed API for reading this frame type.
-pub(crate) struct FinishSender(QuicReader);
+/// Typed API for reading this frame type.
+pub struct FinishSender(QuicReader);
 
 impl FinishSender {
-    pub(crate) async fn reliable_count(mut self) -> Result<(Frames, u64)> {
+    pub async fn reliable_count(mut self) -> Result<(Frames, u64)> {
         let o = self.0.read_vli().await?;
         Ok((Frames(self.0), o))
     }
 }
-
-// typed API for reading this frame type.
-pub(crate) struct CloseReceiver(QuicReader);
+/// Typed API for reading this frame type.
+pub struct CloseReceiver(QuicReader);
 
 impl CloseReceiver {
 
 }
 
-// typed API for reading this frame type.
-pub(crate) struct ClosedChannelLost(QuicReader);
+/// Typed API for reading this frame type.
+pub struct ClosedChannelLost(QuicReader);
 
 impl ClosedChannelLost {
-    pub(crate) async fn chan_id(mut self) -> Result<(Frames, ChanId)> {
+    pub async fn chan_id(mut self) -> Result<(Frames, ChanId)> {
         let o = self.0.read_chan_id().await?;
         Ok((Frames(self.0), o))
     }

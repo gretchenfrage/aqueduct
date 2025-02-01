@@ -1,7 +1,7 @@
 #![allow(dead_code)] // TODO
 //#![doc = include_str!("../../../README.md")] // TODO: fix links
 
-#[macro_use]
+//#[macro_use]
 extern crate tracing;
 
 pub extern crate bytes;
@@ -10,6 +10,7 @@ pub mod zero_copy;
 
 mod channel;
 mod util;
+pub mod frame;
 
 pub use crate::channel::api::*;
 
