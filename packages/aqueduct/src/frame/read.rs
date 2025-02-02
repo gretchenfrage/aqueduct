@@ -361,14 +361,14 @@ impl Message {
     }
 
     /// Read the `sent_on` field.
-    pub async fn sent_on(mut self) -> ResetResult<(Message2, ReceiverChanId)> {
+    pub async fn sent_on(mut self) -> ResetResult<(Message2, ChanIdRee)> {
         let o = self.0.read_chan_id().await?;
         if o.dir().side_to() != self.0.side {
             return Err(anyhow!(
                 "received Message frame with sent_on field in wrong direction"
             ).into());
         }
-        Ok((Message2(self.0), ReceiverChanId(o)))
+        Ok((Message2(self.0), ChanIdRee::new_unchecked(o)))
     }
 }
 
@@ -402,11 +402,16 @@ pub struct Message4(QuicReader, usize);
 
 impl Message4 {
     /// Read the next element of the `attachments` field, or return `None` if there are no more.
-    pub async fn next_attachment(&mut self) -> ResetResult<Option<ChanId>> {
+    pub async fn next_attachment(&mut self) -> ResetResult<Option<ChanIdEre>> {
         if self.1 == 0 {
             return Ok(None);
         }
-        let o = self.0.read_vli_with_limit(Some(&mut self.1)).await?;
+        let o = ChanId(self.0.read_vli_with_limit(Some(&mut self.1)).await?);
+        if o.minted_by() == self.0.side {
+            return Err(anyhow!(
+                "received Message frame with attached channel minted by wrong side"
+            ).into());
+        }
         Ok(Some(ChanId(o)))
     }
 
