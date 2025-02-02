@@ -64,7 +64,7 @@ impl Writer {
     }
 
     // send data written to `self` on the provided QUIC stream (zero-copy-ly).
-    async fn send_stream(self, stream: &mut SendStream) -> Result<()> {
+    async fn send_on_stream(self, stream: &mut SendStream) -> Result<()> {
         for fragment in self.0.fragments() {
             stream.write_chunk(fragment).await?;
         }
@@ -72,19 +72,19 @@ impl Writer {
     }
 
     // open new unidirectional QUIC stream, send written data on it, finish stream.
-    async fn send_new_stream(self, conn: &Connection) -> Result<()> {
+    async fn send_on_new_stream(self, conn: &Connection) -> Result<()> {
         let mut stream = conn.open_uni().await?;
-        self.send_stream(&mut stream).await?;
+        self.send_on_stream(&mut stream).await?;
         stream.finish().unwrap();
         Ok(())
     }
 
     // send written data in a QUIC datagram, or fall back to send_new_stream if too large.
-    async fn send_datagram(self, conn: &Connection) -> Result<()> {
+    async fn send_on_datagram(self, conn: &Connection) -> Result<()> {
         let max_datagram_size = conn.max_datagram_size()
             .ok_or_else(|| anyhow!("datagrams disabled"))?;
         if self.0.len() > max_datagram_size {
-            self.send_new_stream(conn).await
+            self.send_on_new_stream(conn).await
         } else {
             let bytes = self.0.defragment();
             if let Err(e) = conn.send_datagram(bytes.clone()) {
@@ -119,20 +119,20 @@ pub struct Frames(Writer);
 
 impl Frames {
     /// Send bytes written to `self` on an existing QUIC stream.
-    pub async fn send_stream(self, stream: &mut SendStream) -> Result<()> {
-        self.0.send_stream(stream).await
+    pub async fn send_on_stream(self, stream: &mut SendStream) -> Result<()> {
+        self.0.send_on_stream(stream).await
     }
 
     /// Open a new unidirectional QUIC stream, send bytes written to `self` on it, then finish the
     /// stream.
-    pub async fn send_new_stream(self, conn: &Connection) -> Result<()> {
-        self.0.send_new_stream(conn).await
+    pub async fn send_on_new_stream(self, conn: &Connection) -> Result<()> {
+        self.0.send_on_new_stream(conn).await
     }
 
-    /// Send bytes written to `self` in a QUIC datagram, or fall back to `send_new_stream` if too
-    /// large.
-    pub async fn send_datagram(self, conn: &Connection) -> Result<()> {
-        self.0.send_datagram(conn).await
+    /// Send bytes written to `self` in a QUIC datagram, or fall back to `send_on_new_stream` if
+    /// too large.
+    pub async fn send_on_datagram(self, conn: &Connection) -> Result<()> {
+        self.0.send_on_datagram(conn).await
     }
 
     /// Write this frame type to `self`.
@@ -145,7 +145,7 @@ impl Frames {
 
     /// Write this frame type to `self`.
     pub fn connection_control(&mut self) {
-        // TODO
+        // TODO headers
         self.0.write(&[FrameType::ConnectionControl as u8]);
         self.0.write(&[0]);
     }
@@ -226,7 +226,7 @@ impl Attachments {
 ///
 /// - Filters filters out empty ranges.
 /// - Merges adjacent pos/neg ranges.
-/// - Inserts an initial empty ack range if necessary.
+/// - Inserts an initial empty positive range if necessary.
 ///
 /// As such, this can _mostly_ be used in arbitrary ways without panicking. However, if the user
 /// attempts to pass `self` to a function to encode a frame, and `self` does not include _any_
@@ -262,7 +262,7 @@ impl PosNegRanges {
         match &mut self.pending {
             &mut None => {
                 if self.written.is_empty() {
-                    // initial empty ack
+                    // initial neg delta
                     self.written.write_vli(0);
                 }
                 self.pending = Some((false, delta));

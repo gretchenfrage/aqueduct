@@ -1,7 +1,5 @@
 //! Aqueduct encoding/decoding shared types and functions. 
 
-use anyhow::*;
-
 
 /// Side of a connection.
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
@@ -106,7 +104,7 @@ pub enum FrameType {
 
 impl FrameType {
     /// Convert from frame type byte.
-    pub fn from_byte(b: u8) -> Result<Self> {
+    pub fn from_byte(b: u8) -> Option<Self> {
         use FrameType::*;
         [
             Version,
@@ -119,9 +117,7 @@ impl FrameType {
             FinishSender,
             CloseReceiver,
             ClosedChannelLost,
-        ].into_iter()
-            .find(|&frame_type| frame_type as u8 == b)
-            .ok_or_else(|| anyhow!("invalid frame type byte: {}", b))
+        ].into_iter().find(|&frame_type| frame_type as u8 == b)
     }
 }
 
@@ -177,8 +173,11 @@ impl CloseCode {
 
 
 /// Validate that a byte string is ASCII and cast to a str.
-pub fn ascii_to_str(b: &[u8]) -> Result<&str> {
-    ensure!(b.is_ascii(), "expected ASCII string");
-    // safety: all valid ASCII strings are valid UTF-8 strings
-    Ok(std::str::from_utf8(b).unwrap())
+pub fn ascii_to_str(b: &[u8]) -> Option<&str> {
+    if b.is_ascii() {
+        // unwrap safety: all valid ASCII strings are valid UTF-8 strings
+        Some(std::str::from_utf8(b).unwrap())
+    } else {
+        None
+    }
 }
