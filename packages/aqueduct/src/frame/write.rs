@@ -4,6 +4,16 @@ use crate::{
     zero_copy::MultiBytes,
     frame::common::*,
 };
+use std::{
+    sync::{
+        Arc,
+        atomic::{
+            Ordering::Relaxed,
+            AtomicBool,
+        },
+    },
+    mem::take,
+};
 use quinn::{SendStream, Connection, SendDatagramError};
 use anyhow::*;
 
@@ -135,7 +145,7 @@ impl Frames {
         self.0.send_on_datagram(conn).await
     }
 
-    /// Write this frame type to `self`.
+    /// Encode a Version frame to `self`.
     pub fn version(&mut self) {
         self.0.write(&[FrameType::Version as u8]);
         self.0.write(&VERSION_FRAME_MAGIC_BYTES);
@@ -143,20 +153,28 @@ impl Frames {
         self.0.write_vlba(VERSION);
     }
 
-    /// Write this frame type to `self`.
+    /// Encode a Version frame to `self` if `must_send_version` is true.
+    pub fn version_if(&mut self, must_send_version: &Arc<AtomicBool>) {
+        if must_send_version.load(Relaxed) {
+            self.version();
+        }
+    }
+
+    /// Encode a ConnectionControl frame to `self`.
+    ///
+    /// TODO: headers
     pub fn connection_control(&mut self) {
-        // TODO headers
         self.0.write(&[FrameType::ConnectionControl as u8]);
         self.0.write(&[0]);
     }
 
-    /// Write this frame type to `self`.
+    /// Encode a ChannelControl frame to `self`.
     pub fn channel_control(&mut self, chan_id: ChanId) {
         self.0.write(&[FrameType::ChannelControl as u8]);
         self.0.write_chan_id(chan_id);
     }
 
-    /// Write this frame type to `self`.
+    /// Encode a Message frame to `self`.
     pub fn message(
         &mut self,
         sent_on: ChanId,
@@ -171,37 +189,37 @@ impl Frames {
         self.0.write_vlba(payload);
     }
 
-    /// Write this frame type to `self`.
+    /// Encode a SentUnreliable frame to `self`.
     pub fn sent_unreliable(&mut self, delta: u64) {
         self.0.write(&[FrameType::SentUnreliable as u8]);
         self.0.write_vli(delta);
     }
 
-    /// Write this frame type to `self`.
+    /// Encode an AckReliable frame to `self`.
     pub fn ack_reliable(&mut self, acks: PosNegRanges) {
         self.0.write(&[FrameType::AckReliable as u8]);
         self.0.write_vlba(acks.finalize());
     }
 
-    /// Write this frame type to `self`.
+    /// Encode an AckNackUnreliable frame to `self`.
     pub fn ack_nack_unreliable(&mut self, ack_nacks: PosNegRanges) {
         self.0.write(&[FrameType::AckNackUnreliable as u8]);
         self.0.write_vlba(ack_nacks.finalize());
     }
 
-    /// Write this frame type to `self`.
+    /// Encode a FinishSender frame to `self`.
     pub fn finish_sender(&mut self, reliable_count: u64) {
         self.0.write(&[FrameType::FinishSender as u8]);
         self.0.write_vli(reliable_count);
     }
 
-    /// Write this frame type to `self`.
+    /// Encode a CloseReceiver frame to `self`.
     pub fn close_receiver(&mut self, reliable_ack_nacks: PosNegRanges) {
         self.0.write(&[FrameType::CloseReceiver as u8]);
         self.0.write_vlba(reliable_ack_nacks.written.0);
     }
 
-    /// Write this frame type to `self`.
+    /// Encode a ClosedChannelLost frame to `self`.
     pub fn closed_channel_lost(&mut self, chan_id: ChanId) {
         self.0.write(&[FrameType::ClosedChannelLost as u8]);
         self.0.write_chan_id(chan_id);
