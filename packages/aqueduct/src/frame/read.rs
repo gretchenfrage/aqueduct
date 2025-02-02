@@ -361,9 +361,14 @@ impl Message {
     }
 
     /// Read the `sent_on` field.
-    pub async fn sent_on(mut self) -> ResetResult<(Message2, ChanId)> {
+    pub async fn sent_on(mut self) -> ResetResult<(Message2, ReceiverChanId)> {
         let o = self.0.read_chan_id().await?;
-        Ok((Message2(self.0), o))
+        if o.dir().side_to() != self.0.side {
+            return Err(anyhow!(
+                "received Message frame with sent_on field in wrong direction"
+            ).into());
+        }
+        Ok((Message2(self.0), ReceiverChanId(o)))
     }
 }
 
@@ -532,13 +537,13 @@ pub struct ChannelControl(QuicReader);
 
 impl ChannelControl {
     /// Read the `channel_id` field.
-    pub async fn chan_id(mut self) -> ResetResult<(ChanCtrlFrames, ChanId)> {
+    pub async fn chan_id(mut self) -> ResetResult<ChanCtrlFrames> {
         let o = self.0.read_chan_id().await?;
-        if o.dir().side_to() == self.0.side {
-            Ok((ChanCtrlFrames::Receiver(ReceiverChanCtrlFrames(self.0)), o))
+        Ok(if o.dir().side_to() == self.0.side {
+            ChanCtrlFrames::Receiver(ReceiverChanCtrlFrames(self.0), ReceiverChanId(o))
         } else {
-            Ok((ChanCtrlFrames::Sender(SenderChanCtrlFrames(self.0)), o))
-        }
+            ChanCtrlFrames::Sender(SenderChanCtrlFrames(self.0), SenderChanId(o))
+        })
     }
 }
 
@@ -546,9 +551,9 @@ impl ChannelControl {
 #[must_use]
 pub enum ChanCtrlFrames {
     /// The local side is the sender side of the channel.
-    Sender(SenderChanCtrlFrames),
+    Sender(SenderChanCtrlFrames, SenderChanId),
     /// The local side is the receiver side of the channel.
-    Receiver(ReceiverChanCtrlFrames),
+    Receiver(ReceiverChanCtrlFrames, ReceiverChanId),
 }
 
 /// Typed API for reading Aqueduct frames from a channel control stream for which the local side is

@@ -4,15 +4,12 @@ use crate::{
     zero_copy::MultiBytes,
     frame::common::*,
 };
-use std::{
-    sync::{
-        Arc,
-        atomic::{
-            Ordering::Relaxed,
-            AtomicBool,
-        },
+use std::sync::{
+    Arc,
+    atomic::{
+        Ordering::Relaxed,
+        AtomicBool,
     },
-    mem::take,
 };
 use quinn::{SendStream, Connection, SendDatagramError};
 use anyhow::*;
@@ -62,8 +59,8 @@ impl Writer {
     }
 
     // write a channel id.
-    fn write_chan_id(&mut self, chan_id: ChanId) {
-        self.write_vli(chan_id.0);
+    fn write_chan_id(&mut self, chan_id: impl Into<ChanId>) {
+        self.write_vli(chan_id.into().0);
     }
 
     // write a variable length-prefixed byte array (zero-copy-ly).
@@ -169,7 +166,7 @@ impl Frames {
     }
 
     /// Encode a ChannelControl frame to `self`.
-    pub fn channel_control(&mut self, chan_id: ChanId) {
+    pub fn channel_control(&mut self, chan_id: impl Into<ChanId>) {
         self.0.write(&[FrameType::ChannelControl as u8]);
         self.0.write_chan_id(chan_id);
     }
@@ -177,13 +174,13 @@ impl Frames {
     /// Encode a Message frame to `self`.
     pub fn message(
         &mut self,
-        sent_on: ChanId,
+        sent_on: SenderChanId,
         message_num: u64,
         attachments: Attachments,
         payload: MultiBytes,
     ) {
         self.0.write(&[FrameType::Message as u8]);
-        self.0.write_chan_id(sent_on);
+        self.0.write_chan_id(sent_on.0);
         self.0.write_vli(message_num);
         self.0.write_vlba(attachments.0);
         self.0.write_vlba(payload);
@@ -220,7 +217,7 @@ impl Frames {
     }
 
     /// Encode a ClosedChannelLost frame to `self`.
-    pub fn closed_channel_lost(&mut self, chan_id: ChanId) {
+    pub fn closed_channel_lost(&mut self, chan_id: impl Into<ChanId>) {
         self.0.write(&[FrameType::ClosedChannelLost as u8]);
         self.0.write_chan_id(chan_id);
     }
@@ -233,7 +230,7 @@ pub struct Attachments(Writer);
 
 impl Attachments {
     /// Encode an attachment.
-    pub fn attachment(&mut self, chan_id: ChanId) {
+    pub fn attachment(&mut self, chan_id: impl Into<ChanId>) {
         self.0.write_chan_id(chan_id);
     }
 }

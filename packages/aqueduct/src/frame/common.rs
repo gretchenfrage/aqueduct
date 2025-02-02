@@ -75,7 +75,7 @@ impl ChanId {
     }
 
     /// Get is-oneshot part.
-    pub fn oneshot(self) -> bool {
+    pub fn is_oneshot(self) -> bool {
         (self.0 & 0b100) != 0
     }
 
@@ -84,6 +84,48 @@ impl ChanId {
         (self.0 & !0b111u64) >> 3
     }
 }
+
+
+macro_rules! chan_id_newtype {
+    (#[doc = $doc:literal] $name:ident)=>{
+        #[doc = $doc]
+        #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
+        pub struct $name(pub ChanId);
+
+        impl $name {
+            /// Get minted-by part.
+            pub fn minted_by(self) -> Side {
+                self.0.minted_by()
+            }
+
+            /// Get is-oneshot part.
+            pub fn is_oneshot(self) -> bool {
+                self.0.is_oneshot()
+            }
+
+            /// Get channel index part.
+            pub fn idx(self) -> u64 {
+                self.0.idx()
+            }
+        }
+
+        impl Into<ChanId> for $name {
+            fn into(self) -> ChanId {
+                self.0
+            }
+        }
+    };
+}
+
+chan_id_newtype!(
+    /// Newtype wrapper for channel ID to hint that the local side is the sender side.
+    SenderChanId
+);
+
+chan_id_newtype!(
+    /// Newtype wrapper for channel ID to hint that the local side is the receiver side.
+    ReceiverChanId
+);
 
 
 /// Aqueduct frame type.
