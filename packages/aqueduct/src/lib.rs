@@ -9,8 +9,9 @@ pub extern crate bytes;
 pub mod zero_copy;
 
 mod channel;
-mod util;
+pub mod util;
 pub mod frame;
+pub mod proto;
 
 pub use crate::channel::api::*;
 

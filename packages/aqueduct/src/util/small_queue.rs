@@ -23,7 +23,7 @@ pub struct SmallQueue<T, const N: usize> {
     start: usize,
     len: usize,
     part_1: [MaybeUninit<T>; N],
-    // we don't need to use Option because we rely on stdlib to fake the heap allocation of ZSTs
+    // we don't need Option<Box> because we rely on stdlib to fake the heap allocation of ZSTs
     part_2: Box<[MaybeUninit<T>]>,
 }
 
@@ -66,7 +66,7 @@ impl<T, const N: usize> SmallQueue<T, N> {
         if storage_idx < N {
             self.part_1[storage_idx].as_ptr()
         } else {
-            self.part_2[storage_idx].as_ptr()
+            self.part_2[storage_idx - N].as_ptr()
         }
     }
 
@@ -76,7 +76,7 @@ impl<T, const N: usize> SmallQueue<T, N> {
         if storage_idx < N {
             self.part_1[storage_idx].as_mut_ptr()
         } else {
-            self.part_2[storage_idx].as_mut_ptr()
+            self.part_2[storage_idx - N].as_mut_ptr()
         }
     }
 
