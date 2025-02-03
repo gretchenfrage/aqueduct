@@ -473,8 +473,11 @@ pub struct ClosedChannelLost(QuicReader);
 
 impl ClosedChannelLost {
     /// Read the `channel_id` field.
-    pub async fn chan_id(mut self) -> Result<(ExpectFinishNoReset, ChanId)> {
+    pub async fn chan_id(mut self) -> Result<(ExpectFinishNoReset, ChanIdRemotelyMinted)> {
         let o = self.0.read_chan_id().await.map_err(|e| e.no_reset("after ClosedChannelLost"))?;
+        let SortByMintedBy::RemotelyMinted(o) = o.sort_by_minted_by(self.0.side) else {
+            return Err(anyhow!("received ClosedChannelLost frame with locally minted channel id"));
+        };
         Ok((ExpectFinishNoReset(self.0, "after ClosedChannelLost"), o))
     }
 }
@@ -544,6 +547,11 @@ impl ChannelControl {
     /// Read the `channel_id` field.
     pub async fn chan_id(mut self) -> ResetResult<ChanCtrlFrames> {
         let o = self.0.read_chan_id().await?;
+        let SortByMintedBy::LocallyMinted(o) = o.sort_by_minted_by(self.0.side) else {
+            return Err(anyhow!(
+                "received ChannelControl frame with remotely minted channel ID"
+            ).into());
+        };
         Ok(match o.sort_by_dir(self.0.side) {
             SortByDir::LocalSender(o) =>
                 ChanCtrlFrames::Sender(SenderChanCtrlFrames(self.0), o),
@@ -557,9 +565,9 @@ impl ChannelControl {
 #[must_use]
 pub enum ChanCtrlFrames {
     /// The local side is the sender side of the channel.
-    Sender(SenderChanCtrlFrames, ChanIdLocalSender),
+    Sender(SenderChanCtrlFrames, ChanIdLocalSenderLocallyMinted),
     /// The local side is the receiver side of the channel.
-    Receiver(ReceiverChanCtrlFrames, ChanIdLocalReceiver),
+    Receiver(ReceiverChanCtrlFrames, ChanIdLocalReceiverLocallyMinted),
 }
 
 /// Typed API for reading Aqueduct frames from a channel control stream for which the local side is

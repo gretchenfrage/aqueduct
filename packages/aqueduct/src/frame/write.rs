@@ -166,21 +166,21 @@ impl Frames {
     }
 
     /// Encode a ChannelControl frame to `self`.
-    pub fn channel_control(&mut self, chan_id: impl Into<ChanId>) {
+    pub fn channel_control(&mut self, chan_id: impl Into<ChanIdRemotelyMinted>) {
         self.0.write(&[FrameType::ChannelControl as u8]);
-        self.0.write_chan_id(chan_id);
+        self.0.write_chan_id(chan_id.into());
     }
 
     /// Encode a Message frame to `self`.
     pub fn message(
         &mut self,
-        sent_on: ChanIdLocalSender,
+        sent_on: impl Into<ChanIdLocalSender>,
         message_num: u64,
         attachments: Attachments,
         payload: MultiBytes,
     ) {
         self.0.write(&[FrameType::Message as u8]);
-        self.0.write_chan_id(sent_on);
+        self.0.write_chan_id(sent_on.into());
         self.0.write_vli(message_num);
         self.0.write_vlba(attachments.0);
         self.0.write_vlba(payload);
@@ -217,9 +217,9 @@ impl Frames {
     }
 
     /// Encode a ClosedChannelLost frame to `self`.
-    pub fn closed_channel_lost(&mut self, chan_id: impl Into<ChanId>) {
+    pub fn closed_channel_lost(&mut self, chan_id: impl Into<ChanIdLocallyMinted>) {
         self.0.write(&[FrameType::ClosedChannelLost as u8]);
-        self.0.write_chan_id(chan_id);
+        self.0.write_chan_id(chan_id.into());
     }
 }
 
