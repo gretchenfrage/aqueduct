@@ -230,8 +230,8 @@ pub struct Attachments(Writer);
 
 impl Attachments {
     /// Encode an attachment.
-    pub fn attachment(&mut self, chan_id: impl Into<ChanId>) {
-        self.0.write_chan_id(chan_id);
+    pub fn attachment(&mut self, chan_id: impl Into<ChanIdLocallyMinted>) {
+        self.0.write_chan_id(chan_id.into());
     }
 }
 
