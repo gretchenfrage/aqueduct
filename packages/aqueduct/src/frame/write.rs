@@ -174,13 +174,13 @@ impl Frames {
     /// Encode a Message frame to `self`.
     pub fn message(
         &mut self,
-        sent_on: SenderChanId,
+        sent_on: ChanIdLocalSender,
         message_num: u64,
         attachments: Attachments,
         payload: MultiBytes,
     ) {
         self.0.write(&[FrameType::Message as u8]);
-        self.0.write_chan_id(sent_on.0);
+        self.0.write_chan_id(sent_on);
         self.0.write_vli(message_num);
         self.0.write_vlba(attachments.0);
         self.0.write_vlba(payload);

@@ -1,11 +1,5 @@
 //! System for type-checking channel ID bounds.
 //!
-//! It follows the convention of `ChanId` followed by 3 letters, representing 3 axes:
-//!
-//! 1. Direction: `E` for either, `S` for sender, `R` for receiver.
-//! 2. Minted By: `E` for either, `L` for local, `R` for remote.
-//! 3. Is Oneshot: `E` for either, `M` for multishot, `O` for oneshot.
-//!
 //! This entire module is procedurally generated from a Python script and checked into git, via the
 //! following procedure:
 //!
@@ -15,18 +9,64 @@
 use crate::frame::common::{ChanId, Dir, Side};
 
 
-/// Newtype wrapper around chan id.
-///
-/// - It may be flowing in either direction
-/// - It may have been minted by either side
-/// - It may be either oneshot or multishot
+/// Channel ID categorized by its direction relative to the local side.
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
-pub struct ChanIdEee(ChanId);
+pub enum SortByDir<A, B> {
+    LocalSender(A),
+    LocalReceiver(B),
+}
 
-impl ChanIdEee {
+/// Channel ID categorized by which side minted it relative to the local side.
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
+pub enum SortByMintedBy<A, B> {
+    LocallyMinted(A),
+    RemotelyMinted(B),
+}
+
+/// Channel ID categorized by whether it is multishot.
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
+pub enum SortByIsOneshot<A, B> {
+    Multishot(A),
+    Oneshot(B),
+}
+
+impl ChanId {
+    /// Categorized this channel ID by its direction relative to the local side.
+    pub fn sort_by_dir(self, side: Side) -> SortByDir<ChanIdLocalSender, ChanIdLocalReceiver> {
+        if self.dir().side_to() == side {
+            SortByDir::LocalReceiver(ChanIdLocalReceiver::new_unchecked(self.into()))
+        } else {
+            SortByDir::LocalSender(ChanIdLocalSender::new_unchecked(self.into()))
+        }
+    }
+
+    /// Categorized this channel ID by which side minted it relative to the local side.
+    pub fn sort_by_minted_by(self, side: Side) -> SortByMintedBy<ChanIdLocallyMinted, ChanIdRemotelyMinted> {
+        if self.minted_by() == side {
+            SortByMintedBy::LocallyMinted(ChanIdLocallyMinted::new_unchecked(self.into()))
+        } else {
+            SortByMintedBy::RemotelyMinted(ChanIdRemotelyMinted::new_unchecked(self.into()))
+        }
+    }
+
+    /// Categorized this channel ID by whether it is multishot.
+    pub fn sort_by_is_oneshot(self) -> SortByIsOneshot<ChanIdMultishot, ChanIdOneshot> {
+        if self.is_oneshot() {
+            SortByIsOneshot::Oneshot(ChanIdOneshot::new_unchecked(self.into()))
+        } else {
+            SortByIsOneshot::Multishot(ChanIdMultishot::new_unchecked(self.into()))
+        }
+    }
+}
+
+/// Newtype wrapper around chan id.
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
+pub struct ChanIdMultishot(ChanId);
+
+impl ChanIdMultishot {
     /// Construct without checking component constraints.
     pub fn new_unchecked(chan_id: ChanId) -> Self {
-        ChanIdEee(chan_id)
+        ChanIdMultishot(chan_id)
     }
 
     /// Get direction part.
@@ -34,9 +74,27 @@ impl ChanIdEee {
          self.0.dir()
     }
 
-    /// Get is-oneshot part.
-    pub fn is_oneshot(self) -> bool {
-        self.0.is_oneshot()
+    /// Categorized this channel ID by its direction relative to the local side.
+    pub fn sort_by_dir(self, side: Side) -> SortByDir<ChanIdLocalSenderMultishot, ChanIdLocalReceiverMultishot> {
+        if self.dir().side_to() == side {
+            SortByDir::LocalReceiver(ChanIdLocalReceiverMultishot::new_unchecked(self.into()))
+        } else {
+            SortByDir::LocalSender(ChanIdLocalSenderMultishot::new_unchecked(self.into()))
+        }
+    }
+
+    /// Get minted-by part.
+    pub fn minted_by(self) -> Side {
+        self.0.minted_by()
+    }
+
+    /// Categorized this channel ID by which side minted it relative to the local side.
+    pub fn sort_by_minted_by(self, side: Side) -> SortByMintedBy<ChanIdLocallyMintedMultishot, ChanIdRemotelyMintedMultishot> {
+        if self.minted_by() == side {
+            SortByMintedBy::LocallyMinted(ChanIdLocallyMintedMultishot::new_unchecked(self.into()))
+        } else {
+            SortByMintedBy::RemotelyMinted(ChanIdRemotelyMintedMultishot::new_unchecked(self.into()))
+        }
     }
 
     /// Get channel index part.
@@ -45,25 +103,21 @@ impl ChanIdEee {
     }
 }
 
-impl From<ChanIdEee> for ChanId {
-    fn from(subtype: ChanIdEee) -> ChanId {
+impl From<ChanIdMultishot> for ChanId {
+    fn from(subtype: ChanIdMultishot) -> ChanId {
         subtype.0
     }
 }
 
 
 /// Newtype wrapper around chan id.
-///
-/// - It may be flowing in either direction
-/// - It may have been minted by either side
-/// - It is multishot
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
-pub struct ChanIdEem(ChanId);
+pub struct ChanIdOneshot(ChanId);
 
-impl ChanIdEem {
+impl ChanIdOneshot {
     /// Construct without checking component constraints.
     pub fn new_unchecked(chan_id: ChanId) -> Self {
-        ChanIdEem(chan_id)
+        ChanIdOneshot(chan_id)
     }
 
     /// Get direction part.
@@ -71,37 +125,50 @@ impl ChanIdEem {
          self.0.dir()
     }
 
+    /// Categorized this channel ID by its direction relative to the local side.
+    pub fn sort_by_dir(self, side: Side) -> SortByDir<ChanIdLocalSenderOneshot, ChanIdLocalReceiverOneshot> {
+        if self.dir().side_to() == side {
+            SortByDir::LocalReceiver(ChanIdLocalReceiverOneshot::new_unchecked(self.into()))
+        } else {
+            SortByDir::LocalSender(ChanIdLocalSenderOneshot::new_unchecked(self.into()))
+        }
+    }
+
+    /// Get minted-by part.
+    pub fn minted_by(self) -> Side {
+        self.0.minted_by()
+    }
+
+    /// Categorized this channel ID by which side minted it relative to the local side.
+    pub fn sort_by_minted_by(self, side: Side) -> SortByMintedBy<ChanIdLocallyMintedOneshot, ChanIdRemotelyMintedOneshot> {
+        if self.minted_by() == side {
+            SortByMintedBy::LocallyMinted(ChanIdLocallyMintedOneshot::new_unchecked(self.into()))
+        } else {
+            SortByMintedBy::RemotelyMinted(ChanIdRemotelyMintedOneshot::new_unchecked(self.into()))
+        }
+    }
+
     /// Get channel index part.
     pub fn idx(self) -> u64 {
         self.0.idx()
     }
 }
 
-impl From<ChanIdEem> for ChanId {
-    fn from(subtype: ChanIdEem) -> ChanId {
+impl From<ChanIdOneshot> for ChanId {
+    fn from(subtype: ChanIdOneshot) -> ChanId {
         subtype.0
-    }
-}
-
-impl From<ChanIdEem> for ChanIdEee {
-    fn from(subtype: ChanIdEem) -> Self {
-        ChanIdEee::new_unchecked(subtype.0)
     }
 }
 
 
 /// Newtype wrapper around chan id.
-///
-/// - It may be flowing in either direction
-/// - It may have been minted by either side
-/// - It is oneshot
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
-pub struct ChanIdEeo(ChanId);
+pub struct ChanIdLocallyMinted(ChanId);
 
-impl ChanIdEeo {
+impl ChanIdLocallyMinted {
     /// Construct without checking component constraints.
     pub fn new_unchecked(chan_id: ChanId) -> Self {
-        ChanIdEeo(chan_id)
+        ChanIdLocallyMinted(chan_id)
     }
 
     /// Get direction part.
@@ -109,37 +176,50 @@ impl ChanIdEeo {
          self.0.dir()
     }
 
+    /// Categorized this channel ID by its direction relative to the local side.
+    pub fn sort_by_dir(self, side: Side) -> SortByDir<ChanIdLocalSenderLocallyMinted, ChanIdLocalReceiverLocallyMinted> {
+        if self.dir().side_to() == side {
+            SortByDir::LocalReceiver(ChanIdLocalReceiverLocallyMinted::new_unchecked(self.into()))
+        } else {
+            SortByDir::LocalSender(ChanIdLocalSenderLocallyMinted::new_unchecked(self.into()))
+        }
+    }
+
+    /// Get is-oneshot part.
+    pub fn is_oneshot(self) -> bool {
+        self.0.is_oneshot()
+    }
+
+    /// Categorized this channel ID by whether it is multishot.
+    pub fn sort_by_is_oneshot(self) -> SortByIsOneshot<ChanIdLocallyMintedMultishot, ChanIdLocallyMintedOneshot> {
+        if self.is_oneshot() {
+            SortByIsOneshot::Oneshot(ChanIdLocallyMintedOneshot::new_unchecked(self.into()))
+        } else {
+            SortByIsOneshot::Multishot(ChanIdLocallyMintedMultishot::new_unchecked(self.into()))
+        }
+    }
+
     /// Get channel index part.
     pub fn idx(self) -> u64 {
         self.0.idx()
     }
 }
 
-impl From<ChanIdEeo> for ChanId {
-    fn from(subtype: ChanIdEeo) -> ChanId {
+impl From<ChanIdLocallyMinted> for ChanId {
+    fn from(subtype: ChanIdLocallyMinted) -> ChanId {
         subtype.0
-    }
-}
-
-impl From<ChanIdEeo> for ChanIdEee {
-    fn from(subtype: ChanIdEeo) -> Self {
-        ChanIdEee::new_unchecked(subtype.0)
     }
 }
 
 
 /// Newtype wrapper around chan id.
-///
-/// - It may be flowing in either direction
-/// - It was minted by the local side
-/// - It may be either oneshot or multishot
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
-pub struct ChanIdEle(ChanId);
+pub struct ChanIdLocallyMintedMultishot(ChanId);
 
-impl ChanIdEle {
+impl ChanIdLocallyMintedMultishot {
     /// Construct without checking component constraints.
     pub fn new_unchecked(chan_id: ChanId) -> Self {
-        ChanIdEle(chan_id)
+        ChanIdLocallyMintedMultishot(chan_id)
     }
 
     /// Get direction part.
@@ -147,14 +227,13 @@ impl ChanIdEle {
          self.0.dir()
     }
 
-    /// Get minted-by part.
-    pub fn minted_by(self) -> Side {
-        self.0.minted_by()
-    }
-
-    /// Get is-oneshot part.
-    pub fn is_oneshot(self) -> bool {
-        self.0.is_oneshot()
+    /// Categorized this channel ID by its direction relative to the local side.
+    pub fn sort_by_dir(self, side: Side) -> SortByDir<ChanIdLocalSenderLocallyMintedMultishot, ChanIdLocalReceiverLocallyMintedMultishot> {
+        if self.dir().side_to() == side {
+            SortByDir::LocalReceiver(ChanIdLocalReceiverLocallyMintedMultishot::new_unchecked(self.into()))
+        } else {
+            SortByDir::LocalSender(ChanIdLocalSenderLocallyMintedMultishot::new_unchecked(self.into()))
+        }
     }
 
     /// Get channel index part.
@@ -163,31 +242,33 @@ impl ChanIdEle {
     }
 }
 
-impl From<ChanIdEle> for ChanId {
-    fn from(subtype: ChanIdEle) -> ChanId {
+impl From<ChanIdLocallyMintedMultishot> for ChanId {
+    fn from(subtype: ChanIdLocallyMintedMultishot) -> ChanId {
         subtype.0
     }
 }
 
-impl From<ChanIdEle> for ChanIdEee {
-    fn from(subtype: ChanIdEle) -> Self {
-        ChanIdEee::new_unchecked(subtype.0)
+impl From<ChanIdLocallyMintedMultishot> for ChanIdMultishot {
+    fn from(subtype: ChanIdLocallyMintedMultishot) -> Self {
+        ChanIdMultishot::new_unchecked(subtype.0)
+    }
+}
+
+impl From<ChanIdLocallyMintedMultishot> for ChanIdLocallyMinted {
+    fn from(subtype: ChanIdLocallyMintedMultishot) -> Self {
+        ChanIdLocallyMinted::new_unchecked(subtype.0)
     }
 }
 
 
 /// Newtype wrapper around chan id.
-///
-/// - It may be flowing in either direction
-/// - It was minted by the local side
-/// - It is multishot
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
-pub struct ChanIdElm(ChanId);
+pub struct ChanIdLocallyMintedOneshot(ChanId);
 
-impl ChanIdElm {
+impl ChanIdLocallyMintedOneshot {
     /// Construct without checking component constraints.
     pub fn new_unchecked(chan_id: ChanId) -> Self {
-        ChanIdElm(chan_id)
+        ChanIdLocallyMintedOneshot(chan_id)
     }
 
     /// Get direction part.
@@ -195,9 +276,13 @@ impl ChanIdElm {
          self.0.dir()
     }
 
-    /// Get minted-by part.
-    pub fn minted_by(self) -> Side {
-        self.0.minted_by()
+    /// Categorized this channel ID by its direction relative to the local side.
+    pub fn sort_by_dir(self, side: Side) -> SortByDir<ChanIdLocalSenderLocallyMintedOneshot, ChanIdLocalReceiverLocallyMintedOneshot> {
+        if self.dir().side_to() == side {
+            SortByDir::LocalReceiver(ChanIdLocalReceiverLocallyMintedOneshot::new_unchecked(self.into()))
+        } else {
+            SortByDir::LocalSender(ChanIdLocalSenderLocallyMintedOneshot::new_unchecked(self.into()))
+        }
     }
 
     /// Get channel index part.
@@ -206,43 +291,33 @@ impl ChanIdElm {
     }
 }
 
-impl From<ChanIdElm> for ChanId {
-    fn from(subtype: ChanIdElm) -> ChanId {
+impl From<ChanIdLocallyMintedOneshot> for ChanId {
+    fn from(subtype: ChanIdLocallyMintedOneshot) -> ChanId {
         subtype.0
     }
 }
 
-impl From<ChanIdElm> for ChanIdEee {
-    fn from(subtype: ChanIdElm) -> Self {
-        ChanIdEee::new_unchecked(subtype.0)
+impl From<ChanIdLocallyMintedOneshot> for ChanIdOneshot {
+    fn from(subtype: ChanIdLocallyMintedOneshot) -> Self {
+        ChanIdOneshot::new_unchecked(subtype.0)
     }
 }
 
-impl From<ChanIdElm> for ChanIdEem {
-    fn from(subtype: ChanIdElm) -> Self {
-        ChanIdEem::new_unchecked(subtype.0)
-    }
-}
-
-impl From<ChanIdElm> for ChanIdEle {
-    fn from(subtype: ChanIdElm) -> Self {
-        ChanIdEle::new_unchecked(subtype.0)
+impl From<ChanIdLocallyMintedOneshot> for ChanIdLocallyMinted {
+    fn from(subtype: ChanIdLocallyMintedOneshot) -> Self {
+        ChanIdLocallyMinted::new_unchecked(subtype.0)
     }
 }
 
 
 /// Newtype wrapper around chan id.
-///
-/// - It may be flowing in either direction
-/// - It was minted by the local side
-/// - It is oneshot
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
-pub struct ChanIdElo(ChanId);
+pub struct ChanIdRemotelyMinted(ChanId);
 
-impl ChanIdElo {
+impl ChanIdRemotelyMinted {
     /// Construct without checking component constraints.
     pub fn new_unchecked(chan_id: ChanId) -> Self {
-        ChanIdElo(chan_id)
+        ChanIdRemotelyMinted(chan_id)
     }
 
     /// Get direction part.
@@ -250,9 +325,27 @@ impl ChanIdElo {
          self.0.dir()
     }
 
-    /// Get minted-by part.
-    pub fn minted_by(self) -> Side {
-        self.0.minted_by()
+    /// Categorized this channel ID by its direction relative to the local side.
+    pub fn sort_by_dir(self, side: Side) -> SortByDir<ChanIdLocalSenderRemotelyMinted, ChanIdLocalReceiverRemotelyMinted> {
+        if self.dir().side_to() == side {
+            SortByDir::LocalReceiver(ChanIdLocalReceiverRemotelyMinted::new_unchecked(self.into()))
+        } else {
+            SortByDir::LocalSender(ChanIdLocalSenderRemotelyMinted::new_unchecked(self.into()))
+        }
+    }
+
+    /// Get is-oneshot part.
+    pub fn is_oneshot(self) -> bool {
+        self.0.is_oneshot()
+    }
+
+    /// Categorized this channel ID by whether it is multishot.
+    pub fn sort_by_is_oneshot(self) -> SortByIsOneshot<ChanIdRemotelyMintedMultishot, ChanIdRemotelyMintedOneshot> {
+        if self.is_oneshot() {
+            SortByIsOneshot::Oneshot(ChanIdRemotelyMintedOneshot::new_unchecked(self.into()))
+        } else {
+            SortByIsOneshot::Multishot(ChanIdRemotelyMintedMultishot::new_unchecked(self.into()))
+        }
     }
 
     /// Get channel index part.
@@ -261,43 +354,21 @@ impl ChanIdElo {
     }
 }
 
-impl From<ChanIdElo> for ChanId {
-    fn from(subtype: ChanIdElo) -> ChanId {
+impl From<ChanIdRemotelyMinted> for ChanId {
+    fn from(subtype: ChanIdRemotelyMinted) -> ChanId {
         subtype.0
-    }
-}
-
-impl From<ChanIdElo> for ChanIdEee {
-    fn from(subtype: ChanIdElo) -> Self {
-        ChanIdEee::new_unchecked(subtype.0)
-    }
-}
-
-impl From<ChanIdElo> for ChanIdEeo {
-    fn from(subtype: ChanIdElo) -> Self {
-        ChanIdEeo::new_unchecked(subtype.0)
-    }
-}
-
-impl From<ChanIdElo> for ChanIdEle {
-    fn from(subtype: ChanIdElo) -> Self {
-        ChanIdEle::new_unchecked(subtype.0)
     }
 }
 
 
 /// Newtype wrapper around chan id.
-///
-/// - It may be flowing in either direction
-/// - It was minted by the remote side
-/// - It may be either oneshot or multishot
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
-pub struct ChanIdEre(ChanId);
+pub struct ChanIdRemotelyMintedMultishot(ChanId);
 
-impl ChanIdEre {
+impl ChanIdRemotelyMintedMultishot {
     /// Construct without checking component constraints.
     pub fn new_unchecked(chan_id: ChanId) -> Self {
-        ChanIdEre(chan_id)
+        ChanIdRemotelyMintedMultishot(chan_id)
     }
 
     /// Get direction part.
@@ -305,14 +376,13 @@ impl ChanIdEre {
          self.0.dir()
     }
 
-    /// Get minted-by part.
-    pub fn minted_by(self) -> Side {
-        self.0.minted_by()
-    }
-
-    /// Get is-oneshot part.
-    pub fn is_oneshot(self) -> bool {
-        self.0.is_oneshot()
+    /// Categorized this channel ID by its direction relative to the local side.
+    pub fn sort_by_dir(self, side: Side) -> SortByDir<ChanIdLocalSenderRemotelyMintedMultishot, ChanIdLocalReceiverRemotelyMintedMultishot> {
+        if self.dir().side_to() == side {
+            SortByDir::LocalReceiver(ChanIdLocalReceiverRemotelyMintedMultishot::new_unchecked(self.into()))
+        } else {
+            SortByDir::LocalSender(ChanIdLocalSenderRemotelyMintedMultishot::new_unchecked(self.into()))
+        }
     }
 
     /// Get channel index part.
@@ -321,31 +391,33 @@ impl ChanIdEre {
     }
 }
 
-impl From<ChanIdEre> for ChanId {
-    fn from(subtype: ChanIdEre) -> ChanId {
+impl From<ChanIdRemotelyMintedMultishot> for ChanId {
+    fn from(subtype: ChanIdRemotelyMintedMultishot) -> ChanId {
         subtype.0
     }
 }
 
-impl From<ChanIdEre> for ChanIdEee {
-    fn from(subtype: ChanIdEre) -> Self {
-        ChanIdEee::new_unchecked(subtype.0)
+impl From<ChanIdRemotelyMintedMultishot> for ChanIdMultishot {
+    fn from(subtype: ChanIdRemotelyMintedMultishot) -> Self {
+        ChanIdMultishot::new_unchecked(subtype.0)
+    }
+}
+
+impl From<ChanIdRemotelyMintedMultishot> for ChanIdRemotelyMinted {
+    fn from(subtype: ChanIdRemotelyMintedMultishot) -> Self {
+        ChanIdRemotelyMinted::new_unchecked(subtype.0)
     }
 }
 
 
 /// Newtype wrapper around chan id.
-///
-/// - It may be flowing in either direction
-/// - It was minted by the remote side
-/// - It is multishot
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
-pub struct ChanIdErm(ChanId);
+pub struct ChanIdRemotelyMintedOneshot(ChanId);
 
-impl ChanIdErm {
+impl ChanIdRemotelyMintedOneshot {
     /// Construct without checking component constraints.
     pub fn new_unchecked(chan_id: ChanId) -> Self {
-        ChanIdErm(chan_id)
+        ChanIdRemotelyMintedOneshot(chan_id)
     }
 
     /// Get direction part.
@@ -353,9 +425,13 @@ impl ChanIdErm {
          self.0.dir()
     }
 
-    /// Get minted-by part.
-    pub fn minted_by(self) -> Side {
-        self.0.minted_by()
+    /// Categorized this channel ID by its direction relative to the local side.
+    pub fn sort_by_dir(self, side: Side) -> SortByDir<ChanIdLocalSenderRemotelyMintedOneshot, ChanIdLocalReceiverRemotelyMintedOneshot> {
+        if self.dir().side_to() == side {
+            SortByDir::LocalReceiver(ChanIdLocalReceiverRemotelyMintedOneshot::new_unchecked(self.into()))
+        } else {
+            SortByDir::LocalSender(ChanIdLocalSenderRemotelyMintedOneshot::new_unchecked(self.into()))
+        }
     }
 
     /// Get channel index part.
@@ -364,48 +440,33 @@ impl ChanIdErm {
     }
 }
 
-impl From<ChanIdErm> for ChanId {
-    fn from(subtype: ChanIdErm) -> ChanId {
+impl From<ChanIdRemotelyMintedOneshot> for ChanId {
+    fn from(subtype: ChanIdRemotelyMintedOneshot) -> ChanId {
         subtype.0
     }
 }
 
-impl From<ChanIdErm> for ChanIdEee {
-    fn from(subtype: ChanIdErm) -> Self {
-        ChanIdEee::new_unchecked(subtype.0)
+impl From<ChanIdRemotelyMintedOneshot> for ChanIdOneshot {
+    fn from(subtype: ChanIdRemotelyMintedOneshot) -> Self {
+        ChanIdOneshot::new_unchecked(subtype.0)
     }
 }
 
-impl From<ChanIdErm> for ChanIdEem {
-    fn from(subtype: ChanIdErm) -> Self {
-        ChanIdEem::new_unchecked(subtype.0)
-    }
-}
-
-impl From<ChanIdErm> for ChanIdEre {
-    fn from(subtype: ChanIdErm) -> Self {
-        ChanIdEre::new_unchecked(subtype.0)
+impl From<ChanIdRemotelyMintedOneshot> for ChanIdRemotelyMinted {
+    fn from(subtype: ChanIdRemotelyMintedOneshot) -> Self {
+        ChanIdRemotelyMinted::new_unchecked(subtype.0)
     }
 }
 
 
 /// Newtype wrapper around chan id.
-///
-/// - It may be flowing in either direction
-/// - It was minted by the remote side
-/// - It is oneshot
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
-pub struct ChanIdEro(ChanId);
+pub struct ChanIdLocalSender(ChanId);
 
-impl ChanIdEro {
+impl ChanIdLocalSender {
     /// Construct without checking component constraints.
     pub fn new_unchecked(chan_id: ChanId) -> Self {
-        ChanIdEro(chan_id)
-    }
-
-    /// Get direction part.
-    pub fn dir(self) -> Dir {
-         self.0.dir()
+        ChanIdLocalSender(chan_id)
     }
 
     /// Get minted-by part.
@@ -413,49 +474,13 @@ impl ChanIdEro {
         self.0.minted_by()
     }
 
-    /// Get channel index part.
-    pub fn idx(self) -> u64 {
-        self.0.idx()
-    }
-}
-
-impl From<ChanIdEro> for ChanId {
-    fn from(subtype: ChanIdEro) -> ChanId {
-        subtype.0
-    }
-}
-
-impl From<ChanIdEro> for ChanIdEee {
-    fn from(subtype: ChanIdEro) -> Self {
-        ChanIdEee::new_unchecked(subtype.0)
-    }
-}
-
-impl From<ChanIdEro> for ChanIdEeo {
-    fn from(subtype: ChanIdEro) -> Self {
-        ChanIdEeo::new_unchecked(subtype.0)
-    }
-}
-
-impl From<ChanIdEro> for ChanIdEre {
-    fn from(subtype: ChanIdEro) -> Self {
-        ChanIdEre::new_unchecked(subtype.0)
-    }
-}
-
-
-/// Newtype wrapper around chan id.
-///
-/// - The local side is the sender
-/// - It may have been minted by either side
-/// - It may be either oneshot or multishot
-#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
-pub struct ChanIdSee(ChanId);
-
-impl ChanIdSee {
-    /// Construct without checking component constraints.
-    pub fn new_unchecked(chan_id: ChanId) -> Self {
-        ChanIdSee(chan_id)
+    /// Categorized this channel ID by which side minted it relative to the local side.
+    pub fn sort_by_minted_by(self, side: Side) -> SortByMintedBy<ChanIdLocalSenderLocallyMinted, ChanIdLocalSenderRemotelyMinted> {
+        if self.minted_by() == side {
+            SortByMintedBy::LocallyMinted(ChanIdLocalSenderLocallyMinted::new_unchecked(self.into()))
+        } else {
+            SortByMintedBy::RemotelyMinted(ChanIdLocalSenderRemotelyMinted::new_unchecked(self.into()))
+        }
     }
 
     /// Get is-oneshot part.
@@ -463,37 +488,13 @@ impl ChanIdSee {
         self.0.is_oneshot()
     }
 
-    /// Get channel index part.
-    pub fn idx(self) -> u64 {
-        self.0.idx()
-    }
-}
-
-impl From<ChanIdSee> for ChanId {
-    fn from(subtype: ChanIdSee) -> ChanId {
-        subtype.0
-    }
-}
-
-impl From<ChanIdSee> for ChanIdEee {
-    fn from(subtype: ChanIdSee) -> Self {
-        ChanIdEee::new_unchecked(subtype.0)
-    }
-}
-
-
-/// Newtype wrapper around chan id.
-///
-/// - The local side is the sender
-/// - It may have been minted by either side
-/// - It is multishot
-#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
-pub struct ChanIdSem(ChanId);
-
-impl ChanIdSem {
-    /// Construct without checking component constraints.
-    pub fn new_unchecked(chan_id: ChanId) -> Self {
-        ChanIdSem(chan_id)
+    /// Categorized this channel ID by whether it is multishot.
+    pub fn sort_by_is_oneshot(self) -> SortByIsOneshot<ChanIdLocalSenderMultishot, ChanIdLocalSenderOneshot> {
+        if self.is_oneshot() {
+            SortByIsOneshot::Oneshot(ChanIdLocalSenderOneshot::new_unchecked(self.into()))
+        } else {
+            SortByIsOneshot::Multishot(ChanIdLocalSenderMultishot::new_unchecked(self.into()))
+        }
     }
 
     /// Get channel index part.
@@ -502,93 +503,119 @@ impl ChanIdSem {
     }
 }
 
-impl From<ChanIdSem> for ChanId {
-    fn from(subtype: ChanIdSem) -> ChanId {
+impl From<ChanIdLocalSender> for ChanId {
+    fn from(subtype: ChanIdLocalSender) -> ChanId {
         subtype.0
-    }
-}
-
-impl From<ChanIdSem> for ChanIdEee {
-    fn from(subtype: ChanIdSem) -> Self {
-        ChanIdEee::new_unchecked(subtype.0)
-    }
-}
-
-impl From<ChanIdSem> for ChanIdEem {
-    fn from(subtype: ChanIdSem) -> Self {
-        ChanIdEem::new_unchecked(subtype.0)
-    }
-}
-
-impl From<ChanIdSem> for ChanIdSee {
-    fn from(subtype: ChanIdSem) -> Self {
-        ChanIdSee::new_unchecked(subtype.0)
     }
 }
 
 
 /// Newtype wrapper around chan id.
-///
-/// - The local side is the sender
-/// - It may have been minted by either side
-/// - It is oneshot
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
-pub struct ChanIdSeo(ChanId);
+pub struct ChanIdLocalSenderMultishot(ChanId);
 
-impl ChanIdSeo {
+impl ChanIdLocalSenderMultishot {
     /// Construct without checking component constraints.
     pub fn new_unchecked(chan_id: ChanId) -> Self {
-        ChanIdSeo(chan_id)
-    }
-
-    /// Get channel index part.
-    pub fn idx(self) -> u64 {
-        self.0.idx()
-    }
-}
-
-impl From<ChanIdSeo> for ChanId {
-    fn from(subtype: ChanIdSeo) -> ChanId {
-        subtype.0
-    }
-}
-
-impl From<ChanIdSeo> for ChanIdEee {
-    fn from(subtype: ChanIdSeo) -> Self {
-        ChanIdEee::new_unchecked(subtype.0)
-    }
-}
-
-impl From<ChanIdSeo> for ChanIdEeo {
-    fn from(subtype: ChanIdSeo) -> Self {
-        ChanIdEeo::new_unchecked(subtype.0)
-    }
-}
-
-impl From<ChanIdSeo> for ChanIdSee {
-    fn from(subtype: ChanIdSeo) -> Self {
-        ChanIdSee::new_unchecked(subtype.0)
-    }
-}
-
-
-/// Newtype wrapper around chan id.
-///
-/// - The local side is the sender
-/// - It was minted by the local side
-/// - It may be either oneshot or multishot
-#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
-pub struct ChanIdSle(ChanId);
-
-impl ChanIdSle {
-    /// Construct without checking component constraints.
-    pub fn new_unchecked(chan_id: ChanId) -> Self {
-        ChanIdSle(chan_id)
+        ChanIdLocalSenderMultishot(chan_id)
     }
 
     /// Get minted-by part.
     pub fn minted_by(self) -> Side {
         self.0.minted_by()
+    }
+
+    /// Categorized this channel ID by which side minted it relative to the local side.
+    pub fn sort_by_minted_by(self, side: Side) -> SortByMintedBy<ChanIdLocalSenderLocallyMintedMultishot, ChanIdLocalSenderRemotelyMintedMultishot> {
+        if self.minted_by() == side {
+            SortByMintedBy::LocallyMinted(ChanIdLocalSenderLocallyMintedMultishot::new_unchecked(self.into()))
+        } else {
+            SortByMintedBy::RemotelyMinted(ChanIdLocalSenderRemotelyMintedMultishot::new_unchecked(self.into()))
+        }
+    }
+
+    /// Get channel index part.
+    pub fn idx(self) -> u64 {
+        self.0.idx()
+    }
+}
+
+impl From<ChanIdLocalSenderMultishot> for ChanId {
+    fn from(subtype: ChanIdLocalSenderMultishot) -> ChanId {
+        subtype.0
+    }
+}
+
+impl From<ChanIdLocalSenderMultishot> for ChanIdMultishot {
+    fn from(subtype: ChanIdLocalSenderMultishot) -> Self {
+        ChanIdMultishot::new_unchecked(subtype.0)
+    }
+}
+
+impl From<ChanIdLocalSenderMultishot> for ChanIdLocalSender {
+    fn from(subtype: ChanIdLocalSenderMultishot) -> Self {
+        ChanIdLocalSender::new_unchecked(subtype.0)
+    }
+}
+
+
+/// Newtype wrapper around chan id.
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
+pub struct ChanIdLocalSenderOneshot(ChanId);
+
+impl ChanIdLocalSenderOneshot {
+    /// Construct without checking component constraints.
+    pub fn new_unchecked(chan_id: ChanId) -> Self {
+        ChanIdLocalSenderOneshot(chan_id)
+    }
+
+    /// Get minted-by part.
+    pub fn minted_by(self) -> Side {
+        self.0.minted_by()
+    }
+
+    /// Categorized this channel ID by which side minted it relative to the local side.
+    pub fn sort_by_minted_by(self, side: Side) -> SortByMintedBy<ChanIdLocalSenderLocallyMintedOneshot, ChanIdLocalSenderRemotelyMintedOneshot> {
+        if self.minted_by() == side {
+            SortByMintedBy::LocallyMinted(ChanIdLocalSenderLocallyMintedOneshot::new_unchecked(self.into()))
+        } else {
+            SortByMintedBy::RemotelyMinted(ChanIdLocalSenderRemotelyMintedOneshot::new_unchecked(self.into()))
+        }
+    }
+
+    /// Get channel index part.
+    pub fn idx(self) -> u64 {
+        self.0.idx()
+    }
+}
+
+impl From<ChanIdLocalSenderOneshot> for ChanId {
+    fn from(subtype: ChanIdLocalSenderOneshot) -> ChanId {
+        subtype.0
+    }
+}
+
+impl From<ChanIdLocalSenderOneshot> for ChanIdOneshot {
+    fn from(subtype: ChanIdLocalSenderOneshot) -> Self {
+        ChanIdOneshot::new_unchecked(subtype.0)
+    }
+}
+
+impl From<ChanIdLocalSenderOneshot> for ChanIdLocalSender {
+    fn from(subtype: ChanIdLocalSenderOneshot) -> Self {
+        ChanIdLocalSender::new_unchecked(subtype.0)
+    }
+}
+
+
+/// Newtype wrapper around chan id.
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
+pub struct ChanIdLocalSenderLocallyMinted(ChanId);
+
+impl ChanIdLocalSenderLocallyMinted {
+    /// Construct without checking component constraints.
+    pub fn new_unchecked(chan_id: ChanId) -> Self {
+        ChanIdLocalSenderLocallyMinted(chan_id)
     }
 
     /// Get is-oneshot part.
@@ -596,54 +623,13 @@ impl ChanIdSle {
         self.0.is_oneshot()
     }
 
-    /// Get channel index part.
-    pub fn idx(self) -> u64 {
-        self.0.idx()
-    }
-}
-
-impl From<ChanIdSle> for ChanId {
-    fn from(subtype: ChanIdSle) -> ChanId {
-        subtype.0
-    }
-}
-
-impl From<ChanIdSle> for ChanIdEee {
-    fn from(subtype: ChanIdSle) -> Self {
-        ChanIdEee::new_unchecked(subtype.0)
-    }
-}
-
-impl From<ChanIdSle> for ChanIdEle {
-    fn from(subtype: ChanIdSle) -> Self {
-        ChanIdEle::new_unchecked(subtype.0)
-    }
-}
-
-impl From<ChanIdSle> for ChanIdSee {
-    fn from(subtype: ChanIdSle) -> Self {
-        ChanIdSee::new_unchecked(subtype.0)
-    }
-}
-
-
-/// Newtype wrapper around chan id.
-///
-/// - The local side is the sender
-/// - It was minted by the local side
-/// - It is multishot
-#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
-pub struct ChanIdSlm(ChanId);
-
-impl ChanIdSlm {
-    /// Construct without checking component constraints.
-    pub fn new_unchecked(chan_id: ChanId) -> Self {
-        ChanIdSlm(chan_id)
-    }
-
-    /// Get minted-by part.
-    pub fn minted_by(self) -> Side {
-        self.0.minted_by()
+    /// Categorized this channel ID by whether it is multishot.
+    pub fn sort_by_is_oneshot(self) -> SortByIsOneshot<ChanIdLocalSenderLocallyMintedMultishot, ChanIdLocalSenderLocallyMintedOneshot> {
+        if self.is_oneshot() {
+            SortByIsOneshot::Oneshot(ChanIdLocalSenderLocallyMintedOneshot::new_unchecked(self.into()))
+        } else {
+            SortByIsOneshot::Multishot(ChanIdLocalSenderLocallyMintedMultishot::new_unchecked(self.into()))
+        }
     }
 
     /// Get channel index part.
@@ -652,72 +638,33 @@ impl ChanIdSlm {
     }
 }
 
-impl From<ChanIdSlm> for ChanId {
-    fn from(subtype: ChanIdSlm) -> ChanId {
+impl From<ChanIdLocalSenderLocallyMinted> for ChanId {
+    fn from(subtype: ChanIdLocalSenderLocallyMinted) -> ChanId {
         subtype.0
     }
 }
 
-impl From<ChanIdSlm> for ChanIdEee {
-    fn from(subtype: ChanIdSlm) -> Self {
-        ChanIdEee::new_unchecked(subtype.0)
+impl From<ChanIdLocalSenderLocallyMinted> for ChanIdLocallyMinted {
+    fn from(subtype: ChanIdLocalSenderLocallyMinted) -> Self {
+        ChanIdLocallyMinted::new_unchecked(subtype.0)
     }
 }
 
-impl From<ChanIdSlm> for ChanIdEem {
-    fn from(subtype: ChanIdSlm) -> Self {
-        ChanIdEem::new_unchecked(subtype.0)
-    }
-}
-
-impl From<ChanIdSlm> for ChanIdEle {
-    fn from(subtype: ChanIdSlm) -> Self {
-        ChanIdEle::new_unchecked(subtype.0)
-    }
-}
-
-impl From<ChanIdSlm> for ChanIdElm {
-    fn from(subtype: ChanIdSlm) -> Self {
-        ChanIdElm::new_unchecked(subtype.0)
-    }
-}
-
-impl From<ChanIdSlm> for ChanIdSee {
-    fn from(subtype: ChanIdSlm) -> Self {
-        ChanIdSee::new_unchecked(subtype.0)
-    }
-}
-
-impl From<ChanIdSlm> for ChanIdSem {
-    fn from(subtype: ChanIdSlm) -> Self {
-        ChanIdSem::new_unchecked(subtype.0)
-    }
-}
-
-impl From<ChanIdSlm> for ChanIdSle {
-    fn from(subtype: ChanIdSlm) -> Self {
-        ChanIdSle::new_unchecked(subtype.0)
+impl From<ChanIdLocalSenderLocallyMinted> for ChanIdLocalSender {
+    fn from(subtype: ChanIdLocalSenderLocallyMinted) -> Self {
+        ChanIdLocalSender::new_unchecked(subtype.0)
     }
 }
 
 
 /// Newtype wrapper around chan id.
-///
-/// - The local side is the sender
-/// - It was minted by the local side
-/// - It is oneshot
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
-pub struct ChanIdSlo(ChanId);
+pub struct ChanIdLocalSenderLocallyMintedMultishot(ChanId);
 
-impl ChanIdSlo {
+impl ChanIdLocalSenderLocallyMintedMultishot {
     /// Construct without checking component constraints.
     pub fn new_unchecked(chan_id: ChanId) -> Self {
-        ChanIdSlo(chan_id)
-    }
-
-    /// Get minted-by part.
-    pub fn minted_by(self) -> Side {
-        self.0.minted_by()
+        ChanIdLocalSenderLocallyMintedMultishot(chan_id)
     }
 
     /// Get channel index part.
@@ -726,72 +673,116 @@ impl ChanIdSlo {
     }
 }
 
-impl From<ChanIdSlo> for ChanId {
-    fn from(subtype: ChanIdSlo) -> ChanId {
+impl From<ChanIdLocalSenderLocallyMintedMultishot> for ChanId {
+    fn from(subtype: ChanIdLocalSenderLocallyMintedMultishot) -> ChanId {
         subtype.0
     }
 }
 
-impl From<ChanIdSlo> for ChanIdEee {
-    fn from(subtype: ChanIdSlo) -> Self {
-        ChanIdEee::new_unchecked(subtype.0)
+impl From<ChanIdLocalSenderLocallyMintedMultishot> for ChanIdMultishot {
+    fn from(subtype: ChanIdLocalSenderLocallyMintedMultishot) -> Self {
+        ChanIdMultishot::new_unchecked(subtype.0)
     }
 }
 
-impl From<ChanIdSlo> for ChanIdEeo {
-    fn from(subtype: ChanIdSlo) -> Self {
-        ChanIdEeo::new_unchecked(subtype.0)
+impl From<ChanIdLocalSenderLocallyMintedMultishot> for ChanIdLocallyMinted {
+    fn from(subtype: ChanIdLocalSenderLocallyMintedMultishot) -> Self {
+        ChanIdLocallyMinted::new_unchecked(subtype.0)
     }
 }
 
-impl From<ChanIdSlo> for ChanIdEle {
-    fn from(subtype: ChanIdSlo) -> Self {
-        ChanIdEle::new_unchecked(subtype.0)
+impl From<ChanIdLocalSenderLocallyMintedMultishot> for ChanIdLocallyMintedMultishot {
+    fn from(subtype: ChanIdLocalSenderLocallyMintedMultishot) -> Self {
+        ChanIdLocallyMintedMultishot::new_unchecked(subtype.0)
     }
 }
 
-impl From<ChanIdSlo> for ChanIdElo {
-    fn from(subtype: ChanIdSlo) -> Self {
-        ChanIdElo::new_unchecked(subtype.0)
+impl From<ChanIdLocalSenderLocallyMintedMultishot> for ChanIdLocalSender {
+    fn from(subtype: ChanIdLocalSenderLocallyMintedMultishot) -> Self {
+        ChanIdLocalSender::new_unchecked(subtype.0)
     }
 }
 
-impl From<ChanIdSlo> for ChanIdSee {
-    fn from(subtype: ChanIdSlo) -> Self {
-        ChanIdSee::new_unchecked(subtype.0)
+impl From<ChanIdLocalSenderLocallyMintedMultishot> for ChanIdLocalSenderMultishot {
+    fn from(subtype: ChanIdLocalSenderLocallyMintedMultishot) -> Self {
+        ChanIdLocalSenderMultishot::new_unchecked(subtype.0)
     }
 }
 
-impl From<ChanIdSlo> for ChanIdSeo {
-    fn from(subtype: ChanIdSlo) -> Self {
-        ChanIdSeo::new_unchecked(subtype.0)
-    }
-}
-
-impl From<ChanIdSlo> for ChanIdSle {
-    fn from(subtype: ChanIdSlo) -> Self {
-        ChanIdSle::new_unchecked(subtype.0)
+impl From<ChanIdLocalSenderLocallyMintedMultishot> for ChanIdLocalSenderLocallyMinted {
+    fn from(subtype: ChanIdLocalSenderLocallyMintedMultishot) -> Self {
+        ChanIdLocalSenderLocallyMinted::new_unchecked(subtype.0)
     }
 }
 
 
 /// Newtype wrapper around chan id.
-///
-/// - The local side is the sender
-/// - It was minted by the remote side
-/// - It may be either oneshot or multishot
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
-pub struct ChanIdSre(ChanId);
+pub struct ChanIdLocalSenderLocallyMintedOneshot(ChanId);
 
-impl ChanIdSre {
+impl ChanIdLocalSenderLocallyMintedOneshot {
     /// Construct without checking component constraints.
     pub fn new_unchecked(chan_id: ChanId) -> Self {
-        ChanIdSre(chan_id)
+        ChanIdLocalSenderLocallyMintedOneshot(chan_id)
     }
 
-    /// Get minted-by part.
-    pub fn minted_by(self) -> Side {
-        self.0.minted_by()
+    /// Get channel index part.
+    pub fn idx(self) -> u64 {
+        self.0.idx()
+    }
+}
+
+impl From<ChanIdLocalSenderLocallyMintedOneshot> for ChanId {
+    fn from(subtype: ChanIdLocalSenderLocallyMintedOneshot) -> ChanId {
+        subtype.0
+    }
+}
+
+impl From<ChanIdLocalSenderLocallyMintedOneshot> for ChanIdOneshot {
+    fn from(subtype: ChanIdLocalSenderLocallyMintedOneshot) -> Self {
+        ChanIdOneshot::new_unchecked(subtype.0)
+    }
+}
+
+impl From<ChanIdLocalSenderLocallyMintedOneshot> for ChanIdLocallyMinted {
+    fn from(subtype: ChanIdLocalSenderLocallyMintedOneshot) -> Self {
+        ChanIdLocallyMinted::new_unchecked(subtype.0)
+    }
+}
+
+impl From<ChanIdLocalSenderLocallyMintedOneshot> for ChanIdLocallyMintedOneshot {
+    fn from(subtype: ChanIdLocalSenderLocallyMintedOneshot) -> Self {
+        ChanIdLocallyMintedOneshot::new_unchecked(subtype.0)
+    }
+}
+
+impl From<ChanIdLocalSenderLocallyMintedOneshot> for ChanIdLocalSender {
+    fn from(subtype: ChanIdLocalSenderLocallyMintedOneshot) -> Self {
+        ChanIdLocalSender::new_unchecked(subtype.0)
+    }
+}
+
+impl From<ChanIdLocalSenderLocallyMintedOneshot> for ChanIdLocalSenderOneshot {
+    fn from(subtype: ChanIdLocalSenderLocallyMintedOneshot) -> Self {
+        ChanIdLocalSenderOneshot::new_unchecked(subtype.0)
+    }
+}
+
+impl From<ChanIdLocalSenderLocallyMintedOneshot> for ChanIdLocalSenderLocallyMinted {
+    fn from(subtype: ChanIdLocalSenderLocallyMintedOneshot) -> Self {
+        ChanIdLocalSenderLocallyMinted::new_unchecked(subtype.0)
+    }
+}
+
+
+/// Newtype wrapper around chan id.
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
+pub struct ChanIdLocalSenderRemotelyMinted(ChanId);
+
+impl ChanIdLocalSenderRemotelyMinted {
+    /// Construct without checking component constraints.
+    pub fn new_unchecked(chan_id: ChanId) -> Self {
+        ChanIdLocalSenderRemotelyMinted(chan_id)
     }
 
     /// Get is-oneshot part.
@@ -799,49 +790,166 @@ impl ChanIdSre {
         self.0.is_oneshot()
     }
 
+    /// Categorized this channel ID by whether it is multishot.
+    pub fn sort_by_is_oneshot(self) -> SortByIsOneshot<ChanIdLocalSenderRemotelyMintedMultishot, ChanIdLocalSenderRemotelyMintedOneshot> {
+        if self.is_oneshot() {
+            SortByIsOneshot::Oneshot(ChanIdLocalSenderRemotelyMintedOneshot::new_unchecked(self.into()))
+        } else {
+            SortByIsOneshot::Multishot(ChanIdLocalSenderRemotelyMintedMultishot::new_unchecked(self.into()))
+        }
+    }
+
     /// Get channel index part.
     pub fn idx(self) -> u64 {
         self.0.idx()
     }
 }
 
-impl From<ChanIdSre> for ChanId {
-    fn from(subtype: ChanIdSre) -> ChanId {
+impl From<ChanIdLocalSenderRemotelyMinted> for ChanId {
+    fn from(subtype: ChanIdLocalSenderRemotelyMinted) -> ChanId {
         subtype.0
     }
 }
 
-impl From<ChanIdSre> for ChanIdEee {
-    fn from(subtype: ChanIdSre) -> Self {
-        ChanIdEee::new_unchecked(subtype.0)
+impl From<ChanIdLocalSenderRemotelyMinted> for ChanIdRemotelyMinted {
+    fn from(subtype: ChanIdLocalSenderRemotelyMinted) -> Self {
+        ChanIdRemotelyMinted::new_unchecked(subtype.0)
     }
 }
 
-impl From<ChanIdSre> for ChanIdEre {
-    fn from(subtype: ChanIdSre) -> Self {
-        ChanIdEre::new_unchecked(subtype.0)
-    }
-}
-
-impl From<ChanIdSre> for ChanIdSee {
-    fn from(subtype: ChanIdSre) -> Self {
-        ChanIdSee::new_unchecked(subtype.0)
+impl From<ChanIdLocalSenderRemotelyMinted> for ChanIdLocalSender {
+    fn from(subtype: ChanIdLocalSenderRemotelyMinted) -> Self {
+        ChanIdLocalSender::new_unchecked(subtype.0)
     }
 }
 
 
 /// Newtype wrapper around chan id.
-///
-/// - The local side is the sender
-/// - It was minted by the remote side
-/// - It is multishot
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
-pub struct ChanIdSrm(ChanId);
+pub struct ChanIdLocalSenderRemotelyMintedMultishot(ChanId);
 
-impl ChanIdSrm {
+impl ChanIdLocalSenderRemotelyMintedMultishot {
     /// Construct without checking component constraints.
     pub fn new_unchecked(chan_id: ChanId) -> Self {
-        ChanIdSrm(chan_id)
+        ChanIdLocalSenderRemotelyMintedMultishot(chan_id)
+    }
+
+    /// Get channel index part.
+    pub fn idx(self) -> u64 {
+        self.0.idx()
+    }
+}
+
+impl From<ChanIdLocalSenderRemotelyMintedMultishot> for ChanId {
+    fn from(subtype: ChanIdLocalSenderRemotelyMintedMultishot) -> ChanId {
+        subtype.0
+    }
+}
+
+impl From<ChanIdLocalSenderRemotelyMintedMultishot> for ChanIdMultishot {
+    fn from(subtype: ChanIdLocalSenderRemotelyMintedMultishot) -> Self {
+        ChanIdMultishot::new_unchecked(subtype.0)
+    }
+}
+
+impl From<ChanIdLocalSenderRemotelyMintedMultishot> for ChanIdRemotelyMinted {
+    fn from(subtype: ChanIdLocalSenderRemotelyMintedMultishot) -> Self {
+        ChanIdRemotelyMinted::new_unchecked(subtype.0)
+    }
+}
+
+impl From<ChanIdLocalSenderRemotelyMintedMultishot> for ChanIdRemotelyMintedMultishot {
+    fn from(subtype: ChanIdLocalSenderRemotelyMintedMultishot) -> Self {
+        ChanIdRemotelyMintedMultishot::new_unchecked(subtype.0)
+    }
+}
+
+impl From<ChanIdLocalSenderRemotelyMintedMultishot> for ChanIdLocalSender {
+    fn from(subtype: ChanIdLocalSenderRemotelyMintedMultishot) -> Self {
+        ChanIdLocalSender::new_unchecked(subtype.0)
+    }
+}
+
+impl From<ChanIdLocalSenderRemotelyMintedMultishot> for ChanIdLocalSenderMultishot {
+    fn from(subtype: ChanIdLocalSenderRemotelyMintedMultishot) -> Self {
+        ChanIdLocalSenderMultishot::new_unchecked(subtype.0)
+    }
+}
+
+impl From<ChanIdLocalSenderRemotelyMintedMultishot> for ChanIdLocalSenderRemotelyMinted {
+    fn from(subtype: ChanIdLocalSenderRemotelyMintedMultishot) -> Self {
+        ChanIdLocalSenderRemotelyMinted::new_unchecked(subtype.0)
+    }
+}
+
+
+/// Newtype wrapper around chan id.
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
+pub struct ChanIdLocalSenderRemotelyMintedOneshot(ChanId);
+
+impl ChanIdLocalSenderRemotelyMintedOneshot {
+    /// Construct without checking component constraints.
+    pub fn new_unchecked(chan_id: ChanId) -> Self {
+        ChanIdLocalSenderRemotelyMintedOneshot(chan_id)
+    }
+
+    /// Get channel index part.
+    pub fn idx(self) -> u64 {
+        self.0.idx()
+    }
+}
+
+impl From<ChanIdLocalSenderRemotelyMintedOneshot> for ChanId {
+    fn from(subtype: ChanIdLocalSenderRemotelyMintedOneshot) -> ChanId {
+        subtype.0
+    }
+}
+
+impl From<ChanIdLocalSenderRemotelyMintedOneshot> for ChanIdOneshot {
+    fn from(subtype: ChanIdLocalSenderRemotelyMintedOneshot) -> Self {
+        ChanIdOneshot::new_unchecked(subtype.0)
+    }
+}
+
+impl From<ChanIdLocalSenderRemotelyMintedOneshot> for ChanIdRemotelyMinted {
+    fn from(subtype: ChanIdLocalSenderRemotelyMintedOneshot) -> Self {
+        ChanIdRemotelyMinted::new_unchecked(subtype.0)
+    }
+}
+
+impl From<ChanIdLocalSenderRemotelyMintedOneshot> for ChanIdRemotelyMintedOneshot {
+    fn from(subtype: ChanIdLocalSenderRemotelyMintedOneshot) -> Self {
+        ChanIdRemotelyMintedOneshot::new_unchecked(subtype.0)
+    }
+}
+
+impl From<ChanIdLocalSenderRemotelyMintedOneshot> for ChanIdLocalSender {
+    fn from(subtype: ChanIdLocalSenderRemotelyMintedOneshot) -> Self {
+        ChanIdLocalSender::new_unchecked(subtype.0)
+    }
+}
+
+impl From<ChanIdLocalSenderRemotelyMintedOneshot> for ChanIdLocalSenderOneshot {
+    fn from(subtype: ChanIdLocalSenderRemotelyMintedOneshot) -> Self {
+        ChanIdLocalSenderOneshot::new_unchecked(subtype.0)
+    }
+}
+
+impl From<ChanIdLocalSenderRemotelyMintedOneshot> for ChanIdLocalSenderRemotelyMinted {
+    fn from(subtype: ChanIdLocalSenderRemotelyMintedOneshot) -> Self {
+        ChanIdLocalSenderRemotelyMinted::new_unchecked(subtype.0)
+    }
+}
+
+
+/// Newtype wrapper around chan id.
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
+pub struct ChanIdLocalReceiver(ChanId);
+
+impl ChanIdLocalReceiver {
+    /// Construct without checking component constraints.
+    pub fn new_unchecked(chan_id: ChanId) -> Self {
+        ChanIdLocalReceiver(chan_id)
     }
 
     /// Get minted-by part.
@@ -849,147 +957,13 @@ impl ChanIdSrm {
         self.0.minted_by()
     }
 
-    /// Get channel index part.
-    pub fn idx(self) -> u64 {
-        self.0.idx()
-    }
-}
-
-impl From<ChanIdSrm> for ChanId {
-    fn from(subtype: ChanIdSrm) -> ChanId {
-        subtype.0
-    }
-}
-
-impl From<ChanIdSrm> for ChanIdEee {
-    fn from(subtype: ChanIdSrm) -> Self {
-        ChanIdEee::new_unchecked(subtype.0)
-    }
-}
-
-impl From<ChanIdSrm> for ChanIdEem {
-    fn from(subtype: ChanIdSrm) -> Self {
-        ChanIdEem::new_unchecked(subtype.0)
-    }
-}
-
-impl From<ChanIdSrm> for ChanIdEre {
-    fn from(subtype: ChanIdSrm) -> Self {
-        ChanIdEre::new_unchecked(subtype.0)
-    }
-}
-
-impl From<ChanIdSrm> for ChanIdErm {
-    fn from(subtype: ChanIdSrm) -> Self {
-        ChanIdErm::new_unchecked(subtype.0)
-    }
-}
-
-impl From<ChanIdSrm> for ChanIdSee {
-    fn from(subtype: ChanIdSrm) -> Self {
-        ChanIdSee::new_unchecked(subtype.0)
-    }
-}
-
-impl From<ChanIdSrm> for ChanIdSem {
-    fn from(subtype: ChanIdSrm) -> Self {
-        ChanIdSem::new_unchecked(subtype.0)
-    }
-}
-
-impl From<ChanIdSrm> for ChanIdSre {
-    fn from(subtype: ChanIdSrm) -> Self {
-        ChanIdSre::new_unchecked(subtype.0)
-    }
-}
-
-
-/// Newtype wrapper around chan id.
-///
-/// - The local side is the sender
-/// - It was minted by the remote side
-/// - It is oneshot
-#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
-pub struct ChanIdSro(ChanId);
-
-impl ChanIdSro {
-    /// Construct without checking component constraints.
-    pub fn new_unchecked(chan_id: ChanId) -> Self {
-        ChanIdSro(chan_id)
-    }
-
-    /// Get minted-by part.
-    pub fn minted_by(self) -> Side {
-        self.0.minted_by()
-    }
-
-    /// Get channel index part.
-    pub fn idx(self) -> u64 {
-        self.0.idx()
-    }
-}
-
-impl From<ChanIdSro> for ChanId {
-    fn from(subtype: ChanIdSro) -> ChanId {
-        subtype.0
-    }
-}
-
-impl From<ChanIdSro> for ChanIdEee {
-    fn from(subtype: ChanIdSro) -> Self {
-        ChanIdEee::new_unchecked(subtype.0)
-    }
-}
-
-impl From<ChanIdSro> for ChanIdEeo {
-    fn from(subtype: ChanIdSro) -> Self {
-        ChanIdEeo::new_unchecked(subtype.0)
-    }
-}
-
-impl From<ChanIdSro> for ChanIdEre {
-    fn from(subtype: ChanIdSro) -> Self {
-        ChanIdEre::new_unchecked(subtype.0)
-    }
-}
-
-impl From<ChanIdSro> for ChanIdEro {
-    fn from(subtype: ChanIdSro) -> Self {
-        ChanIdEro::new_unchecked(subtype.0)
-    }
-}
-
-impl From<ChanIdSro> for ChanIdSee {
-    fn from(subtype: ChanIdSro) -> Self {
-        ChanIdSee::new_unchecked(subtype.0)
-    }
-}
-
-impl From<ChanIdSro> for ChanIdSeo {
-    fn from(subtype: ChanIdSro) -> Self {
-        ChanIdSeo::new_unchecked(subtype.0)
-    }
-}
-
-impl From<ChanIdSro> for ChanIdSre {
-    fn from(subtype: ChanIdSro) -> Self {
-        ChanIdSre::new_unchecked(subtype.0)
-    }
-}
-
-
-/// Newtype wrapper around chan id.
-///
-/// - The local side is the receiver
-/// - It may have been minted by either side
-/// - It may be either oneshot or multishot
-#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
-pub struct ChanIdRee(ChanId);
-
-impl ChanIdRee {
-    /// Construct without checking component constraints.
-    pub fn new_unchecked(chan_id: ChanId) -> Self {
-        ChanIdRee(chan_id)
+    /// Categorized this channel ID by which side minted it relative to the local side.
+    pub fn sort_by_minted_by(self, side: Side) -> SortByMintedBy<ChanIdLocalReceiverLocallyMinted, ChanIdLocalReceiverRemotelyMinted> {
+        if self.minted_by() == side {
+            SortByMintedBy::LocallyMinted(ChanIdLocalReceiverLocallyMinted::new_unchecked(self.into()))
+        } else {
+            SortByMintedBy::RemotelyMinted(ChanIdLocalReceiverRemotelyMinted::new_unchecked(self.into()))
+        }
     }
 
     /// Get is-oneshot part.
@@ -997,37 +971,13 @@ impl ChanIdRee {
         self.0.is_oneshot()
     }
 
-    /// Get channel index part.
-    pub fn idx(self) -> u64 {
-        self.0.idx()
-    }
-}
-
-impl From<ChanIdRee> for ChanId {
-    fn from(subtype: ChanIdRee) -> ChanId {
-        subtype.0
-    }
-}
-
-impl From<ChanIdRee> for ChanIdEee {
-    fn from(subtype: ChanIdRee) -> Self {
-        ChanIdEee::new_unchecked(subtype.0)
-    }
-}
-
-
-/// Newtype wrapper around chan id.
-///
-/// - The local side is the receiver
-/// - It may have been minted by either side
-/// - It is multishot
-#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
-pub struct ChanIdRem(ChanId);
-
-impl ChanIdRem {
-    /// Construct without checking component constraints.
-    pub fn new_unchecked(chan_id: ChanId) -> Self {
-        ChanIdRem(chan_id)
+    /// Categorized this channel ID by whether it is multishot.
+    pub fn sort_by_is_oneshot(self) -> SortByIsOneshot<ChanIdLocalReceiverMultishot, ChanIdLocalReceiverOneshot> {
+        if self.is_oneshot() {
+            SortByIsOneshot::Oneshot(ChanIdLocalReceiverOneshot::new_unchecked(self.into()))
+        } else {
+            SortByIsOneshot::Multishot(ChanIdLocalReceiverMultishot::new_unchecked(self.into()))
+        }
     }
 
     /// Get channel index part.
@@ -1036,93 +986,119 @@ impl ChanIdRem {
     }
 }
 
-impl From<ChanIdRem> for ChanId {
-    fn from(subtype: ChanIdRem) -> ChanId {
+impl From<ChanIdLocalReceiver> for ChanId {
+    fn from(subtype: ChanIdLocalReceiver) -> ChanId {
         subtype.0
-    }
-}
-
-impl From<ChanIdRem> for ChanIdEee {
-    fn from(subtype: ChanIdRem) -> Self {
-        ChanIdEee::new_unchecked(subtype.0)
-    }
-}
-
-impl From<ChanIdRem> for ChanIdEem {
-    fn from(subtype: ChanIdRem) -> Self {
-        ChanIdEem::new_unchecked(subtype.0)
-    }
-}
-
-impl From<ChanIdRem> for ChanIdRee {
-    fn from(subtype: ChanIdRem) -> Self {
-        ChanIdRee::new_unchecked(subtype.0)
     }
 }
 
 
 /// Newtype wrapper around chan id.
-///
-/// - The local side is the receiver
-/// - It may have been minted by either side
-/// - It is oneshot
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
-pub struct ChanIdReo(ChanId);
+pub struct ChanIdLocalReceiverMultishot(ChanId);
 
-impl ChanIdReo {
+impl ChanIdLocalReceiverMultishot {
     /// Construct without checking component constraints.
     pub fn new_unchecked(chan_id: ChanId) -> Self {
-        ChanIdReo(chan_id)
-    }
-
-    /// Get channel index part.
-    pub fn idx(self) -> u64 {
-        self.0.idx()
-    }
-}
-
-impl From<ChanIdReo> for ChanId {
-    fn from(subtype: ChanIdReo) -> ChanId {
-        subtype.0
-    }
-}
-
-impl From<ChanIdReo> for ChanIdEee {
-    fn from(subtype: ChanIdReo) -> Self {
-        ChanIdEee::new_unchecked(subtype.0)
-    }
-}
-
-impl From<ChanIdReo> for ChanIdEeo {
-    fn from(subtype: ChanIdReo) -> Self {
-        ChanIdEeo::new_unchecked(subtype.0)
-    }
-}
-
-impl From<ChanIdReo> for ChanIdRee {
-    fn from(subtype: ChanIdReo) -> Self {
-        ChanIdRee::new_unchecked(subtype.0)
-    }
-}
-
-
-/// Newtype wrapper around chan id.
-///
-/// - The local side is the receiver
-/// - It was minted by the local side
-/// - It may be either oneshot or multishot
-#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
-pub struct ChanIdRle(ChanId);
-
-impl ChanIdRle {
-    /// Construct without checking component constraints.
-    pub fn new_unchecked(chan_id: ChanId) -> Self {
-        ChanIdRle(chan_id)
+        ChanIdLocalReceiverMultishot(chan_id)
     }
 
     /// Get minted-by part.
     pub fn minted_by(self) -> Side {
         self.0.minted_by()
+    }
+
+    /// Categorized this channel ID by which side minted it relative to the local side.
+    pub fn sort_by_minted_by(self, side: Side) -> SortByMintedBy<ChanIdLocalReceiverLocallyMintedMultishot, ChanIdLocalReceiverRemotelyMintedMultishot> {
+        if self.minted_by() == side {
+            SortByMintedBy::LocallyMinted(ChanIdLocalReceiverLocallyMintedMultishot::new_unchecked(self.into()))
+        } else {
+            SortByMintedBy::RemotelyMinted(ChanIdLocalReceiverRemotelyMintedMultishot::new_unchecked(self.into()))
+        }
+    }
+
+    /// Get channel index part.
+    pub fn idx(self) -> u64 {
+        self.0.idx()
+    }
+}
+
+impl From<ChanIdLocalReceiverMultishot> for ChanId {
+    fn from(subtype: ChanIdLocalReceiverMultishot) -> ChanId {
+        subtype.0
+    }
+}
+
+impl From<ChanIdLocalReceiverMultishot> for ChanIdMultishot {
+    fn from(subtype: ChanIdLocalReceiverMultishot) -> Self {
+        ChanIdMultishot::new_unchecked(subtype.0)
+    }
+}
+
+impl From<ChanIdLocalReceiverMultishot> for ChanIdLocalReceiver {
+    fn from(subtype: ChanIdLocalReceiverMultishot) -> Self {
+        ChanIdLocalReceiver::new_unchecked(subtype.0)
+    }
+}
+
+
+/// Newtype wrapper around chan id.
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
+pub struct ChanIdLocalReceiverOneshot(ChanId);
+
+impl ChanIdLocalReceiverOneshot {
+    /// Construct without checking component constraints.
+    pub fn new_unchecked(chan_id: ChanId) -> Self {
+        ChanIdLocalReceiverOneshot(chan_id)
+    }
+
+    /// Get minted-by part.
+    pub fn minted_by(self) -> Side {
+        self.0.minted_by()
+    }
+
+    /// Categorized this channel ID by which side minted it relative to the local side.
+    pub fn sort_by_minted_by(self, side: Side) -> SortByMintedBy<ChanIdLocalReceiverLocallyMintedOneshot, ChanIdLocalReceiverRemotelyMintedOneshot> {
+        if self.minted_by() == side {
+            SortByMintedBy::LocallyMinted(ChanIdLocalReceiverLocallyMintedOneshot::new_unchecked(self.into()))
+        } else {
+            SortByMintedBy::RemotelyMinted(ChanIdLocalReceiverRemotelyMintedOneshot::new_unchecked(self.into()))
+        }
+    }
+
+    /// Get channel index part.
+    pub fn idx(self) -> u64 {
+        self.0.idx()
+    }
+}
+
+impl From<ChanIdLocalReceiverOneshot> for ChanId {
+    fn from(subtype: ChanIdLocalReceiverOneshot) -> ChanId {
+        subtype.0
+    }
+}
+
+impl From<ChanIdLocalReceiverOneshot> for ChanIdOneshot {
+    fn from(subtype: ChanIdLocalReceiverOneshot) -> Self {
+        ChanIdOneshot::new_unchecked(subtype.0)
+    }
+}
+
+impl From<ChanIdLocalReceiverOneshot> for ChanIdLocalReceiver {
+    fn from(subtype: ChanIdLocalReceiverOneshot) -> Self {
+        ChanIdLocalReceiver::new_unchecked(subtype.0)
+    }
+}
+
+
+/// Newtype wrapper around chan id.
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
+pub struct ChanIdLocalReceiverLocallyMinted(ChanId);
+
+impl ChanIdLocalReceiverLocallyMinted {
+    /// Construct without checking component constraints.
+    pub fn new_unchecked(chan_id: ChanId) -> Self {
+        ChanIdLocalReceiverLocallyMinted(chan_id)
     }
 
     /// Get is-oneshot part.
@@ -1130,54 +1106,13 @@ impl ChanIdRle {
         self.0.is_oneshot()
     }
 
-    /// Get channel index part.
-    pub fn idx(self) -> u64 {
-        self.0.idx()
-    }
-}
-
-impl From<ChanIdRle> for ChanId {
-    fn from(subtype: ChanIdRle) -> ChanId {
-        subtype.0
-    }
-}
-
-impl From<ChanIdRle> for ChanIdEee {
-    fn from(subtype: ChanIdRle) -> Self {
-        ChanIdEee::new_unchecked(subtype.0)
-    }
-}
-
-impl From<ChanIdRle> for ChanIdEle {
-    fn from(subtype: ChanIdRle) -> Self {
-        ChanIdEle::new_unchecked(subtype.0)
-    }
-}
-
-impl From<ChanIdRle> for ChanIdRee {
-    fn from(subtype: ChanIdRle) -> Self {
-        ChanIdRee::new_unchecked(subtype.0)
-    }
-}
-
-
-/// Newtype wrapper around chan id.
-///
-/// - The local side is the receiver
-/// - It was minted by the local side
-/// - It is multishot
-#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
-pub struct ChanIdRlm(ChanId);
-
-impl ChanIdRlm {
-    /// Construct without checking component constraints.
-    pub fn new_unchecked(chan_id: ChanId) -> Self {
-        ChanIdRlm(chan_id)
-    }
-
-    /// Get minted-by part.
-    pub fn minted_by(self) -> Side {
-        self.0.minted_by()
+    /// Categorized this channel ID by whether it is multishot.
+    pub fn sort_by_is_oneshot(self) -> SortByIsOneshot<ChanIdLocalReceiverLocallyMintedMultishot, ChanIdLocalReceiverLocallyMintedOneshot> {
+        if self.is_oneshot() {
+            SortByIsOneshot::Oneshot(ChanIdLocalReceiverLocallyMintedOneshot::new_unchecked(self.into()))
+        } else {
+            SortByIsOneshot::Multishot(ChanIdLocalReceiverLocallyMintedMultishot::new_unchecked(self.into()))
+        }
     }
 
     /// Get channel index part.
@@ -1186,72 +1121,33 @@ impl ChanIdRlm {
     }
 }
 
-impl From<ChanIdRlm> for ChanId {
-    fn from(subtype: ChanIdRlm) -> ChanId {
+impl From<ChanIdLocalReceiverLocallyMinted> for ChanId {
+    fn from(subtype: ChanIdLocalReceiverLocallyMinted) -> ChanId {
         subtype.0
     }
 }
 
-impl From<ChanIdRlm> for ChanIdEee {
-    fn from(subtype: ChanIdRlm) -> Self {
-        ChanIdEee::new_unchecked(subtype.0)
+impl From<ChanIdLocalReceiverLocallyMinted> for ChanIdLocallyMinted {
+    fn from(subtype: ChanIdLocalReceiverLocallyMinted) -> Self {
+        ChanIdLocallyMinted::new_unchecked(subtype.0)
     }
 }
 
-impl From<ChanIdRlm> for ChanIdEem {
-    fn from(subtype: ChanIdRlm) -> Self {
-        ChanIdEem::new_unchecked(subtype.0)
-    }
-}
-
-impl From<ChanIdRlm> for ChanIdEle {
-    fn from(subtype: ChanIdRlm) -> Self {
-        ChanIdEle::new_unchecked(subtype.0)
-    }
-}
-
-impl From<ChanIdRlm> for ChanIdElm {
-    fn from(subtype: ChanIdRlm) -> Self {
-        ChanIdElm::new_unchecked(subtype.0)
-    }
-}
-
-impl From<ChanIdRlm> for ChanIdRee {
-    fn from(subtype: ChanIdRlm) -> Self {
-        ChanIdRee::new_unchecked(subtype.0)
-    }
-}
-
-impl From<ChanIdRlm> for ChanIdRem {
-    fn from(subtype: ChanIdRlm) -> Self {
-        ChanIdRem::new_unchecked(subtype.0)
-    }
-}
-
-impl From<ChanIdRlm> for ChanIdRle {
-    fn from(subtype: ChanIdRlm) -> Self {
-        ChanIdRle::new_unchecked(subtype.0)
+impl From<ChanIdLocalReceiverLocallyMinted> for ChanIdLocalReceiver {
+    fn from(subtype: ChanIdLocalReceiverLocallyMinted) -> Self {
+        ChanIdLocalReceiver::new_unchecked(subtype.0)
     }
 }
 
 
 /// Newtype wrapper around chan id.
-///
-/// - The local side is the receiver
-/// - It was minted by the local side
-/// - It is oneshot
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
-pub struct ChanIdRlo(ChanId);
+pub struct ChanIdLocalReceiverLocallyMintedMultishot(ChanId);
 
-impl ChanIdRlo {
+impl ChanIdLocalReceiverLocallyMintedMultishot {
     /// Construct without checking component constraints.
     pub fn new_unchecked(chan_id: ChanId) -> Self {
-        ChanIdRlo(chan_id)
-    }
-
-    /// Get minted-by part.
-    pub fn minted_by(self) -> Side {
-        self.0.minted_by()
+        ChanIdLocalReceiverLocallyMintedMultishot(chan_id)
     }
 
     /// Get channel index part.
@@ -1260,72 +1156,116 @@ impl ChanIdRlo {
     }
 }
 
-impl From<ChanIdRlo> for ChanId {
-    fn from(subtype: ChanIdRlo) -> ChanId {
+impl From<ChanIdLocalReceiverLocallyMintedMultishot> for ChanId {
+    fn from(subtype: ChanIdLocalReceiverLocallyMintedMultishot) -> ChanId {
         subtype.0
     }
 }
 
-impl From<ChanIdRlo> for ChanIdEee {
-    fn from(subtype: ChanIdRlo) -> Self {
-        ChanIdEee::new_unchecked(subtype.0)
+impl From<ChanIdLocalReceiverLocallyMintedMultishot> for ChanIdMultishot {
+    fn from(subtype: ChanIdLocalReceiverLocallyMintedMultishot) -> Self {
+        ChanIdMultishot::new_unchecked(subtype.0)
     }
 }
 
-impl From<ChanIdRlo> for ChanIdEeo {
-    fn from(subtype: ChanIdRlo) -> Self {
-        ChanIdEeo::new_unchecked(subtype.0)
+impl From<ChanIdLocalReceiverLocallyMintedMultishot> for ChanIdLocallyMinted {
+    fn from(subtype: ChanIdLocalReceiverLocallyMintedMultishot) -> Self {
+        ChanIdLocallyMinted::new_unchecked(subtype.0)
     }
 }
 
-impl From<ChanIdRlo> for ChanIdEle {
-    fn from(subtype: ChanIdRlo) -> Self {
-        ChanIdEle::new_unchecked(subtype.0)
+impl From<ChanIdLocalReceiverLocallyMintedMultishot> for ChanIdLocallyMintedMultishot {
+    fn from(subtype: ChanIdLocalReceiverLocallyMintedMultishot) -> Self {
+        ChanIdLocallyMintedMultishot::new_unchecked(subtype.0)
     }
 }
 
-impl From<ChanIdRlo> for ChanIdElo {
-    fn from(subtype: ChanIdRlo) -> Self {
-        ChanIdElo::new_unchecked(subtype.0)
+impl From<ChanIdLocalReceiverLocallyMintedMultishot> for ChanIdLocalReceiver {
+    fn from(subtype: ChanIdLocalReceiverLocallyMintedMultishot) -> Self {
+        ChanIdLocalReceiver::new_unchecked(subtype.0)
     }
 }
 
-impl From<ChanIdRlo> for ChanIdRee {
-    fn from(subtype: ChanIdRlo) -> Self {
-        ChanIdRee::new_unchecked(subtype.0)
+impl From<ChanIdLocalReceiverLocallyMintedMultishot> for ChanIdLocalReceiverMultishot {
+    fn from(subtype: ChanIdLocalReceiverLocallyMintedMultishot) -> Self {
+        ChanIdLocalReceiverMultishot::new_unchecked(subtype.0)
     }
 }
 
-impl From<ChanIdRlo> for ChanIdReo {
-    fn from(subtype: ChanIdRlo) -> Self {
-        ChanIdReo::new_unchecked(subtype.0)
-    }
-}
-
-impl From<ChanIdRlo> for ChanIdRle {
-    fn from(subtype: ChanIdRlo) -> Self {
-        ChanIdRle::new_unchecked(subtype.0)
+impl From<ChanIdLocalReceiverLocallyMintedMultishot> for ChanIdLocalReceiverLocallyMinted {
+    fn from(subtype: ChanIdLocalReceiverLocallyMintedMultishot) -> Self {
+        ChanIdLocalReceiverLocallyMinted::new_unchecked(subtype.0)
     }
 }
 
 
 /// Newtype wrapper around chan id.
-///
-/// - The local side is the receiver
-/// - It was minted by the remote side
-/// - It may be either oneshot or multishot
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
-pub struct ChanIdRre(ChanId);
+pub struct ChanIdLocalReceiverLocallyMintedOneshot(ChanId);
 
-impl ChanIdRre {
+impl ChanIdLocalReceiverLocallyMintedOneshot {
     /// Construct without checking component constraints.
     pub fn new_unchecked(chan_id: ChanId) -> Self {
-        ChanIdRre(chan_id)
+        ChanIdLocalReceiverLocallyMintedOneshot(chan_id)
     }
 
-    /// Get minted-by part.
-    pub fn minted_by(self) -> Side {
-        self.0.minted_by()
+    /// Get channel index part.
+    pub fn idx(self) -> u64 {
+        self.0.idx()
+    }
+}
+
+impl From<ChanIdLocalReceiverLocallyMintedOneshot> for ChanId {
+    fn from(subtype: ChanIdLocalReceiverLocallyMintedOneshot) -> ChanId {
+        subtype.0
+    }
+}
+
+impl From<ChanIdLocalReceiverLocallyMintedOneshot> for ChanIdOneshot {
+    fn from(subtype: ChanIdLocalReceiverLocallyMintedOneshot) -> Self {
+        ChanIdOneshot::new_unchecked(subtype.0)
+    }
+}
+
+impl From<ChanIdLocalReceiverLocallyMintedOneshot> for ChanIdLocallyMinted {
+    fn from(subtype: ChanIdLocalReceiverLocallyMintedOneshot) -> Self {
+        ChanIdLocallyMinted::new_unchecked(subtype.0)
+    }
+}
+
+impl From<ChanIdLocalReceiverLocallyMintedOneshot> for ChanIdLocallyMintedOneshot {
+    fn from(subtype: ChanIdLocalReceiverLocallyMintedOneshot) -> Self {
+        ChanIdLocallyMintedOneshot::new_unchecked(subtype.0)
+    }
+}
+
+impl From<ChanIdLocalReceiverLocallyMintedOneshot> for ChanIdLocalReceiver {
+    fn from(subtype: ChanIdLocalReceiverLocallyMintedOneshot) -> Self {
+        ChanIdLocalReceiver::new_unchecked(subtype.0)
+    }
+}
+
+impl From<ChanIdLocalReceiverLocallyMintedOneshot> for ChanIdLocalReceiverOneshot {
+    fn from(subtype: ChanIdLocalReceiverLocallyMintedOneshot) -> Self {
+        ChanIdLocalReceiverOneshot::new_unchecked(subtype.0)
+    }
+}
+
+impl From<ChanIdLocalReceiverLocallyMintedOneshot> for ChanIdLocalReceiverLocallyMinted {
+    fn from(subtype: ChanIdLocalReceiverLocallyMintedOneshot) -> Self {
+        ChanIdLocalReceiverLocallyMinted::new_unchecked(subtype.0)
+    }
+}
+
+
+/// Newtype wrapper around chan id.
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
+pub struct ChanIdLocalReceiverRemotelyMinted(ChanId);
+
+impl ChanIdLocalReceiverRemotelyMinted {
+    /// Construct without checking component constraints.
+    pub fn new_unchecked(chan_id: ChanId) -> Self {
+        ChanIdLocalReceiverRemotelyMinted(chan_id)
     }
 
     /// Get is-oneshot part.
@@ -1333,54 +1273,48 @@ impl ChanIdRre {
         self.0.is_oneshot()
     }
 
+    /// Categorized this channel ID by whether it is multishot.
+    pub fn sort_by_is_oneshot(self) -> SortByIsOneshot<ChanIdLocalReceiverRemotelyMintedMultishot, ChanIdLocalReceiverRemotelyMintedOneshot> {
+        if self.is_oneshot() {
+            SortByIsOneshot::Oneshot(ChanIdLocalReceiverRemotelyMintedOneshot::new_unchecked(self.into()))
+        } else {
+            SortByIsOneshot::Multishot(ChanIdLocalReceiverRemotelyMintedMultishot::new_unchecked(self.into()))
+        }
+    }
+
     /// Get channel index part.
     pub fn idx(self) -> u64 {
         self.0.idx()
     }
 }
 
-impl From<ChanIdRre> for ChanId {
-    fn from(subtype: ChanIdRre) -> ChanId {
+impl From<ChanIdLocalReceiverRemotelyMinted> for ChanId {
+    fn from(subtype: ChanIdLocalReceiverRemotelyMinted) -> ChanId {
         subtype.0
     }
 }
 
-impl From<ChanIdRre> for ChanIdEee {
-    fn from(subtype: ChanIdRre) -> Self {
-        ChanIdEee::new_unchecked(subtype.0)
+impl From<ChanIdLocalReceiverRemotelyMinted> for ChanIdRemotelyMinted {
+    fn from(subtype: ChanIdLocalReceiverRemotelyMinted) -> Self {
+        ChanIdRemotelyMinted::new_unchecked(subtype.0)
     }
 }
 
-impl From<ChanIdRre> for ChanIdEre {
-    fn from(subtype: ChanIdRre) -> Self {
-        ChanIdEre::new_unchecked(subtype.0)
-    }
-}
-
-impl From<ChanIdRre> for ChanIdRee {
-    fn from(subtype: ChanIdRre) -> Self {
-        ChanIdRee::new_unchecked(subtype.0)
+impl From<ChanIdLocalReceiverRemotelyMinted> for ChanIdLocalReceiver {
+    fn from(subtype: ChanIdLocalReceiverRemotelyMinted) -> Self {
+        ChanIdLocalReceiver::new_unchecked(subtype.0)
     }
 }
 
 
 /// Newtype wrapper around chan id.
-///
-/// - The local side is the receiver
-/// - It was minted by the remote side
-/// - It is multishot
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
-pub struct ChanIdRrm(ChanId);
+pub struct ChanIdLocalReceiverRemotelyMintedMultishot(ChanId);
 
-impl ChanIdRrm {
+impl ChanIdLocalReceiverRemotelyMintedMultishot {
     /// Construct without checking component constraints.
     pub fn new_unchecked(chan_id: ChanId) -> Self {
-        ChanIdRrm(chan_id)
-    }
-
-    /// Get minted-by part.
-    pub fn minted_by(self) -> Side {
-        self.0.minted_by()
+        ChanIdLocalReceiverRemotelyMintedMultishot(chan_id)
     }
 
     /// Get channel index part.
@@ -1389,72 +1323,57 @@ impl ChanIdRrm {
     }
 }
 
-impl From<ChanIdRrm> for ChanId {
-    fn from(subtype: ChanIdRrm) -> ChanId {
+impl From<ChanIdLocalReceiverRemotelyMintedMultishot> for ChanId {
+    fn from(subtype: ChanIdLocalReceiverRemotelyMintedMultishot) -> ChanId {
         subtype.0
     }
 }
 
-impl From<ChanIdRrm> for ChanIdEee {
-    fn from(subtype: ChanIdRrm) -> Self {
-        ChanIdEee::new_unchecked(subtype.0)
+impl From<ChanIdLocalReceiverRemotelyMintedMultishot> for ChanIdMultishot {
+    fn from(subtype: ChanIdLocalReceiverRemotelyMintedMultishot) -> Self {
+        ChanIdMultishot::new_unchecked(subtype.0)
     }
 }
 
-impl From<ChanIdRrm> for ChanIdEem {
-    fn from(subtype: ChanIdRrm) -> Self {
-        ChanIdEem::new_unchecked(subtype.0)
+impl From<ChanIdLocalReceiverRemotelyMintedMultishot> for ChanIdRemotelyMinted {
+    fn from(subtype: ChanIdLocalReceiverRemotelyMintedMultishot) -> Self {
+        ChanIdRemotelyMinted::new_unchecked(subtype.0)
     }
 }
 
-impl From<ChanIdRrm> for ChanIdEre {
-    fn from(subtype: ChanIdRrm) -> Self {
-        ChanIdEre::new_unchecked(subtype.0)
+impl From<ChanIdLocalReceiverRemotelyMintedMultishot> for ChanIdRemotelyMintedMultishot {
+    fn from(subtype: ChanIdLocalReceiverRemotelyMintedMultishot) -> Self {
+        ChanIdRemotelyMintedMultishot::new_unchecked(subtype.0)
     }
 }
 
-impl From<ChanIdRrm> for ChanIdErm {
-    fn from(subtype: ChanIdRrm) -> Self {
-        ChanIdErm::new_unchecked(subtype.0)
+impl From<ChanIdLocalReceiverRemotelyMintedMultishot> for ChanIdLocalReceiver {
+    fn from(subtype: ChanIdLocalReceiverRemotelyMintedMultishot) -> Self {
+        ChanIdLocalReceiver::new_unchecked(subtype.0)
     }
 }
 
-impl From<ChanIdRrm> for ChanIdRee {
-    fn from(subtype: ChanIdRrm) -> Self {
-        ChanIdRee::new_unchecked(subtype.0)
+impl From<ChanIdLocalReceiverRemotelyMintedMultishot> for ChanIdLocalReceiverMultishot {
+    fn from(subtype: ChanIdLocalReceiverRemotelyMintedMultishot) -> Self {
+        ChanIdLocalReceiverMultishot::new_unchecked(subtype.0)
     }
 }
 
-impl From<ChanIdRrm> for ChanIdRem {
-    fn from(subtype: ChanIdRrm) -> Self {
-        ChanIdRem::new_unchecked(subtype.0)
-    }
-}
-
-impl From<ChanIdRrm> for ChanIdRre {
-    fn from(subtype: ChanIdRrm) -> Self {
-        ChanIdRre::new_unchecked(subtype.0)
+impl From<ChanIdLocalReceiverRemotelyMintedMultishot> for ChanIdLocalReceiverRemotelyMinted {
+    fn from(subtype: ChanIdLocalReceiverRemotelyMintedMultishot) -> Self {
+        ChanIdLocalReceiverRemotelyMinted::new_unchecked(subtype.0)
     }
 }
 
 
 /// Newtype wrapper around chan id.
-///
-/// - The local side is the receiver
-/// - It was minted by the remote side
-/// - It is oneshot
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
-pub struct ChanIdRro(ChanId);
+pub struct ChanIdLocalReceiverRemotelyMintedOneshot(ChanId);
 
-impl ChanIdRro {
+impl ChanIdLocalReceiverRemotelyMintedOneshot {
     /// Construct without checking component constraints.
     pub fn new_unchecked(chan_id: ChanId) -> Self {
-        ChanIdRro(chan_id)
-    }
-
-    /// Get minted-by part.
-    pub fn minted_by(self) -> Side {
-        self.0.minted_by()
+        ChanIdLocalReceiverRemotelyMintedOneshot(chan_id)
     }
 
     /// Get channel index part.
@@ -1463,51 +1382,52 @@ impl ChanIdRro {
     }
 }
 
-impl From<ChanIdRro> for ChanId {
-    fn from(subtype: ChanIdRro) -> ChanId {
+impl From<ChanIdLocalReceiverRemotelyMintedOneshot> for ChanId {
+    fn from(subtype: ChanIdLocalReceiverRemotelyMintedOneshot) -> ChanId {
         subtype.0
     }
 }
 
-impl From<ChanIdRro> for ChanIdEee {
-    fn from(subtype: ChanIdRro) -> Self {
-        ChanIdEee::new_unchecked(subtype.0)
+impl From<ChanIdLocalReceiverRemotelyMintedOneshot> for ChanIdOneshot {
+    fn from(subtype: ChanIdLocalReceiverRemotelyMintedOneshot) -> Self {
+        ChanIdOneshot::new_unchecked(subtype.0)
     }
 }
 
-impl From<ChanIdRro> for ChanIdEeo {
-    fn from(subtype: ChanIdRro) -> Self {
-        ChanIdEeo::new_unchecked(subtype.0)
+impl From<ChanIdLocalReceiverRemotelyMintedOneshot> for ChanIdRemotelyMinted {
+    fn from(subtype: ChanIdLocalReceiverRemotelyMintedOneshot) -> Self {
+        ChanIdRemotelyMinted::new_unchecked(subtype.0)
     }
 }
 
-impl From<ChanIdRro> for ChanIdEre {
-    fn from(subtype: ChanIdRro) -> Self {
-        ChanIdEre::new_unchecked(subtype.0)
+impl From<ChanIdLocalReceiverRemotelyMintedOneshot> for ChanIdRemotelyMintedOneshot {
+    fn from(subtype: ChanIdLocalReceiverRemotelyMintedOneshot) -> Self {
+        ChanIdRemotelyMintedOneshot::new_unchecked(subtype.0)
     }
 }
 
-impl From<ChanIdRro> for ChanIdEro {
-    fn from(subtype: ChanIdRro) -> Self {
-        ChanIdEro::new_unchecked(subtype.0)
+impl From<ChanIdLocalReceiverRemotelyMintedOneshot> for ChanIdLocalReceiver {
+    fn from(subtype: ChanIdLocalReceiverRemotelyMintedOneshot) -> Self {
+        ChanIdLocalReceiver::new_unchecked(subtype.0)
     }
 }
 
-impl From<ChanIdRro> for ChanIdRee {
-    fn from(subtype: ChanIdRro) -> Self {
-        ChanIdRee::new_unchecked(subtype.0)
+impl From<ChanIdLocalReceiverRemotelyMintedOneshot> for ChanIdLocalReceiverOneshot {
+    fn from(subtype: ChanIdLocalReceiverRemotelyMintedOneshot) -> Self {
+        ChanIdLocalReceiverOneshot::new_unchecked(subtype.0)
     }
 }
 
-impl From<ChanIdRro> for ChanIdReo {
-    fn from(subtype: ChanIdRro) -> Self {
-        ChanIdReo::new_unchecked(subtype.0)
+impl From<ChanIdLocalReceiverRemotelyMintedOneshot> for ChanIdLocalReceiverRemotelyMinted {
+    fn from(subtype: ChanIdLocalReceiverRemotelyMintedOneshot) -> Self {
+        ChanIdLocalReceiverRemotelyMinted::new_unchecked(subtype.0)
     }
 }
 
-impl From<ChanIdRro> for ChanIdRre {
-    fn from(subtype: ChanIdRro) -> Self {
-        ChanIdRre::new_unchecked(subtype.0)
-    }
-}
+
+/// Typed version of the entrypoint channel constant from the cilent perspective.
+pub const CLIENT_ENTRYPOINT: ChanIdLocalSenderLocallyMintedMultishot = ChanIdLocalSenderLocallyMintedMultishot(ChanId::ENTRYPOINT);
+
+/// Typed version of the entrypoint channel constant from the cilent perspective.
+pub const SERVER_ENTRYPOINT: ChanIdLocalReceiverRemotelyMintedMultishot = ChanIdLocalReceiverRemotelyMintedMultishot(ChanId::ENTRYPOINT);
 

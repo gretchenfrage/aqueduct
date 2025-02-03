@@ -361,14 +361,14 @@ impl Message {
     }
 
     /// Read the `sent_on` field.
-    pub async fn sent_on(mut self) -> ResetResult<(Message2, ChanIdRee)> {
+    pub async fn sent_on(mut self) -> ResetResult<(Message2, ChanIdLocalReceiver)> {
         let o = self.0.read_chan_id().await?;
-        if o.dir().side_to() != self.0.side {
+        let SortByDir::LocalReceiver(o) = o.sort_by_dir(self.0.side) else {
             return Err(anyhow!(
                 "received Message frame with sent_on field in wrong direction"
             ).into());
-        }
-        Ok((Message2(self.0), ChanIdRee::new_unchecked(o)))
+        };
+        Ok((Message2(self.0), o))
     }
 }
 
@@ -402,17 +402,17 @@ pub struct Message4(QuicReader, usize);
 
 impl Message4 {
     /// Read the next element of the `attachments` field, or return `None` if there are no more.
-    pub async fn next_attachment(&mut self) -> ResetResult<Option<ChanIdEre>> {
+    pub async fn next_attachment(&mut self) -> ResetResult<Option<ChanIdRemotelyMinted>> {
         if self.1 == 0 {
             return Ok(None);
         }
         let o = ChanId(self.0.read_vli_with_limit(Some(&mut self.1)).await?);
-        if o.minted_by() == self.0.side {
+        let SortByMintedBy::RemotelyMinted(o) = o.sort_by_minted_by(self.0.side) else {
             return Err(anyhow!(
                 "received Message frame with attached channel minted by wrong side"
             ).into());
-        }
-        Ok(Some(ChanId(o)))
+        };
+        Ok(Some(o))
     }
 
     /// Stop reading the `attachments` field. Panics if there are un-read attachments.
@@ -544,10 +544,11 @@ impl ChannelControl {
     /// Read the `channel_id` field.
     pub async fn chan_id(mut self) -> ResetResult<ChanCtrlFrames> {
         let o = self.0.read_chan_id().await?;
-        Ok(if o.dir().side_to() == self.0.side {
-            ChanCtrlFrames::Receiver(ReceiverChanCtrlFrames(self.0), ReceiverChanId(o))
-        } else {
-            ChanCtrlFrames::Sender(SenderChanCtrlFrames(self.0), SenderChanId(o))
+        Ok(match o.sort_by_dir(self.0.side) {
+            SortByDir::LocalSender(o) =>
+                ChanCtrlFrames::Sender(SenderChanCtrlFrames(self.0), o),
+            SortByDir::LocalReceiver(o) =>
+                ChanCtrlFrames::Receiver(ReceiverChanCtrlFrames(self.0), o),
         })
     }
 }
@@ -556,9 +557,9 @@ impl ChannelControl {
 #[must_use]
 pub enum ChanCtrlFrames {
     /// The local side is the sender side of the channel.
-    Sender(SenderChanCtrlFrames, SenderChanId),
+    Sender(SenderChanCtrlFrames, ChanIdLocalSender),
     /// The local side is the receiver side of the channel.
-    Receiver(ReceiverChanCtrlFrames, ReceiverChanId),
+    Receiver(ReceiverChanCtrlFrames, ChanIdLocalReceiver),
 }
 
 /// Typed API for reading Aqueduct frames from a channel control stream for which the local side is
