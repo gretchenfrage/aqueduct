@@ -125,6 +125,15 @@ impl Into<MultiBytes> for Writer {
 pub struct Frames(Writer);
 
 impl Frames {
+    /// Construct, encoding a Version frame if must_send_version is true, but otherwise empty.
+    pub fn new_with_version_if(must_send_version: &Arc<AtomicBool>) -> Self {
+        let mut frames = Frames::default();
+        if must_send_version.load(Relaxed) {
+            frames.version();
+        }
+        frames
+    }
+
     /// Send bytes written to `self` on an existing QUIC stream.
     pub async fn send_on_stream(self, stream: &mut SendStream) -> Result<()> {
         self.0.send_on_stream(stream).await
@@ -148,13 +157,6 @@ impl Frames {
         self.0.write(&VERSION_FRAME_MAGIC_BYTES);
         self.0.write(&VERSION_FRAME_HUMAN_TEXT);
         self.0.write_vlba(VERSION);
-    }
-
-    /// Encode a Version frame to `self` if `must_send_version` is true.
-    pub fn version_if(&mut self, must_send_version: &Arc<AtomicBool>) {
-        if must_send_version.load(Relaxed) {
-            self.version();
-        }
     }
 
     /// Encode a ConnectionControl frame to `self`.
