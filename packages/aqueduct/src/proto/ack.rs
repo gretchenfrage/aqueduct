@@ -156,7 +156,7 @@ impl TreeAckRanges {
     /// Get the first integer that is not within a range. 
     ///
     /// O(1).
-    fn first_unacked_point(&self) -> u64 {
+    fn first_unacked(&self) -> u64 {
         self.0.iter()
             .next()
             .filter(|&(ref a, _)| a.get() == 0)
@@ -315,5 +315,129 @@ impl ReceiverUnreliableAckManager {
                 }
             }),
         ));
+    }
+
+    /// Whether self is blocking a receiver from finishing, assuming it's in the finishing state.
+    pub fn not_blocking_finish(&self) -> bool {
+        debug_assert!(self.ack_nacked_below <= self.highest_seen_plus_1);
+        self.ack_nacked_below == self.highest_seen_plus_1
+    }
+
+    /// Ack all unreliable messages nums received and not yet acked, possibly nacking message nums
+    /// not yet received if there are holes. Self should not be used after, or unspecified behavior
+    /// results.
+    pub async fn final_ack_nack(&mut self, send_stream: &mut quinn::SendStream) -> Result<()> {
+        let mut w = write::Frames::default();
+        let mut pnr = write::PosNegRanges::default();
+        for r in [&mut self.unacked_below_set_timer, &mut self.unacked_not_below_set_timer]
+            .into_iter()
+            .flat_map(|unacked| unacked.sort_merge_drain())
+        {
+            let (a, b) = r?;
+            debug_assert!(b >= a);
+            debug_assert!(a >= self.ack_nacked_below);
+            pnr.neg_delta(a - self.ack_nacked_below);
+            pnr.pos_delta(b - a + 1);            
+            self.ack_nacked_below = b + 1;
+        }
+        w.ack_nack_unreliable(pnr);
+        w.send_on_stream(send_stream).await?;
+        Ok(())
+    }
+}
+
+
+/// Receiver-side manager for acking and nacking reliable messages.
+#[derive(Default, Debug)]
+pub struct ReceiverReliableAckManager {
+    /// All reliable message nums we have received and acked
+    acked: TreeAckRanges,
+    /// All reliable message nums we have received and not acked.
+    unacked: VecAckRanges,
+    /// Some if we currently have the timer set.
+    set_timer: Option<AbortOnDrop>,
+}
+
+impl ReceiverReliableAckManager {
+    /// Mark a reliable message number as being received, so that it will be acked in the future.
+    pub fn on_receive(
+        &mut self,
+        n: u64,
+        send_ctrl_task_msg: &TokioUnboundedSender<ReceiverCtrlTaskMsg>,
+        send_stream_is_some: bool,
+    ) -> Result<()> {
+        ensure!(n < u64::MAX, "remote message num too high");
+
+        self.unacked.add_point(n);
+        if self.set_timer.is_none() && send_stream_is_some {
+            self.start_timer(send_ctrl_task_msg);
+        }
+        Ok(())
+    }
+
+    /// Call upon receiving a `ReliableAckTimer` task message (self may send it to itself).
+    pub async fn on_timer_event(
+        &mut self,
+        send_stream: &mut Option<quinn::SendStream>,
+    ) -> Result<()> {
+        // unwrap safety: we only start the ack timer when send_stream is Some.
+        let send_stream = send_stream.as_mut().unwrap();
+        debug_assert!(self.set_timer.is_some());
+        self.set_timer = None;
+
+        self.ack_unacked(send_stream).await?;
+
+        Ok(())
+    }
+
+    /// Call upon `send_stream` transitioning from `None` to `Some`, if it was previously `None`.
+    pub fn on_ctrl_stream_opened(
+        &mut self,
+        send_ctrl_task_msg: &TokioUnboundedSender<ReceiverCtrlTaskMsg>,
+    ) {
+        debug_assert!(self.set_timer.is_none());
+        if !self.unacked.is_empty() {
+            self.start_timer(send_ctrl_task_msg);
+        }
+    }
+
+    fn start_timer(&mut self, send_ctrl_task_msg: &TokioUnboundedSender<ReceiverCtrlTaskMsg>) {
+        debug_assert!(self.set_timer.is_none());
+        self.set_timer = Some(AbortOnDrop::spawn({
+            let send_ctrl_task_msg = send_ctrl_task_msg.clone();
+            async move {
+                sleep(Duration::from_secs(1)).await;
+                let _ = send_ctrl_task_msg.send(ReceiverCtrlTaskMsg::ReliableAckTimer);
+            }
+        }));
+    }
+
+    /// Ack all reliable message nums received and not yet acked.
+    async fn ack_unacked(&mut self, send_stream: &mut quinn::SendStream) -> Result<()> {
+        let mut w = write::Frames::default();
+        let mut pnr = write::PosNegRanges::default();
+        let mut base = self.acked.first_unacked();
+        for r in self.unacked.sort_merge_drain() {
+            let (a, b) = r?;
+            self.acked.add_range(a, b)?;
+            debug_assert!(b >= a);
+            debug_assert!(a >= base);
+            pnr.neg_delta(a - base);
+            pnr.pos_delta(b - a + 1);
+            base = b + 1;
+        }
+        w.ack_reliable(pnr);
+        w.send_on_stream(send_stream).await?;
+        Ok(())
+    }
+
+    /// Whether self is blocking a receiver from finishing, assuming it's in the finishing state.
+    pub fn not_blocking_finish(&self, reliable_count: u64) -> bool {
+        self.acked.first_unacked() == reliable_count
+    }
+
+    /// Ack all reliable message nums received and not yet acked.
+    pub async fn final_ack(mut self, send_stream: &mut quinn::SendStream) -> Result<()> {
+        self.ack_unacked(send_stream).await
     }
 }

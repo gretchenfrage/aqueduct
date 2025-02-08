@@ -636,6 +636,7 @@ impl AckReliable2 {
     /// The first range represents acks, the second range represents not-yet-acks, and then
     /// they alternate back and forth.
     pub async fn next_delta(&mut self) -> ResetResult<Option<u64>> {
+        // TODO: error on trailing neg
         self.0.next_delta().await
     }
 

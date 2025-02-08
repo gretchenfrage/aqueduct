@@ -4,7 +4,10 @@ mod ack;
 
 use self::{
     chan_id_mint::ChanIdMint,
-    ack::ReceiverUnreliableAckManager,
+    ack::{
+        ReceiverReliableAckManager,
+        ReceiverUnreliableAckManager,
+    },
 };
 use crate::{
     zero_copy::MultiBytes,
@@ -240,8 +243,8 @@ impl Connection {
 
         let (r, reliable_count) = r.reliable_count().await?;
         let task_msg = ReceiverCtrlTaskMsg::ReceivedFinishSender { reliable_count };
-        let _todo = receiver.send_ctrl_task_msg.send(task_msg);
         r.finish().await?;
+        let _todo = receiver.send_ctrl_task_msg.send(task_msg);
 
         Ok(())
     }
@@ -256,10 +259,16 @@ impl Connection {
         let mut gateway_obj = None;
         let mut send_stream = None;
 
+        let mut reliable_ack_mgr = ReceiverReliableAckManager::default();
+
         let mut unreliable_ack_mgr = ReceiverUnreliableAckManager::default();
         let mut sent_unreliable_base = 0u64;
 
-        while let Some(task_msg) = recv_ctrl_task_msg.recv().await {
+        let mut finishing_reliable_count = None;
+
+        // loop until finish or cancel
+        loop {
+            let task_msg = recv_ctrl_task_msg.recv().await.expect("TODO better message");
             match task_msg {
                 ReceiverCtrlTaskMsg::ReceiverTaken(mut gateway) => {
                     // we now have the ability to convey received messages to the application
@@ -270,8 +279,16 @@ impl Connection {
                 },
                 ReceiverCtrlTaskMsg::ReceivedMessage(app_msg) => {
                     // we have received a message from the remote side
+                    // let the ack managers do stuff
                     match app_msg.message_num {
-                        MessageNum::Reliable(n) => todo!(),
+                        MessageNum::Reliable(n) => {
+                            reliable_ack_mgr
+                                .on_receive(
+                                    n,
+                                    &send_ctrl_task_msg,
+                                    send_stream.is_some(),
+                                )?;
+                        },
                         MessageNum::Unreliable(n) => {
                             let already_received = unreliable_ack_mgr
                                 .on_receive(
@@ -286,10 +303,20 @@ impl Connection {
                         }
                     }
 
+                    // convey it to the application
                     if let Some(gateway) = gateway_obj.as_mut() {
                         (gateway)(app_msg)?;
                     } else {
                         gateway_buf.push(app_msg);
+                    }
+
+                    // maybe that unblocked finishing
+                    if let Some(reliable_count) = finishing_reliable_count {
+                        if reliable_ack_mgr.not_blocking_finish(reliable_count)
+                            && unreliable_ack_mgr.not_blocking_finish()
+                        {
+                            break;
+                        }
                     }
                 },
                 ReceiverCtrlTaskMsg::CtrlStreamOpened(stream) => {
@@ -308,22 +335,82 @@ impl Connection {
                     unreliable_ack_mgr.on_declared(n, &send_ctrl_task_msg, send_stream.is_some())?;
                 },
                 ReceiverCtrlTaskMsg::ReceivedFinishSender { reliable_count } => {
-                    let _ = reliable_count;
-                    // TODO
+                    // the remote side gracefully finished the control stream
+                    finishing_reliable_count = Some(reliable_count);
+                    if reliable_ack_mgr.not_blocking_finish(reliable_count)
+                        && unreliable_ack_mgr.not_blocking_finish()
+                    {
+                        break;
+                    }
                 },
                 ReceiverCtrlTaskMsg::CtrlStreamReset(code) => {
-                    let _ = code;
+                    // the remote side intentionally reset the control stream
+                    match code {
+                        ResetCode::Cancelled => break,
+                        ResetCode::Lost => {
+                            debug!("receiver control task received loss reset code");
+                            // TODO reset send stream I think
+                            return Ok(())
+                        }
+                    }
+                },
+                ReceiverCtrlTaskMsg::ReliableAckTimer => {
+                    // reliable ack manager time-based event
+                    reliable_ack_mgr.on_timer_event(&mut send_stream).await?;
+
+                    // maybe that unblocked finishing
+                    if let Some(reliable_count) = finishing_reliable_count {
+                        if reliable_ack_mgr.not_blocking_finish(reliable_count)
+                            && unreliable_ack_mgr.not_blocking_finish()
+                        {
+                            break;
+                        }
+                    }
                 },
                 ReceiverCtrlTaskMsg::UnreliableAckTimer => {
+                    // unreliable ack manager time-based event
                     unreliable_ack_mgr
                         .on_timer_event(&send_ctrl_task_msg, &mut send_stream)
                         .await?;
-                },
-                ReceiverCtrlTaskMsg::ReliableAckTimer => {
 
+                    // maybe that unblocked finishing
+                    if let Some(reliable_count) = finishing_reliable_count {
+                        if reliable_ack_mgr.not_blocking_finish(reliable_count)
+                            && unreliable_ack_mgr.not_blocking_finish()
+                        {
+                            break;
+                        }
+                    }
                 },
             }
+        };
+
+        // TODO gateway stuff?
+        // TODO close due to receiver hangup
+
+        // close
+        while send_stream.is_none() {
+            let task_msg = recv_ctrl_task_msg.recv().await.expect("TODO better message");
+            match task_msg {
+                ReceiverCtrlTaskMsg::ReceiverTaken(_gateway) => todo!(),
+                ReceiverCtrlTaskMsg::ReceivedMessage(_app_msg) => todo!(),
+                ReceiverCtrlTaskMsg::CtrlStreamOpened(stream) => {
+                    send_stream = Some(stream);
+                },
+                ReceiverCtrlTaskMsg::ReceivedSentUnreliable { .. } => unreachable!(),
+                ReceiverCtrlTaskMsg::ReceivedFinishSender { .. } => unreachable!(),
+                ReceiverCtrlTaskMsg::CtrlStreamReset(_) => unreachable!(),
+                ReceiverCtrlTaskMsg::ReliableAckTimer => (),
+                ReceiverCtrlTaskMsg::UnreliableAckTimer => (),
+            }
         }
+        let mut send_stream = send_stream.unwrap();
+        reliable_ack_mgr.final_ack(&mut send_stream).await?;
+        unreliable_ack_mgr.final_ack_nack(&mut send_stream).await?;
+        // TODO: at this point encoding, we realized that the FinishReceiver frame as defined in
+        //       the protocol is unnecessary
+        send_stream.finish().unwrap();
+
         Ok(())
     }
 
