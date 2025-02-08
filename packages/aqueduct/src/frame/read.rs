@@ -355,11 +355,6 @@ impl UniFrames {
 pub struct Message(QuicReader);
 
 impl Message {
-    /// Whether this Message frame was sent reliably.
-    pub fn reliable(&self) -> bool {
-        matches!(&self.0.source, &QuicReaderSource::Stream(_))
-    }
-
     /// Read the `sent_on` field.
     pub async fn sent_on(mut self) -> ResetResult<(Message2, ChanIdLocalReceiver)> {
         let o = self.0.read_chan_id().await?;
@@ -368,45 +363,49 @@ impl Message {
                 "received Message frame with sent_on field in wrong direction"
             ).into());
         };
-        Ok((Message2(self.0), o))
+        Ok((Message2(self.0, o), o))
     }
 }
 
 /// Part of typed API for reading a Message frame.
 #[must_use]
-pub struct Message2(QuicReader);
+pub struct Message2(QuicReader, ChanIdLocalReceiver);
 
 impl Message2 {
     /// Read the `message_num` field.
-    pub async fn message_num(mut self) -> ResetResult<(Message3, u64)> {
+    pub async fn message_num(mut self) -> ResetResult<(Message3, MessageNum)> {
         let o = self.0.read_vli().await?;
-        Ok((Message3(self.0), o))
+        let o = match &self.0.source {
+            &QuicReaderSource::Stream(_) => MessageNum::Reliable(o),
+            &QuicReaderSource::Datagram(_) => MessageNum::Unreliable(o),
+        };
+        Ok((Message3(self.0, self.1), o))
     }
 }
 
 /// Part of typed API for reading a Message frame.
 #[must_use]
-pub struct Message3(QuicReader);
+pub struct Message3(QuicReader, ChanIdLocalReceiver);
 
 impl Message3 {
     /// Read the byte length of the `attachments` field (may not be the number of elements).
     pub async fn attachments_len(mut self) -> ResetResult<(Message4, usize)> {
         let len = self.0.read_vli_usize().await?;
-        Ok((Message4(self.0, len), len))
+        Ok((Message4(self.0, self.1, len), len))
     }
 }
 
 /// Part of typed API for reading a Message frame.
 #[must_use]
-pub struct Message4(QuicReader, usize);
+pub struct Message4(QuicReader, ChanIdLocalReceiver, usize);
 
 impl Message4 {
     /// Read the next element of the `attachments` field, or return `None` if there are no more.
     pub async fn next_attachment(&mut self) -> ResetResult<Option<ChanIdRemotelyMinted>> {
-        if self.1 == 0 {
+        if self.2 == 0 {
             return Ok(None);
         }
-        let o = ChanId(self.0.read_vli_with_limit(Some(&mut self.1)).await?);
+        let o = ChanId(self.0.read_vli_with_limit(Some(&mut self.2)).await?);
         let SortByMintedBy::RemotelyMinted(o) = o.sort_by_minted_by(self.0.side) else {
             return Err(anyhow!(
                 "received Message frame with attached channel minted by wrong side"
@@ -417,44 +416,44 @@ impl Message4 {
 
     /// Stop reading the `attachments` field. Panics if there are un-read attachments.
     pub fn done(self) -> Message5 {
-        assert!(self.1 == 0, "Message4.done without reading all attachments");
-        Message5(self.0)
+        assert!(self.2 == 0, "Message4.done without reading all attachments");
+        Message5(self.0, self.1)
     }
 }
 
 /// Part of typed API for reading a Message frame.
 #[must_use]
-pub struct Message5(QuicReader);
+pub struct Message5(QuicReader, ChanIdLocalReceiver);
 
 impl Message5 {
     /// Read the byte length of the `payload` field.
     pub async fn payload_len(mut self) -> ResetResult<(Message6, usize)> {
         let len = self.0.read_vli_usize().await?;
-        Ok((Message6(self.0, len), len))
+        Ok((Message6(self.0, self.1, len), len))
     }
 }
 
 /// Part of typed API for reading a Message frame.
 #[must_use]
-pub struct Message6(QuicReader, usize);
+pub struct Message6(QuicReader, ChanIdLocalReceiver, usize);
 
 impl Message6 {
     /// Read the entire contents of the `payload` field.
     pub async fn payload(mut self) -> ResetResult<(NextMessage, MultiBytes)> {
-        let o = self.0.read_zc(self.1).await?;
-        Ok((NextMessage(self.0), o))
+        let o = self.0.read_zc(self.2).await?;
+        Ok((NextMessage(self.0, self.1), o))
     }
 }
 
 /// Typed API for possibly reading more Message frames after at least one Message frame has already
 /// been read from the underlying byte sequence.
 #[must_use]
-pub struct NextMessage(QuicReader);
+pub struct NextMessage(QuicReader, ChanIdLocalReceiver);
 
 impl NextMessage {
     /// Begin reading the next Message frame, or return `None` if the underlying byte sequence
     /// finishes gracefully after the previous Message frame.
-    pub async fn next_message(mut self) -> ResetResult<Option<Message>> {
+    pub async fn next_message(mut self) -> ResetResult<Option<Message2>> {
         Ok(if self.0.is_done().await? {
             None
         } else {
@@ -462,7 +461,13 @@ impl NextMessage {
             if ft != FrameType::Message {
                 return Err(anyhow!("unexpected frame type {:?} in NextMessage context", ft).into());
             }
-            Some(Message(self.0))
+            let o = self.0.read_chan_id().await?;
+            if o != self.1.into() {
+                return Err(anyhow!(
+                    "received Message frames in same stream/datagram with different sent_to"
+                ).into());
+            }
+            Some(Message2(self.0, self.1))
         })
     }
 }

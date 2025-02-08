@@ -1,9 +1,9 @@
 
 mod chan_id_mint;
+mod ack_range;
 
 use self::chan_id_mint::ChanIdMint;
 use crate::{
-    util::atomic_take::AtomicTake,
     zero_copy::MultiBytes,
     channel::{
         api::*,
@@ -17,22 +17,19 @@ use crate::{
 };
 use std::{
     sync::{
-        atomic::AtomicBool,
+        atomic::{
+            AtomicBool,
+            Ordering::Relaxed,
+        },
         Arc,
     },
     panic::{AssertUnwindSafe, catch_unwind},
 };
 use dashmap::DashMap;
-use tokio::{
-    sync::{
-        mpsc::{
-            UnboundedSender as TokioUnboundedSender,
-            UnboundedReceiver as TokioUnboundedReceiver,
-            unbounded_channel as tokio_unbounded_channel,
-        },
-        Mutex as TokioMutex,
-    },
-    task::spawn,
+use tokio::sync::mpsc::{
+    UnboundedSender as TokioUnboundedSender,
+    UnboundedReceiver as TokioUnboundedReceiver,
+    unbounded_channel as tokio_unbounded_channel,
 };
 use anyhow::{Result, Context, anyhow};
 
@@ -57,73 +54,53 @@ struct Connection {
 struct NetReceiver {
     /// Message sender to the local side's channel control task.
     send_ctrl_task_msg: TokioUnboundedSender<ReceiverCtrlTaskMsg>,
-    /// Message receiver of messages to the local side's channel control task, if that task does
-    /// not yet exist. The local side's channel control task is spawned when the local side
-    /// experiences the establishment of the channel control stream:
-    ///
-    /// - For Aqueduct channels created by the remote side, the local side creates the channel
-    ///   control stream at the same time as it creates this Receiver, and thus the channel control
-    ///   task is spawned immediately and this AtomicTake is initialized as None.
-    /// - For Aqueduct channels create by the local side, the remote side creates the channel
-    ///   control stream, and thus there is an asynchronous delay between the local side creating
-    ///   this Receiver and the local side observing the establishment of the channel control
-    ///   stream. As such, this AtomicTake is initialized as Some, and then its value is taken
-    ///   later to be owned by the local side's channel control task.
-    recv_ctrl_task_msg: AtomicTake<TokioUnboundedReceiver<ReceiverCtrlTaskMsg>>,
-    /// Gateway for giving received messages to application deserialization logic. 
-    gateway: TokioMutex<ReceiverGateway>,
+    /// Whether a ReceiverTaken message may be sent to the channel control task.
+    receiver_taken: AtomicBool,
+    /// Whether a CtrlStreamOpened message may be sent to the channel control task.
+    ctrl_stream_opened: AtomicBool,
 }
 
 /// Message to a receiver-side channel control task.
 enum ReceiverCtrlTaskMsg {
-
+    /// The local application took the receiver handle. That means that proto code constructed a
+    /// gateway Aqueduct channel, gave ownership of the receiver half to the application, and
+    /// wrapped the sender half plus application-provided serialization logic into the contained
+    /// gateway object.
+    ReceiverTaken(Box<dyn FnMut(ReceivedMessage) -> Result<()> + Send>),
+    /// A Message frame was received and routed to this receiver.
+    ReceivedMessage(ReceivedMessage),
+    /// The remote side opened the channel control stream for this receiver.
+    CtrlStreamOpened(quinn::SendStream),
+    /// A SentUnreliable frame was received on the channel control stream.
+    ReceivedSentUnreliable {
+        delta: u64,
+    },
+    /// A FinishSender frame was received on the channel control stream.
+    ReceivedFinishSender {
+        reliable_count: u64,
+    },
+    /// The remote side reset the channel control stream.
+    CtrlStreamReset(ResetCode),
+    /// Used internally by control task.
+    UnreliableAckTimer,
+    /// Used internally by control task.
+    ReliableAckTimer,
 }
 
-/// Gateway for giving received messages to application deserialization logic.
-enum ReceiverGateway {
-    /// The application has not yet taken the receiver. The gateway holds a buffer of received
-    /// but not yet application-level deserialized messages.
-    Buffer(Vec<ReceivedMessage>),
-    /// The application has taken the receiver. The dyn object will invoke application-level
-    /// deserialization logic on the message, then relay it to the application's Aqueduct channel
-    /// handle, or return error on failure or panic in the application-level deserialization logic.
-    Object(Box<dyn FnMut(ReceivedMessage) -> Result<()> + Send>),
-}
-
-/// Message within a channel that has been fully received on the Aqueduct protocol level, but not
-/// yet deserialized at the application level.
+/// A fully received Message frame.
 struct ReceivedMessage {
+    message_num: MessageNum,
     payload: MultiBytes,
-    attachments: Vec<Option<ReceivedAttachment>>,
-}
-
-/// Attachment in a `ReceivedMessage`.
-enum ReceivedAttachment {
-    Sender(ChanIdLocalSenderRemotelyMinted),
-    Receiver(ChanIdLocalReceiverRemotelyMinted),
+    /// These are all initially `Some`; they are wrapped in `Option` to simplify `DecoderDetacher`
+    /// implementation.
+    attachments: Vec<Option<ChanIdRemotelyMinted>>,
 }
 
 impl Connection {
-    /// Handle an incoming unidirectional QUIC stream.
-    ///
-    /// Returning reset error is ignored. Returning other error triggers connection close.
-    async fn handle_uni(&self, stream: quinn::RecvStream) -> ResetResult<()> {
-        let r = read::uni_stream(stream, self.side, Arc::clone(&self.has_received_version)).await?;
-        match r {
-            read::UniFrames::Message(r) => self.handle_messages(r).await,
-            read::UniFrames::ClosedChannelLost(r) => {
-                let _ = r;
-                todo!()
-            }
-        }
-    }
-
     /// Handle a sequence of incoming Message frames.
     async fn handle_messages(&self, r: read::Message) -> ResetResult<()> {
         // route
-        let is_reliable = r.reliable();
-        let (r, sent_on) = r.sent_on().await?;
-
+        let (mut r, sent_on) = r.sent_on().await?;
         let receiver = match sent_on.sort_by_minted_by(self.side) {
             SortByMintedBy::LocallyMinted(_) => {
                 if let Some(receiver) = self.receivers.get(&sent_on) {
@@ -140,28 +117,17 @@ impl Connection {
                         let _ = recv_ctrl_task_msg; // TODO: spawn channel control task
                         NetReceiver {
                             send_ctrl_task_msg,
-                            recv_ctrl_task_msg: AtomicTake::none(),
-                            gateway: TokioMutex::new(ReceiverGateway::Buffer(Vec::new())),
+                            receiver_taken: false.into(),
+                            ctrl_stream_opened: true.into(),
                         }
                     })
                     .downgrade()
             }
         };
 
-        // handle the remainder of the first Message frame
-        let mut next_r = self.handle_routed_message(sent_on, is_reliable, &receiver, r).await?;
-
-        // handle subsequent Message frames
-        while let Some(r) = next_r.next_message().await? {
-            let (r, sent_on_2) = r.sent_on().await?;
-
-            if sent_on_2 != sent_on {
-                return Err(anyhow!(
-                    "received multiple Message frames on same stream with different sent_on"
-                ).into());
-            }
-
-            next_r = self.handle_routed_message(sent_on, is_reliable, &*receiver, r).await?;
+        // process Message frames
+        while let Some(r2) = self.handle_routed_message(&receiver, r).await? {
+            r = r2;
         }
 
         Ok(())
@@ -170,39 +136,31 @@ impl Connection {
     /// Handle an incoming Message frame that has already been routed to a receiver.
     async fn handle_routed_message(
         &self,
-        sent_on: ChanIdLocalReceiver,
-        is_reliable: bool,
         receiver: &NetReceiver,
         r: read::Message2,
-    ) -> ResetResult<read::NextMessage> {
+    ) -> ResetResult<Option<read::Message2>> {
         // read the rest of the message
         let (r, message_num) = r.message_num().await?;
         let (mut r, _) = r.attachments_len().await?;
         let mut attachments = Vec::new();
         while let Some(attachment) = r.next_attachment().await? {
-            attachments.push(Some(match attachment.sort_by_dir(self.side) {
-                // TODO do something extra here
-                SortByDir::LocalSender(chan_id) => ReceivedAttachment::Sender(chan_id),
-                SortByDir::LocalReceiver(chan_id) => ReceivedAttachment::Receiver(chan_id),
-            }));
+            attachments.push(Some(attachment));
         }
         let (r, _) = r.done().payload_len().await?;
         let (r, payload) = r.payload().await?;
-        let received = ReceivedMessage {
+
+        // sent it to the control task
+        let task_msg = ReceiverCtrlTaskMsg::ReceivedMessage(ReceivedMessage {
+            message_num,
             payload,
             attachments,
-        };
-
-        // convey it to the application
-        match &mut *receiver.gateway.lock().await {
-            &mut ReceiverGateway::Buffer(ref mut vec) => vec.push(received),
-            &mut ReceiverGateway::Object(ref mut obj) => (obj)(received)?,
+        });
+        if receiver.send_ctrl_task_msg.send(task_msg).is_err() {
+            return Ok(None);
         }
 
-        let _ = (sent_on, is_reliable, receiver, message_num);
-        // TODO
-
-        Ok(r)
+        // read whether there will be another message
+        Ok(r.next_message().await?)
     }
 
     /// Handle an incoming bidirectional QUIC stream.
@@ -236,61 +194,137 @@ impl Connection {
         Ok(())
     }
 
-    /// Handle incoming channel control frames for a channel with a local receiver.
+    /// Handle an incoming control stream for a channel with a local receiver.
     async fn handle_receiver_ctrl_frames(
         self: &Arc<Self>,
         chan_id: ChanIdLocalReceiverLocallyMinted,
         mut send_stream: quinn::SendStream,
         mut next_r: read::ReceiverChanCtrlFrames,
     ) -> ResetResult<()> {
-        // get the ctrl task msg receiver, or short-circuit
-        let Some(recv_ctrl_task_msg) = self.receivers
-            .get(&ChanIdLocalReceiver::from(chan_id))
-            .and_then(|receiver| receiver.recv_ctrl_task_msg.take())
+        // get the local net receiver or short-circuit
+        let Some(receiver) = self.receivers.get(&ChanIdLocalReceiver::from(chan_id))
         else {
             send_stream.reset((ResetCode::Lost as u32).into()).unwrap();
             return Ok(());
         };
 
-        // spawn the channel control task
-        spawn({
-            let this = Arc::clone(self);
-            async move {
-                let result = this.receiver_ctrl(recv_ctrl_task_msg, send_stream).await;
-                this.close_on_error(result);
-            }
-        });
+        // claim the right to send a CtrlStreamOpened message to the control task or short-circuit
+        if receiver.ctrl_stream_opened.swap(true, Relaxed) {
+            send_stream.reset((ResetCode::Lost as u32).into()).unwrap();
+            return Ok(());
+        }
+
+        // send ownership of the send stream to the channel control task
+        // TODO: think harder about how we want to handle race conditions with the control task closing
+        // TODO: related to that, we need to relay ctrl stream resets to the control task
+        let task_msg = ReceiverCtrlTaskMsg::CtrlStreamOpened(send_stream);
+        let _todo = receiver.send_ctrl_task_msg.send(task_msg);
 
         // read incoming control frames and relay them to the receiver task
-        loop {
+        // (loop breaks upon encountering beginning of final frame on stream)
+        let r = loop {
             match next_r.next_frame().await? {
                 read::ReceiverChanCtrlFrame::SentUnreliable(r) => {
                     let (r, delta) = r.delta().await?;
-                    // TODO
-                    let _ = delta;
+                    let task_msg = ReceiverCtrlTaskMsg::ReceivedSentUnreliable { delta };
+                    let _todo = receiver.send_ctrl_task_msg.send(task_msg);
                     next_r = r;
                 }
-                read::ReceiverChanCtrlFrame::FinishSender(r) => {
-                    let (r, reliable_count) = r.reliable_count().await?;
-                    // TODO
-                    let _ = reliable_count;
-                    r.finish().await?;
-                    break;
-                }
+                read::ReceiverChanCtrlFrame::FinishSender(r) => break r,
             };
-        }
+        };
+
+        let (r, reliable_count) = r.reliable_count().await?;
+        let task_msg = ReceiverCtrlTaskMsg::ReceivedFinishSender { reliable_count };
+        let _todo = receiver.send_ctrl_task_msg.send(task_msg);
+        r.finish().await?;
 
         Ok(())
     }
 
-    /// Body of a channel control task on the receiver side.
+    /// Body of a receiver-side channel control task.
     async fn receiver_ctrl(
         &self,
+        send_ctrl_task_msg: TokioUnboundedSender<ReceiverCtrlTaskMsg>,
         recv_ctrl_task_msg: TokioUnboundedReceiver<ReceiverCtrlTaskMsg>,
-        send_stream: quinn::SendStream,
     ) -> Result<()> {
-        let _ = (recv_ctrl_task_msg, send_stream);
-        Ok(())
+        let _ = (send_ctrl_task_msg, recv_ctrl_task_msg);
+        todo!()
+        /*let mut gateway_buf = Vec::new();
+        let mut gateway_obj = None;
+        let mut send_stream = None;
+
+        let mut unreliable_ack_nacked_below = 0;
+        let mut unreliable_highest_seen_plus_1 = 0;
+        let mut unreliable_timer_set: Option<(u64, AbortOnDrop)> = None;
+
+        while let Some(task_msg) = recv_ctrl_task_msg.recv().await {
+            match task_msg {
+                ReceiverCtrlTaskMsg::ReceiverTaken(mut gateway) => {
+                    for app_msg in gateway_buf.drain(..) {
+                        (gateway)(app_msg)?;
+                    }
+                    gateway_obj = Some(gateway);
+                },
+                ReceiverCtrlTaskMsg::ReceivedMessage(app_msg) => {
+                    match app_msg.message_num {
+                        MessageNum::Reliable(n) => todo!(),
+                        MessageNum::Unreliable(n) => {
+                            if n < unreliable_ack_nacked_below {
+                                debug!("ignoring late-arriving unreliable message");
+                                continue;
+                            }
+                            let n_plus_1 = n
+                                .checked_add(1)
+                                .ok_or_else(|| anyhow!("remote unreliable message num overflow"))?;
+                            unreliable_highest_seen_plus_1 =
+                                unreliable_highest_seen_plus_1.max(n_plus_1);
+                            if unreliable_timer_set.is_none() {
+                                unreliable_timer_set = Some((
+                                    n_plus_1,
+                                    AbortOnDrop::spawn({
+                                        let send_ctrl_task_msg = send_ctrl_task_msg.clone();
+                                        async move {
+                                            sleep(Duration::from_secs(1)).await;
+                                            let _ = send_ctrl_task_msg
+                                                .send(ReceiverCtrlTaskMsg::UnreliableAckTimer);
+                                        }
+                                    }),
+                                ));
+                            }
+                        }
+                    }
+
+                    // TODO: ack nack
+                    if let Some(gateway) = gateway_obj.as_mut() {
+                        (gateway)(app_msg)?;
+                    } else {
+                        gateway_buf.push(app_msg);
+                    }
+                },
+                ReceiverCtrlTaskMsg::CtrlStreamOpened(stream) => {
+                    send_stream = Some(stream);
+                },
+                ReceiverCtrlTaskMsg::ReceivedSentUnreliable { delta } => {
+                    let _ = delta;
+                    // TODO
+                },
+                ReceiverCtrlTaskMsg::ReceivedFinishSender { reliable_count } => {
+                    let _ = reliable_count;
+                    // TODO
+                },
+                ReceiverCtrlTaskMsg::CtrlStreamReset(code) => {
+                    let _ = code;
+                },
+                ReceiverCtrlTaskMsg::UnreliableAckTimer => {
+
+                },
+                ReceiverCtrlTaskMsg::ReliableAckTimer => {
+
+                },
+            }
+        }
+        Ok(())*/
     }
 
     /// Take messages from gateway, encode them, and transmit them on the given channel.
@@ -422,7 +456,7 @@ impl<'a> AttachTarget<'a> {
     }*/
 }
 
-/// Passed to an [`DecoderDettacher`] to detach attachments from.
+/// Passed to an [`DecoderDetacher`] to detach attachments from.
 pub struct DetachTarget<'a>(std::marker::PhantomData<&'a ()>);
 
 impl<'a> DetachTarget<'a> {

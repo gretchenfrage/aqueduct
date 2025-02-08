@@ -183,3 +183,9 @@ pub fn ascii_to_str(b: &[u8]) -> Option<&str> {
         None
     }
 }
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub enum MessageNum {
+    Reliable(u64),
+    Unreliable(u64),
+}

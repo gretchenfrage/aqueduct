@@ -11,7 +11,6 @@ pub mod zero_copy;
 mod channel;
 pub mod util;
 pub mod frame;
-//mod message_encoder_api;
 pub mod proto;
 
 pub use crate::channel::api::*;
