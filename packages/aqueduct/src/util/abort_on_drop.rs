@@ -8,6 +8,7 @@ use tokio::task::{
 
 
 /// Wrapper around tokio task that aborts if dropped.
+#[derive(Debug)]
 pub struct AbortOnDrop(AbortHandle);
 
 impl AbortOnDrop {

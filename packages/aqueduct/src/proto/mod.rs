@@ -1,8 +1,11 @@
 
 mod chan_id_mint;
-mod ack_range;
+mod ack;
 
-use self::chan_id_mint::ChanIdMint;
+use self::{
+    chan_id_mint::ChanIdMint,
+    ack::ReceiverUnreliableAckManager,
+};
 use crate::{
     zero_copy::MultiBytes,
     channel::{
@@ -24,6 +27,7 @@ use std::{
         Arc,
     },
     panic::{AssertUnwindSafe, catch_unwind},
+    num::NonZero,
 };
 use dashmap::DashMap;
 use tokio::sync::mpsc::{
@@ -73,7 +77,7 @@ enum ReceiverCtrlTaskMsg {
     CtrlStreamOpened(quinn::SendStream),
     /// A SentUnreliable frame was received on the channel control stream.
     ReceivedSentUnreliable {
-        delta: u64,
+        delta: NonZero<u64>,
     },
     /// A FinishSender frame was received on the channel control stream.
     ReceivedFinishSender {
@@ -246,56 +250,42 @@ impl Connection {
     async fn receiver_ctrl(
         &self,
         send_ctrl_task_msg: TokioUnboundedSender<ReceiverCtrlTaskMsg>,
-        recv_ctrl_task_msg: TokioUnboundedReceiver<ReceiverCtrlTaskMsg>,
+        mut recv_ctrl_task_msg: TokioUnboundedReceiver<ReceiverCtrlTaskMsg>,
     ) -> Result<()> {
-        let _ = (send_ctrl_task_msg, recv_ctrl_task_msg);
-        todo!()
-        /*let mut gateway_buf = Vec::new();
+        let mut gateway_buf = Vec::new();
         let mut gateway_obj = None;
         let mut send_stream = None;
 
-        let mut unreliable_ack_nacked_below = 0;
-        let mut unreliable_highest_seen_plus_1 = 0;
-        let mut unreliable_timer_set: Option<(u64, AbortOnDrop)> = None;
+        let mut unreliable_ack_mgr = ReceiverUnreliableAckManager::default();
+        let mut sent_unreliable_base = 0u64;
 
         while let Some(task_msg) = recv_ctrl_task_msg.recv().await {
             match task_msg {
                 ReceiverCtrlTaskMsg::ReceiverTaken(mut gateway) => {
+                    // we now have the ability to convey received messages to the application
                     for app_msg in gateway_buf.drain(..) {
                         (gateway)(app_msg)?;
                     }
                     gateway_obj = Some(gateway);
                 },
                 ReceiverCtrlTaskMsg::ReceivedMessage(app_msg) => {
+                    // we have received a message from the remote side
                     match app_msg.message_num {
                         MessageNum::Reliable(n) => todo!(),
                         MessageNum::Unreliable(n) => {
-                            if n < unreliable_ack_nacked_below {
+                            let already_received = unreliable_ack_mgr
+                                .on_receive(
+                                    n,
+                                    &send_ctrl_task_msg,
+                                    send_stream.is_some(),
+                                )?;
+                            if already_received {
                                 debug!("ignoring late-arriving unreliable message");
                                 continue;
-                            }
-                            let n_plus_1 = n
-                                .checked_add(1)
-                                .ok_or_else(|| anyhow!("remote unreliable message num overflow"))?;
-                            unreliable_highest_seen_plus_1 =
-                                unreliable_highest_seen_plus_1.max(n_plus_1);
-                            if unreliable_timer_set.is_none() {
-                                unreliable_timer_set = Some((
-                                    n_plus_1,
-                                    AbortOnDrop::spawn({
-                                        let send_ctrl_task_msg = send_ctrl_task_msg.clone();
-                                        async move {
-                                            sleep(Duration::from_secs(1)).await;
-                                            let _ = send_ctrl_task_msg
-                                                .send(ReceiverCtrlTaskMsg::UnreliableAckTimer);
-                                        }
-                                    }),
-                                ));
                             }
                         }
                     }
 
-                    // TODO: ack nack
                     if let Some(gateway) = gateway_obj.as_mut() {
                         (gateway)(app_msg)?;
                     } else {
@@ -303,11 +293,19 @@ impl Connection {
                     }
                 },
                 ReceiverCtrlTaskMsg::CtrlStreamOpened(stream) => {
+                    // we now have the ability to send control frames to the remote side
                     send_stream = Some(stream);
+                    unreliable_ack_mgr.on_ctrl_stream_opened(&send_ctrl_task_msg);
                 },
                 ReceiverCtrlTaskMsg::ReceivedSentUnreliable { delta } => {
-                    let _ = delta;
-                    // TODO
+                    // the remote side declared having sent an unreliable message
+                    sent_unreliable_base = sent_unreliable_base
+                        .checked_add(delta.get())
+                        .ok_or_else(|| anyhow!("received SentUnreliable overflow"))?;
+                    // underflow safety: delta is non-zero
+                    let n = sent_unreliable_base - 1;
+
+                    unreliable_ack_mgr.on_declared(n, &send_ctrl_task_msg, send_stream.is_some())?;
                 },
                 ReceiverCtrlTaskMsg::ReceivedFinishSender { reliable_count } => {
                     let _ = reliable_count;
@@ -317,14 +315,16 @@ impl Connection {
                     let _ = code;
                 },
                 ReceiverCtrlTaskMsg::UnreliableAckTimer => {
-
+                    unreliable_ack_mgr
+                        .on_timer_event(&send_ctrl_task_msg, &mut send_stream)
+                        .await?;
                 },
                 ReceiverCtrlTaskMsg::ReliableAckTimer => {
 
                 },
             }
         }
-        Ok(())*/
+        Ok(())
     }
 
     /// Take messages from gateway, encode them, and transmit them on the given channel.

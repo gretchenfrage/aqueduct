@@ -8,11 +8,14 @@ use crate::{
     },
     frame::common::*,
 };
-use std::sync::{
-    Arc,
-    atomic::{
-        Ordering::Relaxed,
-        AtomicBool,
+use std::{
+    num::NonZero,
+    sync::{
+        atomic::{
+            Ordering::Relaxed,
+            AtomicBool,
+        },
+        Arc,
     },
 };
 use bytes::Bytes;
@@ -744,11 +747,12 @@ pub struct SentUnreliable(QuicReader);
 
 impl SentUnreliable {
     /// Read the `delta` field.
-    pub async fn delta(mut self) -> ResetResult<(ReceiverChanCtrlFrames, u64)> {
+    pub async fn delta(mut self) -> ResetResult<(ReceiverChanCtrlFrames, NonZero<u64>)> {
         let o = self.0.read_vli().await?;
-        if o == 0 {
+        let Some(o) = NonZero::new(o)
+        else {
             return Err(anyhow!("SentUnreliable delta of 0").into())
-        }
+        };
         Ok((ReceiverChanCtrlFrames(self.0), o))
     }
 }
