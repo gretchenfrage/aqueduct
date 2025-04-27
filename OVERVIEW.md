@@ -195,4 +195,4 @@ constraints otherwise achieves.
 
 ## See also
 
-The Aqueduct [`PROTOCOL.md`](PROTOCOL.md) specification.
+The Aqueduct protocol specification: [`PROTOCOL.md`](PROTOCOL.md).
