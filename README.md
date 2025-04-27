@@ -18,13 +18,14 @@ create a great experience for stateful network protocols, such as video games,
 stateful stream processing, actor-oriented programming, reactive programming,
 and more.
 
-## Specification
+## Documentation
+
+- [OVERVIEW.txt](OVERVIEW.txt): Overview of the Aqueduct protocol's design and functionality.
+- [PROTOCOL.txt](PROTOCOL.txt): Protocol reference for creating an Aqueduct implementation.
 
 See [PROTOCOL.txt](PROTOCOL.txt).
 
 ## Design principles
-
-See [docs/PRINCIPLES.md](PROTOCOL.txt) for more elaboration.
 
 1. **Tractable primitives over automagic black boxes.**
 2. **Clear, language-agnostic protocol specification.**
@@ -39,7 +40,3 @@ See [docs/PRINCIPLES.md](PROTOCOL.txt) for more elaboration.
 ## Example
 
 TODO
-
-## More resources
-
-See the [docs/](docs) subdirectory.
