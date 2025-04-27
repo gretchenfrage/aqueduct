@@ -1,8 +1,8 @@
 
-<h1 height="75">
+<img align="right" height="75" src="docs/.assets/aqueduct.png"/>
+
+<h1>
     The Aqueduct network protocol
-    <img align="right" height="75" src="docs/.assets/aqueduct.png"/>
-    <br/>
 </h1>
 
 Aqueduct is a protocol based on sending networked message channels through
