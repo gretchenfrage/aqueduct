@@ -147,13 +147,15 @@ Contextual: ROUTE_TO.CHANNEL.SENDER must be the frame receiver.
    zero varints. All varints must be nonzero, except the first if there are
    more than one.
 
-#### 2.2.11 § `DROP_RECEIVER`
+#### 2.2.11 § `CLOSE_RECEIVER`
 
 Contextual: ROUTE_TO.CHANNEL.SENDER must be the frame receiver.
 
 1. TAG: The byte 10.
 
 #### 2.2.12 § `FORGET_CHANNEL`
+
+Contextual: ROUTE_TO.CHANNEL.CREATOR must be the frame sender.
 
 1. TAG: The byte 11.
 
@@ -186,6 +188,8 @@ a `CONNECTION_HEADERS` frame once.
 
 ---
 
+### Sender-side operation
+
 When an application sends a message via a sender handle, the endpoint sends a
 `MESSAGE` frame. In ORDERED mode, the endpoint maintains a single stream to
 send all these frames for the channel. In UNORDERED mode, the endpoint creates
@@ -198,5 +202,94 @@ sent reliably in streams, and one for messages sent unreliably in datagrams.
 These numbers are assigned sequentially starting at zero within their spaces.
 
 Shortly after an endpoint sends messages unreliably, it must send an a
-SENT_UNRELIABLE frame
+`SENT_UNRELIABLE` frame on a stream counting the number of additional messages
+sent unreliably on that channel.
 
+When an application finishes a channel via a sender handle, the endpoint sends
+a `FINISH_SENDER` frame on a stream. It contains the number of messages ever
+sent reliably on this channel. All `SENT_UNRELIABLE` frames for this channel
+must have been sent on this same stream. After doing this, the endpoint may no
+longer send any more frames pertaining to this channel, except `FORGET_CHANNEL`
+frames.
+
+When an application cancels a channel via a sender handle, the endpoint sends a
+`CANCEL_SENDER` frame on a stream. After doing this, the endpoint may no longer
+finish this channel. Upon doing this, the endpoint should reset all streams on
+which it is sending `MESSAGE` frames for that channel.
+
+### Acking and nacking
+
+Shortly after an endpoint receives a `MESSAGE` frame on a stream, it must send
+an `ACK_RELIABLE` frame acking it. This contains ranges of reliable message
+numbers the endpoint has received. The sequence of varints in RANGES alternates
+between the length of a gap before the next range, followed by the length of
+the next range. The first gap is relative to zero. Gaps merely represent ranges
+that this frame is not acking, rather than nacks.
+
+An endpoint must maintain an "unreliable receipt deadline" of how long to wait
+to receive an unreliable message before declaring it lost. This may be set to 1
+second or twice the current estimated RTT. When an endpoint receives a
+`SENT_UNRELIABLE` frame it learns that the remote endpoint has sent all
+unreliable MESSAGE_NUMs less than the sum of all received
+SENT_UNRELIABLE.COUNT, for that channel.
+
+Shortly after the unreliable receipt deadline after learning that the remote
+side has sent a new unreliable MESSAGE_NUM the endpoint must ack it if it has
+received it and nack it if it hasn't. This is done by sending an
+`ACK_NACK_UNRELIABLE` frame on a stream. The sequence of varints in RANGES
+alternates between the length of the next range to ack and the length of the
+next range to nack. The first range is relative to where the last
+`SENT_UNRELIABLE` frame for the channel left off.
+
+All `SENT_UNRELIABLE` frames for a channel must be sent on the same stream.
+
+When an endpoint receives a `MESSAGE` frame from an unreliable datagram for
+which it has already nacked its unreliable MESSAGE_NUM, it must ignore it. The
+exception to this is that the endpoint does not have to uphold this behavior in
+cases when its receiver state machine for the channel was destroyed then
+re-created since sending the nack.
+
+### Channel state machine lifecycle
+
+When an endpoint receives a `ROUTE_TO` frame for which CHANNEL.CREATOR is
+remote and state for it does not exist, it creates a sender/receiver state
+machine for it.
+
+When an endpoint receives a `ROUTE_TO` frame for which CHANNEL.CREATOR is local
+and state for it does not exist, it sends a `FORGET_CHANNEL` frame on a stream
+for that channel and ignores the rest of the frame sequence.
+
+When an endpoint receives a `FORGET_CHANNEL` frame it must destroy its
+sender/receiver state machine for the channel if one exists, and should abort
+any ongoing operations to send frames for the channel, and should reset any
+streams being used to send frames for the channel. This rule supersedes any
+other requirements that an endpoint do things when certain circumstances occur.
+
+When an endpoint sends a `MESSAGE` frame it creates a sender/receiver state
+machine for each attachment. When an endpoint receives a `MESSAGE` frame it
+creates sender/receiver state machines for each attachment if they do not yet
+exist.
+
+When an application closes a channel's receiver it must send a `DROP_RECEIVER`
+frame on a stream. All `ACK_RELIABLE` and `ACK_NACK_UNRELIABLE` frames for the
+channel must have been sent on the same stream. The `DROP_RECEIVER` frame
+constitutes a nack for all reliable and unreliable MESSAGE_NUMs of the channel
+not already acked or nacked. After sending this, the endpoint must destroy its
+receiver state machine for the channel, but not abandon ongoing operations to
+send frames for the channel.
+
+When an endpoint receives a `CANCEL_SENDER` frame for a channel, it must do the
+same thing it does when the application closes the channel's receiver.
+
+When an endpoint receives a `FINISH_SENDER` frame for a channel, it must wait
+to receive all messages sent reliably on the channel, and also wait for all
+messages sent unreliably on the channel to be acked or nacked. It must not nack
+packets more eagerly than it would otherwise because the channel is finishing. 
+Upon these conditions being met, it must do the same thing it does when the
+application closes the channel's receiver. This process gets preempted if the
+receiver state machine is destroyed for some other reason.
+
+An endpoint should track the set of channel state machines that have been
+destroyed recently (e.g. within 1 second). Messages routed to a channel with
+state that has been destroyed should be ignored. This rule supersedes any
+other requirements that an endpoint do things when certain circumstances occur.
