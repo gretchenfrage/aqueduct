@@ -1,7 +1,7 @@
 
 <img align="right" height="75" src="docs/.assets/aqueduct.png"/>
 
-<h1 align="top">
+<h1 float="top">
     The Aqueduct network protocol
 </h1>
 
