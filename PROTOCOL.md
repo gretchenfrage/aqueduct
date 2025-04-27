@@ -316,5 +316,5 @@ that channel. It should also abandon any ongoing operations to send frames for
 the channel and reset any streams being used for that. This rule supersedes any
 other requirements that an endpoint do things when certain circumstances occur.
 
-### 3.6.1 § Analysis of required state
+#### 3.6.1 § Analysis of required state
 
