@@ -1,7 +1,7 @@
 
 # The Aqueduct network protocol
 
-<h1 align="right"><img src="docs/.assets/aqueduct.png"/></h1>
+<h1 align="right"><img width="100" src="docs/.assets/aqueduct.png"/></h1>
 
 Aqueduct is a protocol based on sending networked message channels through
 other networked message channels, built on QUIC. We believe that async tasks
