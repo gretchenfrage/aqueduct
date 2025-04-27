@@ -2,6 +2,7 @@
 <h1>
     The Aqueduct network protocol
     <img align="right" width="100" src="docs/.assets/aqueduct.png"/>
+    <br/>
 </h1>
 
 Aqueduct is a protocol based on sending networked message channels through
