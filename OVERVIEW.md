@@ -1,3 +1,5 @@
+<img align="right" height="75" src="docs/.assets/aqueduct.png"/>
+
 # The Aqueduct Protocol: Design Overview
 
 Aqueduct is a network protocol based on the central idea of sending channels

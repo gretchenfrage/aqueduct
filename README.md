@@ -23,8 +23,6 @@ and more.
 - [OVERVIEW.txt](OVERVIEW.txt): Overview of the Aqueduct protocol's design and functionality.
 - [PROTOCOL.txt](PROTOCOL.txt): Protocol reference for creating an Aqueduct implementation.
 
-See [PROTOCOL.txt](PROTOCOL.txt).
-
 ## Design principles
 
 1. **Tractable primitives over automagic black boxes.**
