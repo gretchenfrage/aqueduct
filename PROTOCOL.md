@@ -287,9 +287,34 @@ Upon these conditions being met, it must do the same thing it does when the
 application closes the channel's receiver. This process gets preempted if the
 receiver state machine is destroyed for some other reason.
 
-An endpoint should track the set of channel state machines that have been
-destroyed recently (e.g. within 1 second). Messages routed to a channel with
-state that has been destroyed should be ignored. This rule supersedes any
-other requirements that an endpoint do things when certain circumstances occur.
+An endpoint should track the set of channel state machines for which
+CHANNEL.CREATOR is remote that have been destroyed recently (e.g. within 1
+second). Messages routed to such a channel should be ignored. This rule
+supersedes any other requirements that an endpoint do things when certain
+circumstances occur.
 
 ### 3.6 § Channel lost in transit detection
+
+We define distributed facts about the connection that a networked channel may
+be "accessible" or "lost". At a given point in time a channel may be neither
+accessible nor lost, but once a channel becomes accessible or lost it stays as
+such forever. A channel cannot be both accessible and lost. It may be the case
+that a channel is accessible or lost but either side of the connection does not
+yet know that this is the case.
+
+We define the entrypoint channel as always being accessible. A channel is
+accessible if the message it was attached to was acked and also sent on a
+channel that is accessible. A channel is lost if the message it was attached to
+was nacked or if it was sent on a channel that is lost.
+
+If an endpoint does not yet know that a channel is accessible or lost, it
+considers it to be "pending".
+
+When an endpoint learns that a channel it created is lost, it must destroy its
+state machine for the channel and send a `FORGET_CHANNEL` frame on a stream for
+that channel. It should also abandon any ongoing operations to send frames for
+the channel and reset any streams being used for that. This rule supersedes any
+other requirements that an endpoint do things when certain circumstances occur.
+
+### 3.6.1 § Analysis of required state
+
