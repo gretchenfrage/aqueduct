@@ -4,7 +4,8 @@
 
 Aqueduct is a network protocol based on the central idea of sending channels
 within channels, built on top of QUIC. This document introduces the design and
-motivations of Aqueduct.
+motivations of Aqueduct and describes the overall structure of how an
+application can use it.
 
 ## Channels
 
