@@ -20,8 +20,8 @@ and more.
 
 ## Documentation
 
-- [OVERVIEW.txt](OVERVIEW.txt): Overview of the Aqueduct protocol's design and functionality.
-- [PROTOCOL.txt](PROTOCOL.txt): Protocol reference for creating an Aqueduct implementation.
+- [OVERVIEW.md](OVERVIEW.md): Overview of the Aqueduct protocol's design and functionality.
+- [PROTOCOL.md](PROTOCOL.md): Protocol reference for creating an Aqueduct implementation.
 
 ## Design principles
 
