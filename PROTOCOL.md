@@ -2,7 +2,7 @@
 
 # The Aqueduct Protocol: Reference Specification
 
-Note: It is recommended to read [`OVERVIEW.md`][OVERVIEW.md] first.
+Note: It is recommended to read [`OVERVIEW.md`](OVERVIEW.md) first.
 
 ## Encoding low-level primitives
 
