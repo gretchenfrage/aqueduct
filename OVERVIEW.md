@@ -192,3 +192,7 @@ receiver handle to an already-networked channel to be seamlessly handed off to
 a different process. However, we only want to do this if we can find a way to
 avoid it compromising the edge case simplifications Aqueduct's design and
 constraints otherwise achieves.
+
+## See also
+
+The Aqueduct [`PROTOCOL.md`](PROTOCOL.md) specification.

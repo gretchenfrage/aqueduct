@@ -59,11 +59,13 @@ Aqueduct utilizes QUIC unidirectional streams and QUIC unreliable datagrams,
 both of which contain a sequence of frames. An endpoint must read and process
 these frames. A frame sequence always follows the pattern:
 
-1. Zero or one `CONNECTION_HEADERS` frames.
+1. Zero or more of the following:
+    1. Any of the following frame types: `VERSION`, `ACK_VERSION`,
+       `CONNECTION_HEADERS`.
 2. Zero or one of the following:
     1. One `ROUTE_TO` frame.
-    2. Zero or more frames of types other than `CONNECTION_HEADERS` or
-       `ROUTE_TO`.
+    2. Zero or more frames of types other than the following: `VERSION`,
+       `ACK_VERSION`, `CONNECTION_HEADERS`, `ROUTE_TO`.
 
 The `ROUTE_TO` frame contains a chanid that subsequent frames in the sequence
 pertain to. The endpoint must read process the subsequent frames sequentially
@@ -75,23 +77,31 @@ If a stream is reset, the endpoint ignores any partially received frame.
 
 The following frame types exist, and they are encoded as such:
 
-#### 2.2.1 § `CONNECTION_HEADERS`
+#### 2.2.1 § `VERSION`
 
 1. MAGIC BYTES: The bytes [239, 80, 95, 166, 96, 15, 64, 142].
 2. HUMAN TEXT: The ASCII string "AQUEDUCT".
 3. VERSION: A varbytes containing the ASCII string "0.0.0-AFTER".
-4. CONNECTION_HEADERS: Header data.
 
-#### 2.2.2 § `ROUTE_TO`
+#### 2.2.2 § `ACK_VERSION`
 
 1. TAG: The byte 1.
+
+#### 2.2.3 § `CONNECTION_HEADERS`
+
+1. TAG: The byte 2.
+2. CONNECTION_HEADERS: Header data.
+
+#### 2.2.4 § `ROUTE_TO`
+
+1. TAG: The byte 3.
 2. CHANNEL: A chanid.
 
-#### 2.2.3 § `MESSAGE`
+#### 2.2.5 § `MESSAGE`
 
 Contextual: ROUTE_TO.CHANNEL.SENDER must be the frame sender.
 
-1. TAG: The byte 2.
+1. TAG: The byte 4.
 3. MESSAGE_NUM: A varint.
 4. MESSAGE_HEADERS: Header data.
 5. ATTACHMENTS: A varbytes containing a sequence of the following:
@@ -99,54 +109,79 @@ Contextual: ROUTE_TO.CHANNEL.SENDER must be the frame sender.
     2. CHANNEL_HEADERS: Header data.
 6. PAYLOAD: A varbytes.
 
-#### 2.2.4 § `FINISH_SENDER`
-
-Contextual: ROUTE_TO.CHANNEL.SENDER must be the frame sender.
-
-1. TAG: The byte 3.
-3. SENT_RELIABLE: A varint.
-
-#### 2.2.5 § `CANCEL_SENDER`
-
-Contextual: ROUTE_TO.CHANNEL.SENDER must be the frame sender.
-
-1. TAG: The byte 4.
-
-#### 2.2.6 § `SENT_UNRELIABLE`
+#### 2.2.6 § `FINISH_SENDER`
 
 Contextual: ROUTE_TO.CHANNEL.SENDER must be the frame sender.
 
 1. TAG: The byte 5.
+3. SENT_RELIABLE: A varint.
+
+#### 2.2.7 § `CANCEL_SENDER`
+
+Contextual: ROUTE_TO.CHANNEL.SENDER must be the frame sender.
+
+1. TAG: The byte 6.
+
+#### 2.2.8 § `SENT_UNRELIABLE`
+
+Contextual: ROUTE_TO.CHANNEL.SENDER must be the frame sender.
+
+1. TAG: The byte 7.
 3. COUNT: A varint.
 
-#### 2.2.7 § `ACK_RELIABLE`
+#### 2.2.9 § `ACK_RELIABLE`
 
 Contextual: ROUTE_TO.CHANNEL.SENDER must be the frame receiver.
 
-1. TAG: The byte 6.
+1. TAG: The byte 8.
 3. RANGES: A varbytes containing a sequence of varints. The number of varints
    is even and non-zero. Every varint except the first must be non-zero.
 
-#### 2.2.8 § `ACK_NACK_UNRELIABLE`
+#### 2.2.10 § `ACK_NACK_UNRELIABLE`
 
 Contextual: ROUTE_TO.CHANNEL.SENDER must be the frame receiver.
 
-1. TAG: The byte 7.
+1. TAG: The byte 9.
 2. CHANNEL: A chanid with SENDER equal to frame receiver.
 3. RANGES: A varbytes containing a sequence of varints. There must be more than
    zero varints. All varints must be nonzero, except the first if there are
    more than one.
 
-#### 2.2.9 § `DROP_RECEIVER`
+#### 2.2.11 § `DROP_RECEIVER`
 
 Contextual: ROUTE_TO.CHANNEL.SENDER must be the frame receiver.
 
-1. TAG: The byte 8.
+1. TAG: The byte 10.
 
-#### 2.2.10 § `FORGET_CHANNEL`
+#### 2.2.12 § `FORGET_CHANNEL`
 
-1. TAG: The byte 9.
+1. TAG: The byte 11.
 
 ## 3 § Protocol operation
+
+Both sides of the connection maintain a set of sender state machines and
+receiver state machines, each associated with a channel ID for which the
+endpoint is the sender / receiver. When the connection initializes, there is
+only a single sender state machine on the client and receiver state machine on
+the server, for the entrypoint channel.
+
+### 3.1 § Version negotiation
+
+Both sides must begin all frame sequences with a `VERSION` frame until they
+receive an `ACK_VERSION` frame. When an endpoint first receives a `VERSION`
+frame it must send an `ACK_VERSION` frame in a stream. If an endpoint receives
+a frame sequence that does not begin with a `VERSION` frame before it has sent
+an `ACK_VERSION` frame it must close the connection without processing
+subsequent frames.
+
+### 3.2 § Connection headers
+
+When the connection starts, the client must send the server a
+`CONNECTION_HEADERS` frame in a stream, containing the client's connection
+headers. When the server receives this, it must send back a
+`CONNECTION_HEADERS` frame in a stream, containing the server's connection
+headers. Each side must wait to process any frames other than `VERSION` frames
+until it has received a `CONNECTION_HEADERS` frame. Each side must only send
+a `CONNECTION_HEADERS` frame once.
 
 
