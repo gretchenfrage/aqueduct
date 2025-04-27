@@ -293,6 +293,13 @@ second). Messages routed to such a channel should be ignored. This rule
 supersedes any other requirements that an endpoint do things when certain
 circumstances occur.
 
+An endpoint should track the set of channels for which it has sent a
+`FORGET_CHANNEL` frame recently (e.g. within 1 second). Any requirements that
+a `FORGET_CHANNEL` frame be sent for a channel due to some trigger can and
+should be waived if the endpoint already such a frame more recently than the
+trigger. An endpoint that implements this logic must take care to use a
+monotonic clock for this logic, whether logical or physical.
+
 ### 3.6 § Channel lost in transit detection
 
 We define distributed facts about the connection that a networked channel may
@@ -313,8 +320,13 @@ considers it to be "pending".
 When an endpoint learns that a channel it created is lost, it must destroy its
 state machine for the channel and send a `FORGET_CHANNEL` frame on a stream for
 that channel. It should also abandon any ongoing operations to send frames for
-the channel and reset any streams being used for that. This rule supersedes any
-other requirements that an endpoint do things when certain circumstances occur.
+the channel and reset any streams being used for that, except for the operation
+and stream to send a `FORGET_CHANNEL` stream. This rule supersedes any other
+requirements that an endpoint do things when certain circumstances occur.
 
 #### 3.6.1 § Analysis of required state
+
+This section describes what state and mechanism is required to implement
+channel lost in transit detection.
+
 
