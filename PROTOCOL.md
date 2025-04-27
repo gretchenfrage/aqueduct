@@ -109,25 +109,25 @@ Contextual: ROUTE_TO.CHANNEL.SENDER must be the frame sender.
     2. CHANNEL_HEADERS: Header data.
 6. PAYLOAD: A varbytes.
 
-#### 2.2.6 § `FINISH_SENDER`
+#### 2.2.6 § `SENT_UNRELIABLE`
 
 Contextual: ROUTE_TO.CHANNEL.SENDER must be the frame sender.
 
 1. TAG: The byte 5.
-3. SENT_RELIABLE: A varint.
+3. COUNT: A varint.
 
-#### 2.2.7 § `CANCEL_SENDER`
+#### 2.2.7 § `FINISH_SENDER`
 
 Contextual: ROUTE_TO.CHANNEL.SENDER must be the frame sender.
 
 1. TAG: The byte 6.
+3. SENT_RELIABLE: A varint.
 
-#### 2.2.8 § `SENT_UNRELIABLE`
+#### 2.2.8 § `CANCEL_SENDER`
 
 Contextual: ROUTE_TO.CHANNEL.SENDER must be the frame sender.
 
 1. TAG: The byte 7.
-3. COUNT: A varint.
 
 #### 2.2.9 § `ACK_RELIABLE`
 
@@ -165,7 +165,7 @@ endpoint is the sender / receiver. When the connection initializes, there is
 only a single sender state machine on the client and receiver state machine on
 the server, for the entrypoint channel.
 
-### 3.1 § Version negotiation
+### 3.1 § Version
 
 Both sides must begin all frame sequences with a `VERSION` frame until they
 receive an `ACK_VERSION` frame. When an endpoint first receives a `VERSION`
@@ -184,4 +184,19 @@ headers. Each side must wait to process any frames other than `VERSION` frames
 until it has received a `CONNECTION_HEADERS` frame. Each side must only send
 a `CONNECTION_HEADERS` frame once.
 
+---
+
+When an application sends a message via a sender handle, the endpoint sends a
+`MESSAGE` frame. In ORDERED mode, the endpoint maintains a single stream to
+send all these frames for the channel. In UNORDERED mode, the endpoint creates
+a new stream to send each of these frames. In UNRELIABLE mode, the endpoint
+sends each of these frames in an unreliable datagram, unless the message is too
+large to fit in an unreliable datagram, in which case it sends it in a stream.
+
+Each channel has two different spaces of MESSAGE_NUM values: one for messages
+sent reliably in streams, and one for messages sent unreliably in datagrams.
+These numbers are assigned sequentially starting at zero within their spaces.
+
+Shortly after an endpoint sends messages unreliably, it must send an a
+SENT_UNRELIABLE frame
 
