@@ -186,9 +186,7 @@ headers. Each side must wait to process any frames other than `VERSION` frames
 until it has received a `CONNECTION_HEADERS` frame. Each side must only send
 a `CONNECTION_HEADERS` frame once.
 
----
-
-### Sender-side operation
+### 3.3 § Sender-side operation
 
 When an application sends a message via a sender handle, the endpoint sends a
 `MESSAGE` frame. In ORDERED mode, the endpoint maintains a single stream to
@@ -217,7 +215,7 @@ When an application cancels a channel via a sender handle, the endpoint sends a
 finish this channel. Upon doing this, the endpoint should reset all streams on
 which it is sending `MESSAGE` frames for that channel.
 
-### Acking and nacking
+### 3.4 § Acking and nacking
 
 Shortly after an endpoint receives a `MESSAGE` frame on a stream, it must send
 an `ACK_RELIABLE` frame acking it. This contains ranges of reliable message
@@ -249,7 +247,7 @@ exception to this is that the endpoint does not have to uphold this behavior in
 cases when its receiver state machine for the channel was destroyed then
 re-created since sending the nack.
 
-### Channel state machine lifecycle
+### 3.5 § Channel state machine lifecycle
 
 When an endpoint receives a `ROUTE_TO` frame for which CHANNEL.CREATOR is
 remote and state for it does not exist, it creates a sender/receiver state
@@ -293,3 +291,5 @@ An endpoint should track the set of channel state machines that have been
 destroyed recently (e.g. within 1 second). Messages routed to a channel with
 state that has been destroyed should be ignored. This rule supersedes any
 other requirements that an endpoint do things when certain circumstances occur.
+
+### 3.6 § Channel lost in transit detection
