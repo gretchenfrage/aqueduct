@@ -2,6 +2,11 @@
 
 # The Aqueduct Protocol: Reference Specification
 
+Spec version: 0.0.0-AFTER (**Warning: Non-unique draft version designation.**)
+
+This is an inter-version draft state of the Aqueduct protocol specification,
+non-uniquely designated `0.0.0-AFTER`.
+
 Note: It is recommended to read [`OVERVIEW.md`](OVERVIEW.md) first.
 
 ## 1 § Encoding low-level primitives
@@ -90,7 +95,9 @@ The following frame types exist, and they are encoded as such:
 #### 2.2.3 § `CONNECTION_HEADERS`
 
 1. TAG: The byte 2.
-2. CONNECTION_HEADERS: Header data.
+2. PER_CHANNEL_BUFFER: A varint.
+3. ALL_CHANNEL_BUFFER: A varint.
+4. CONNECTION_HEADERS: Header data.
 
 #### 2.2.4 § `ROUTE_TO`
 
@@ -158,6 +165,13 @@ Contextual: ROUTE_TO.CHANNEL.SENDER must be the frame receiver.
 Contextual: ROUTE_TO.CHANNEL.CREATOR must be the frame sender.
 
 1. TAG: The byte 11.
+
+#### 2.2.13 § `DEQUEUED`
+
+Contextual: ROUTE_TO.CHANNEL.SENDER must be the frame receiver.
+
+1. TAG: The byte 12.
+2. NUM_BYTES: A varint.
 
 ## 3 § Protocol operation
 
@@ -251,7 +265,9 @@ re-created since sending the nack.
 
 When an endpoint receives a `ROUTE_TO` frame for which CHANNEL.CREATOR is
 remote and state for it does not exist, it creates a sender/receiver state
-machine for it.
+machine for it. Upon doing so it must also ensure it sends back a `ROUTE_TO`
+frame for the channel back to the remote shortly after (this avoids certain
+lost in transit detection race conditions).
 
 When an endpoint receives a `ROUTE_TO` frame for which CHANNEL.CREATOR is local
 and state for it does not exist, it sends a `FORGET_CHANNEL` frame on a stream
@@ -268,9 +284,9 @@ machine for each attachment. When an endpoint receives a `MESSAGE` frame it
 creates sender/receiver state machines for each attachment if they do not yet
 exist.
 
-When an application closes a channel's receiver it must send a `DROP_RECEIVER`
+When an application closes a channel's receiver it must send a `CLOSE_RECEIVER`
 frame on a stream. All `ACK_RELIABLE` and `ACK_NACK_UNRELIABLE` frames for the
-channel must have been sent on the same stream. The `DROP_RECEIVER` frame
+channel must have been sent on the same stream. The `CLOSE_RECEIVER` frame
 constitutes a nack for all reliable and unreliable MESSAGE_NUMs of the channel
 not already acked or nacked. After sending this, the endpoint must destroy its
 receiver state machine for the channel, but not abandon ongoing operations to
@@ -319,14 +335,60 @@ considers it to be "pending".
 
 When an endpoint learns that a channel it created is lost, it must destroy its
 state machine for the channel and send a `FORGET_CHANNEL` frame on a stream for
-that channel. It should also abandon any ongoing operations to send frames for
-the channel and reset any streams being used for that, except for the operation
-and stream to send a `FORGET_CHANNEL` stream. This rule supersedes any other
-requirements that an endpoint do things when certain circumstances occur.
+that channel. The exception to this is that it is not required to send the
+remote side the `FORGET_CHANNEL` frame if it has never sent the remote side a
+`ROUTE_TO` frame for the channel. It should also abandon any ongoing operations
+to send frames for the channel and reset any streams being used for that,
+except for the operation and stream to send a `FORGET_CHANNEL` stream. This
+rule supersedes any other requirements that an endpoint do things when certain
+circumstances occur.
 
 #### 3.6.1 § Analysis of required state
 
 This section describes what state and mechanism is required to implement
-channel lost in transit detection.
+channel lost in transit detection. It contains no information that couldn't be
+logically deduced from other sections.
 
+First off, it is worth noting that any channel for which the local application
+has dequeued a handle is accessible. The fact that the message it was attached
+to was dequeued means that that message was acked. If the channel that message
+was sent on was created by the local side, it is either the entrypoint channel
+or a channel that the remote side dequeued a sender for (we know this because
+it sent a message on it). If the channel that message was sent on was created
+by the remote side, it is either the entrypoint channel or a channel that the
+local side dequeued a receiver for (we know this because it dequeued a message
+from it). In any of these cases, the channel that message was sent on is
+accessible (proof by induction). Therefore, the channel for which the local
+application has dequeued a handle is also accessible.
 
+An endpoint can maintain a boolean variable for each sender state machine to
+track whether it is marked as accessible, as opposed to pending. It is not
+necessary to represent the lost state, and a sender state machine is
+immediately destroyed when it's known that it's lost. The entrypoint channel
+and any channel created by the remote side start as accessible. Any channel
+created by the local side other than the entrypoint channel start as pending.
+
+An endpoint can also maintain for each sender state machine a multimap from
+each un-acked message number it sent on that sender to all additional channels
+attached to that message. Finally, for only sender state machines which are
+still in a pending state, the endpoint can maintain a collection of all
+additional channels attached to acked messages sent on that sender.
+
+Whenever it first becomes the case that a sender is marked as accessible and
+some message sent on it with attachments has been acked, the endpoint can mark
+all its attached channels as accessible. For attached senders, this may set off
+a recursive cascade of marking channels as accessible. For attached receivers,
+no work is necessary.
+
+Conversely, whenever a message with attachments is nacked, the endpoint deals
+with the fact that it now knows that all attached channels are lost. For each
+attached channel, it can send `FORGET_CHANNEL` frames if needed and destroy
+those channels' state. If those lost channels are senders, the endpoint learns
+that all other channels attached to messages sent to the lost channels are also
+lost, even if the messages they were attached to were acked. This may set off a
+recursive cascade of learning that channels have been lost and dealing with
+that.
+
+### 3.7 § Flow control
+
+Each side 
