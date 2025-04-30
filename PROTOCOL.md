@@ -2,7 +2,7 @@
 
 # The Aqueduct Protocol: Reference Specification
 
-Spec version: 0.0.0-AFTER (**Warning: Non-unique draft version designation.**)
+Spec version: 0.0.0-AFTER (**Warning: Non-unique designation for draft version.**)
 
 This is an inter-version draft state of the Aqueduct protocol specification,
 non-uniquely designated `0.0.0-AFTER`.
