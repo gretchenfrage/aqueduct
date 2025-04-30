@@ -1,4 +1,4 @@
-<img align="right" height="75" src="docs/.assets/aqueduct.png"/>
+<img align="right" height="75" src=".assets/aqueduct.png"/>
 
 # The Aqueduct Protocol: Reference Specification
 
