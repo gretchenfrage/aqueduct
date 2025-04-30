@@ -4,9 +4,6 @@
 
 Spec version: 0.0.0-AFTER (**Warning: Non-unique designation for draft version.**)
 
-This is an inter-version draft state of the Aqueduct protocol specification,
-non-uniquely designated `0.0.0-AFTER`.
-
 Note: It is recommended to read [`OVERVIEW.md`](OVERVIEW.md) first.
 
 ## 1 § Encoding low-level primitives
