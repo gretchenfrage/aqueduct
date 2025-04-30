@@ -12,7 +12,7 @@ mod channel;
 mod util;
 pub mod quic_zc;
 pub mod frame;
-pub mod proto;
+//pub mod proto;
 
 pub use crate::channel::api::*;
 
