@@ -10,7 +10,6 @@ use self::{
     },
 };
 use crate::{
-    zero_copy::MultiBytes,
     channel::{
         api::*,
         error::*,
@@ -32,6 +31,7 @@ use std::{
     panic::{AssertUnwindSafe, catch_unwind},
     num::NonZero,
 };
+use multibytes::MultiBytes;
 use dashmap::DashMap;
 use tokio::sync::mpsc::{
     UnboundedSender as TokioUnboundedSender,

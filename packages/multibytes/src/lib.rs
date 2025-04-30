@@ -1,5 +1,10 @@
+//! Sequence of bytes stored as an array of [`bytes::Bytes`].
 
-use crate::util::small_queue::SmallQueue;
+pub extern crate bytes;
+
+mod small_queue;
+
+use crate::small_queue::SmallQueue;
 use thiserror::Error;
 use bytes::{Bytes, BytesMut};
 
@@ -279,6 +284,7 @@ impl PartialEq<MultiBytes> for MultiBytes {
         true
     }
 }
+
 /// Error type for trying to read more bytes than remain in a collection of bytes.
 #[derive(Error, Debug, Copy, Clone)]
 #[error("too few bytes")]

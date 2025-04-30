@@ -30,6 +30,7 @@ dependencies = [
  "anyhow",
  "bytes",
  "dashmap",
+ "multibytes",
  "quinn",
  "rand",
  "rand_pcg",
@@ -256,6 +257,14 @@ dependencies = [
  "libc",
  "wasi",
  "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "multibytes"
+version = "0.0.0-AFTER"
+dependencies = [
+ "bytes",
+ "thiserror 2.0.9",
 ]
 
 [[package]]

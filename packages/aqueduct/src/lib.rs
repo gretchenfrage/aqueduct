@@ -1,15 +1,16 @@
 #![allow(dead_code)] // TODO
+#![allow(unsafe_op_in_unsafe_fn)]
 //#![doc = include_str!("../../../README.md")] // TODO: fix links
 
 #[macro_use]
 extern crate tracing;
 
 pub extern crate bytes;
-
-pub mod zero_copy;
+pub extern crate multibytes;
 
 mod channel;
-pub mod util;
+mod util;
+pub mod quic_zc;
 pub mod frame;
 pub mod proto;
 

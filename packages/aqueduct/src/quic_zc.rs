@@ -1,6 +1,6 @@
 ///! Internal utilities for bridging between our MultiBytes types and QUIC.
 
-use crate::zero_copy::MultiBytes;
+use multibytes::MultiBytes;
 use bytes::Bytes;
 
 

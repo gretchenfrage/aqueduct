@@ -1,12 +1,8 @@
 //! Typed API for reading frames from quic streams and datagrams.
 
 use crate::{
-    zero_copy::{
-        self,
-        MultiBytes,
-        TooFewBytesError,
-    },
     frame::common::*,
+    quic_zc,
 };
 use std::{
     num::NonZero,
@@ -18,6 +14,7 @@ use std::{
         Arc,
     },
 };
+use multibytes::*;
 use bytes::Bytes;
 use anyhow::{anyhow, Error, Result};
 
@@ -62,18 +59,18 @@ impl From<TooFewBytesError> for ResetError {
     }
 }
 
-impl From<zero_copy::quic::ReadError> for ResetError {
-    fn from(e: zero_copy::quic::ReadError) -> Self {
+impl From<quic_zc::ReadError> for ResetError {
+    fn from(e: quic_zc::ReadError) -> Self {
         match e {
-            zero_copy::quic::ReadError::Quic(quinn::ReadError::Reset(reset_code_int)) => {
+            quic_zc::ReadError::Quic(quinn::ReadError::Reset(reset_code_int)) => {
                 ResetCode::from_u64(reset_code_int.into_inner())
                     .map(ResetError::Reset)
                     .unwrap_or_else(|| ResetError::Other(
                         anyhow!("invalid reset code int: {}", reset_code_int)
                     ))
             },
-            zero_copy::quic::ReadError::Quic(e) => ResetError::Other(e.into()),
-            zero_copy::quic::ReadError::TooFewBytes => TooFewBytesError.into(),
+            quic_zc::ReadError::Quic(e) => ResetError::Other(e.into()),
+            quic_zc::ReadError::TooFewBytes => TooFewBytesError.into(),
         }
     }
 }
@@ -98,7 +95,7 @@ struct QuicReader {
 
 /// Source field of QuicReader.
 enum QuicReaderSource {
-    Stream(zero_copy::quic::QuicStreamReader),
+    Stream(quic_zc::QuicStreamReader),
     Datagram(MultiBytes),
 }
 
@@ -300,7 +297,7 @@ pub async fn uni_stream(
     received_version: Arc<AtomicBool>,
 ) -> ResetResult<UniFrames> {
     UniFrames::begin_frame(QuicReader {
-        source: QuicReaderSource::Stream(zero_copy::quic::QuicStreamReader::new(stream)),
+        source: QuicReaderSource::Stream(quic_zc::QuicStreamReader::new(stream)),
         side,
         received_version,
     }).await
@@ -497,7 +494,7 @@ pub async fn bidi_stream(
     received_version: Arc<AtomicBool>,
 ) -> ResetResult<BidiFrames> {
     let mut reader = QuicReader {
-        source: QuicReaderSource::Stream(zero_copy::quic::QuicStreamReader::new(stream)),
+        source: QuicReaderSource::Stream(quic_zc::QuicStreamReader::new(stream)),
         side,
         received_version,
     };

@@ -1,9 +1,6 @@
 //! Typed API for writing frames to quic streams and datagrams.
 
-use crate::{
-    zero_copy::MultiBytes,
-    frame::common::*,
-};
+use crate::frame::common::*;
 use std::sync::{
     Arc,
     atomic::{
@@ -12,6 +9,7 @@ use std::sync::{
     },
 };
 use quinn::{SendStream, Connection, SendDatagramError};
+use multibytes::*;
 use anyhow::*;
 
 
