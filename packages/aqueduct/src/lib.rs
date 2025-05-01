@@ -9,10 +9,10 @@ pub extern crate bytes;
 pub extern crate multibytes;
 
 mod channel;
-mod util;
+//mod util;
 pub mod quic_zc;
 pub mod frame;
-//pub mod proto;
+pub mod proto;
 
 pub use crate::channel::api::*;
 

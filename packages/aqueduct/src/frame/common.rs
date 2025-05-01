@@ -56,7 +56,6 @@ pub enum FrameTag {
     AckNackUnreliable = 9,
     CloseReceiver = 10,
     ForgetChannel = 11,
-    Dequeued = 12,
 }
 
 impl FrameTag {
@@ -75,16 +74,15 @@ impl FrameTag {
             AckNackUnreliable,
             CloseReceiver,
             ForgetChannel,
-            Dequeued,
         ].into_iter().find(|&frame_type| frame_type as u8 == b)
     }
 }
 
 
 // constants for variable length integer coding.
-pub const VLI_MASK: u8 = 0b01111111;
-pub const VLI_MORE: u8 = 0b10000000;
-pub const VLI_FINAL_SHIFT: u8 = 56;
+pub const VARINT_MASK: u8 = 0b01111111;
+pub const VARINT_MORE: u8 = 0b10000000;
+pub const VARINT_FINAL_SHIFT: u8 = 56;
 
 
 // constants for version frame coding.

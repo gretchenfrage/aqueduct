@@ -4,73 +4,42 @@ use crate::{
     frame::common::*,
     quic_zc,
 };
-use std::{
-    num::NonZero,
-    sync::{
-        atomic::{
-            Ordering::Relaxed,
-            AtomicBool,
-        },
-        Arc,
-    },
-};
 use multibytes::*;
 use bytes::Bytes;
-use anyhow::{anyhow, Error, Result};
+use anyhow::anyhow;
 
 
 // ==== error handling ====
 
 
-/// Result type for reading Aqueduct frames from a QUIC stream/datagram wherein receiving a reset
-/// of the underlying stream may need to be handled gracefully.
-pub type ResetResult<T> = std::result::Result<T, ResetError>;
+pub type Result<T> = std::result::Result<T, Error>;
 
-/// Error type for reading Aqueduct frames from a QUIC stream/datagram wherein receiving a reset
-/// of the underlying stream may need to be handled gracefully.
 #[derive(Debug)]
-pub enum ResetError {
+pub enum Error {
     /// A reset was received on the underlying QUIC stream.
-    Reset(ResetCode),
+    Reset,
     /// Some unrecoverable error occurred.
-    Other(Error),
+    Other(anyhow::Error),
 }
 
-impl ResetError {
-    /// Convert to `Error` by treating QUIC stream reset in the current scenario as unrecoverable.
-    fn no_reset(self, dbg_ctx: &str) -> Error {
-        match self {
-            ResetError::Reset(code) =>
-                anyhow!("unexpected stream reset {:?} ({})", code, dbg_ctx),
-            ResetError::Other(e) => e,
-        }
+impl From<anyhow::Error> for Error {
+    fn from(e: anyhow::Error) -> Self {
+        Error::Other(e)
     }
 }
 
-impl From<Error> for ResetError {
-    fn from(e: Error) -> Self {
-        ResetError::Other(e)
-    }
-}
-
-impl From<TooFewBytesError> for ResetError {
+impl From<TooFewBytesError> for Error {
     fn from(TooFewBytesError: TooFewBytesError) -> Self {
-        Error::msg("too few bytes").into()
+        anyhow::Error::msg("too few bytes").into()
     }
 }
 
-impl From<quic_zc::ReadError> for ResetError {
-    fn from(e: quic_zc::ReadError) -> Self {
+impl From<quic_zc::Error> for Error {
+    fn from(e: quic_zc::Error) -> Self {
         match e {
-            quic_zc::ReadError::Quic(quinn::ReadError::Reset(reset_code_int)) => {
-                ResetCode::from_u64(reset_code_int.into_inner())
-                    .map(ResetError::Reset)
-                    .unwrap_or_else(|| ResetError::Other(
-                        anyhow!("invalid reset code int: {}", reset_code_int)
-                    ))
-            },
-            quic_zc::ReadError::Quic(e) => ResetError::Other(e.into()),
-            quic_zc::ReadError::TooFewBytes => TooFewBytesError.into(),
+            quic_zc::Error::Quic(quinn::ReadError::Reset(_)) => Error::Reset,
+            quic_zc::Error::Quic(e) => Error::Other(e.into()),
+            quic_zc::Error::TooFewBytes => TooFewBytesError.into(),
         }
     }
 }
@@ -79,210 +48,102 @@ impl From<quic_zc::ReadError> for ResetError {
 // ==== module-internal utilities ====
 
 
-/// Utility internal to frame reading module:
-///
-/// - abstracts over zero-copy layer for QUIC stream versus datagram
-/// - provides helper methods for reading common primitives
-/// - is a place to store some state used for validation
-struct QuicReader {
-    /// Source of the byte data.
-    source: QuicReaderSource,
-    /// Which side of the Aqueduct connection the local side is.
-    side: Side,
-    /// Whether a Version frame has been received on this connection from any stream or datagram.
-    received_version: Arc<AtomicBool>,
-}
-
-/// Source field of QuicReader.
-enum QuicReaderSource {
+// - abstracts over zero-copy layer for QUIC stream versus datagram
+// - provides helper methods for reading common primitives
+enum Reader {
     Stream(quic_zc::QuicStreamReader),
     Datagram(MultiBytes),
 }
 
-impl QuicReader {
+impl Reader {
     // read bytes and copy to buf
-    async fn read(&mut self, buf: &mut [u8]) -> ResetResult<()> {
-        Ok(match &mut self.source {
-            &mut QuicReaderSource::Stream(ref mut inner) => inner.read(buf).await?,
-            &mut QuicReaderSource::Datagram(ref mut inner) => inner.read(buf)?,
+    async fn read(&mut self, buf: &mut [u8]) -> Result<()> {
+        Ok(match self {
+            &mut Reader::Stream(ref mut inner) => inner.read(buf).await?,
+            &mut Reader::Datagram(ref mut inner) => inner.read(buf)?,
         })
     }
 
     // read bytes zero-copy-ly
-    async fn read_zc(&mut self, n: usize) -> ResetResult<MultiBytes> {
-        Ok(match &mut self.source {
-            &mut QuicReaderSource::Stream(ref mut inner) => inner.read_zc(n).await?,
-            &mut QuicReaderSource::Datagram(ref mut inner) => inner.read_zc(n)?,
+    async fn read_zc(&mut self, n: usize) -> Result<MultiBytes> {
+        Ok(match self {
+            &mut Reader::Stream(ref mut inner) => inner.read_zc(n).await?,
+            &mut Reader::Datagram(ref mut inner) => inner.read_zc(n)?,
         })
     }
 
     // whether the data source ends immediately after bytes read so far
-    async fn is_done(&mut self) -> ResetResult<bool> {
-        Ok(match &mut self.source {
-            &mut QuicReaderSource::Stream(ref mut inner) => inner.is_done().await?,
-            &mut QuicReaderSource::Datagram(ref inner) => inner.len() == 0,
+    async fn is_done(&mut self) -> Result<bool> {
+        Ok(match self {
+            &mut Reader::Stream(ref mut inner) => inner.is_done().await?,
+            &mut Reader::Datagram(ref inner) => inner.len() == 0,
         })
     }
 
     // read a single byte
-    async fn read_byte(&mut self) -> ResetResult<u8> {
+    async fn read_byte(&mut self) -> Result<u8> {
         let mut buf = [0];
         self.read(&mut buf).await?;
         let [b] = buf;
         Ok(b)
     }
 
-    // read a frame type byte
-    async fn read_frame_type(&mut self) -> ResetResult<FrameType> {
-        let b = self.read_byte().await?;
-        FrameType::from_byte(b).ok_or_else(|| anyhow!("invalid frame type byte: {}", b).into())
-    }
-
     // read a var len int. if limit is Some, decrements the referenced usize by the number of bytes
     // read, or errors if doing so would underflow.
-    async fn read_vli_with_limit(&mut self, mut limit: Option<&mut usize>) -> ResetResult<u64> {
+    async fn read_varint_with_limit(&mut self, mut limit: Option<&mut usize>) -> Result<u64> {
         let mut i: u64 = 0;
         for x in 0..8 {
             if let Some(limit) = limit.as_mut() {
                 if **limit == 0 {
-                    return Err(anyhow!("too few bytes").into());
+                    return Err(TooFewBytesError.into());
                 }
                 **limit -= 1;
             }
             let b = self.read_byte().await?;
-            i |= ((b & VLI_MASK) as u64) << (x * 7);
-            if (b & VLI_MORE) == 0 {
+            i |= ((b & VARINT_MASK) as u64) << (x * 7);
+            if (b & VARINT_MORE) == 0 {
                 return Ok(i);
             }
         }
-        debug_assert!((i & (0xffu64 << VLI_FINAL_SHIFT)) == 0);
+        debug_assert!((i & (0xffu64 << VARINT_FINAL_SHIFT)) == 0);
         if let Some(limit) = limit.as_mut() {
             if **limit == 0 {
-                return Err(anyhow!("too few bytes").into());
+                return Err(TooFewBytesError.into());
             }
             **limit -= 1;
         }
         let b = self.read_byte().await?;
-        i |= (b as u64) << VLI_FINAL_SHIFT;
+        i |= (b as u64) << VARINT_FINAL_SHIFT;
         Ok(i)
     }
 
     // read a var len int.
-    async fn read_vli(&mut self) -> ResetResult<u64> {
-        Ok(self.read_vli_with_limit(None).await?)
+    async fn read_varint(&mut self) -> Result<u64> {
+        Ok(self.read_varint_with_limit(None).await?)
     }
 
     // read a var len int, then cast to usize or error if unable.
-    async fn read_vli_usize(&mut self) -> ResetResult<usize> {
-        let n = self.read_vli().await?;
+    async fn read_varint_usize_with_limit(&mut self, limit: Option<&mut usize>) -> Result<usize> {
+        let n = self.read_varint_with_limit(limit).await?;
         n.try_into().map_err(|_| anyhow!("overflow casting var len int to usize: {}", n).into())
     }
 
-    // read a channel id.
-    async fn read_chan_id(&mut self) -> ResetResult<ChanId> {
-        self.read_vli().await.map(ChanId)
+    async fn read_varint_usize(&mut self) -> Result<usize> {
+        self.read_varint_usize_with_limit(None).await
     }
 
-    // read and validate the contents of a Version frame. if successful, set the `received_version`
-    // connection-global atomic to true.
-    async fn read_version_frame(&mut self) -> ResetResult<()> {
-        for b in VERSION_FRAME_MAGIC_BYTES {
-            if self.read_byte().await? != b {
-                return Err(anyhow!("wrong Version frame magic byte sequence").into());
-            }
+    // read a varbytes (varint encoding length, followed by bytes). if limit is Some, decrements
+    // the referenced usize by the number of bytes read, or errors if doing so would underflow.
+    async fn read_varbytes_with_limit(&mut self, mut limit: Option<&mut usize>) -> Result<MultiBytes> {
+        let len = self.read_varint_usize_with_limit(limit.as_mut().map(|l| &mut **l)).await?;
+        if let Some(limit) = limit.as_mut() {
+            let Some(new_limit) = limit.checked_sub(len)
+            else {
+                return Err(TooFewBytesError.into());
+            };
+            **limit = new_limit; 
         }
-        for b in VERSION_FRAME_HUMAN_TEXT {
-            if self.read_byte().await? != b {
-                return Err(anyhow!("wrong Version frame human text").into());
-            }
-        }
-        let version_number_length = self.read_vli_usize().await?;
-        let mut buf_space = [0; 0xff];
-        if version_number_length > buf_space.len() {
-            return Err(anyhow!("unreasonably long Version frame version number").into());
-        }
-        let buf = &mut buf_space[..version_number_length];
-        self.read(buf).await?;
-        let version_num = ascii_to_str(buf).ok_or(Error::msg("non-ASCII version number"))?;
-        if version_num != VERSION {
-            return
-                Err(anyhow!("mismatching Version frame version number: {:?}", version_num).into());
-        }
-        self.received_version.store(true, Relaxed);
-        Ok(())
-    }
-
-    // return Err unless the `received_version` connection-global atomic is set to true.
-    fn ensure_received_version(&mut self, dbg_ctx: &str) -> Result<()> {
-        if self.received_version.load(Relaxed) {
-            Ok(())
-        } else {
-            Err(anyhow!(
-                "received non-Version frame before receiving Version frame in connection ({})",
-                dbg_ctx,
-            ).into())
-        }
-    }
-}
-
-// utility internal to the frame reading module for reading pos-neg range data.
-struct PosNegRangeReader {
-    reader: QuicReader,
-    remaining_byte_len: usize,
-    zero_delta_validation_state: ZeroDeltaValidationState,
-}
-
-// state for validating pos-neg range data deltas for not containing invalid zeroes.
-#[derive(Copy, Clone, PartialEq)]
-enum ZeroDeltaValidationState {
-    HasNotReadAny,
-    HasReadOnlyInitialZeroDelta,
-    HasReadNonZeroDelta,
-}
-
-impl PosNegRangeReader {
-    // construct with the length prefix having already been read.
-    fn new(reader: QuicReader, byte_len: usize) -> Self {
-        PosNegRangeReader {
-            reader,
-            remaining_byte_len: byte_len,
-            zero_delta_validation_state: ZeroDeltaValidationState::HasNotReadAny,
-        }
-    }
-
-    // read the next delta, if there is one.
-    async fn next_delta(&mut self) -> ResetResult<Option<u64>> {
-        if self.remaining_byte_len == 0 {
-            if self.zero_delta_validation_state ==
-                ZeroDeltaValidationState::HasReadOnlyInitialZeroDelta
-            {
-                Err(anyhow!("pos-neg range data contained only initial zero delta").into())
-            } else {
-                Ok(None)
-            }
-        } else {
-            let delta = self.reader.read_vli_with_limit(Some(&mut self.remaining_byte_len)).await?;
-            if delta == 0 {
-                if self.zero_delta_validation_state == ZeroDeltaValidationState::HasNotReadAny {
-                    self.zero_delta_validation_state =
-                        ZeroDeltaValidationState::HasReadOnlyInitialZeroDelta;
-                } else {
-                    return Err(anyhow!("pos-neg range data contained invalid zero delta").into());
-                }
-            } else {
-                self.zero_delta_validation_state = ZeroDeltaValidationState::HasReadNonZeroDelta;
-            }
-            Ok(Some(delta))
-        }
-    }
-
-    // assert done, and convert to inner QuicReader
-    fn done(self) -> QuicReader {
-        assert!(
-            self.remaining_byte_len == 0,
-            "PosNegRangeReader not done (Aqueduct implementation bug)",
-        );
-        self.reader
+        self.read_zc(len).await
     }
 }
 
@@ -290,512 +151,281 @@ impl PosNegRangeReader {
 // ==== the actual API for reading frames ====
 
 
-/// Begin reading Aqueduct frames from a QUIC unidirectional stream.
-pub async fn uni_stream(
-    stream: quinn::RecvStream,
-    side: Side,
-    received_version: Arc<AtomicBool>,
-) -> ResetResult<UniFrames> {
-    UniFrames::begin_frame(QuicReader {
-        source: QuicReaderSource::Stream(quic_zc::QuicStreamReader::new(stream)),
-        side,
-        received_version,
-    }).await
-}
+/// Typed API for reading a sequence of Aqueduct frames from a QUIC stream or datagram.
+pub struct Frames(Reader);
 
-/// Begin reading Aqueduct frames from a QUIC datagram.
-pub async fn datagram(
-    datagram: Bytes,
-    side: Side,
-    received_version: Arc<AtomicBool>,
-) -> Result<UniFrames> {
-    // this function could be made not async, but it's not worthwhile to do so.
-    UniFrames::begin_frame(QuicReader {
-        source: QuicReaderSource::Datagram(datagram.into()),
-        side,
-        received_version,
-    }).await.map_err(|e| match e {
-        ResetError::Reset(_) => unreachable!("a datagram cannot experience stream reset"),
-        ResetError::Other(e) => e,
-    })
-}
-
-/// Typed API for starting to read Aqueduct frames from a QUIC unidirectional stream or datagram.
-#[must_use]
-pub enum UniFrames {
-    /// Stream/datagram contains (maybe a Version frame, then) one or more Message frames.
-    Message(Message),
-    /// Stream/datagram contains (maybe a Version frame, then) one ClosedChannelLost frame.
-    ClosedChannelLost(ClosedChannelLost),
-}
-
-impl UniFrames {
-    /// Read a frame type byte and construct self based on it.
-    async fn begin_frame(mut reader: QuicReader) -> ResetResult<Self> {
-        let mut ft = reader.read_frame_type().await?;
-
-        if ft == FrameType::Version {
-            reader.read_version_frame().await?;
-            ft = reader.read_frame_type().await?;
-        } else {
-            reader.ensure_received_version("UniFrames")?;
-        }           
-
-        Ok(match ft {
-            FrameType::Message => UniFrames::Message(Message(reader)),
-            FrameType::ClosedChannelLost =>
-                UniFrames::ClosedChannelLost(ClosedChannelLost(reader)),
-            ft => return Err(anyhow!("unexpected frame type {:?} in UniFrames context", ft).into()),
-        })
+impl Frames {
+    pub fn from_stream(stream: quinn::RecvStream) -> Self {
+        Frames(Reader::Stream(quic_zc::QuicStreamReader::new(stream)))
     }
-}
 
-/// Part of typed API for reading a Message frame.
-#[must_use]
-pub struct Message(QuicReader);
-
-impl Message {
-    /// Read the `sent_on` field.
-    pub async fn sent_on(mut self) -> ResetResult<(Message2, ChanIdLocalReceiver)> {
-        let o = self.0.read_chan_id().await?;
-        let SortByDir::LocalReceiver(o) = o.sort_by_dir(self.0.side) else {
-            return Err(anyhow!(
-                "received Message frame with sent_on field in wrong direction"
-            ).into());
-        };
-        Ok((Message2(self.0, o), o))
+    pub fn from_datagram(datagram: Bytes) -> Self {
+        Frames(Reader::Datagram(datagram.into()))
     }
-}
 
-/// Part of typed API for reading a Message frame.
-#[must_use]
-pub struct Message2(QuicReader, ChanIdLocalReceiver);
-
-impl Message2 {
-    /// Read the `message_num` field.
-    pub async fn message_num(mut self) -> ResetResult<(Message3, MessageNum)> {
-        let o = self.0.read_vli().await?;
-        let o = match &self.0.source {
-            &QuicReaderSource::Stream(_) => MessageNum::Reliable(o),
-            &QuicReaderSource::Datagram(_) => MessageNum::Unreliable(o),
-        };
-        Ok((Message3(self.0, self.1), o))
-    }
-}
-
-/// Part of typed API for reading a Message frame.
-#[must_use]
-pub struct Message3(QuicReader, ChanIdLocalReceiver);
-
-impl Message3 {
-    /// Read the byte length of the `attachments` field (may not be the number of elements).
-    pub async fn attachments_len(mut self) -> ResetResult<(Message4, usize)> {
-        let len = self.0.read_vli_usize().await?;
-        Ok((Message4(self.0, self.1, len), len))
-    }
-}
-
-/// Part of typed API for reading a Message frame.
-#[must_use]
-pub struct Message4(QuicReader, ChanIdLocalReceiver, usize);
-
-impl Message4 {
-    /// Read the next element of the `attachments` field, or return `None` if there are no more.
-    pub async fn next_attachment(&mut self) -> ResetResult<Option<ChanIdRemotelyMinted>> {
-        if self.2 == 0 {
+    // begin reading a frame.
+    pub async fn frame(mut self) -> Result<Option<Frame>> {
+        if self.0.is_done().await? {
             return Ok(None);
         }
-        let o = ChanId(self.0.read_vli_with_limit(Some(&mut self.2)).await?);
-        let SortByMintedBy::RemotelyMinted(o) = o.sort_by_minted_by(self.0.side) else {
-            return Err(anyhow!(
-                "received Message frame with attached channel minted by wrong side"
-            ).into());
-        };
-        Ok(Some(o))
+
+        let tag_byte = self.0.read_byte().await?;
+        let tag = FrameTag::from_byte(self.0.read_byte().await?)
+            .ok_or_else(|| anyhow!("unknown frame tag byte: {}", tag_byte))?;
+        Ok(Some(match tag {
+            FrameTag::Version => Frame::Version(self.version().await?),
+            FrameTag::AckVersion => Frame::AckVersion(self),
+            FrameTag::ConnectionHeaders => Frame::ConnectionHeaders(self.connection_headers().await?),
+            FrameTag::RouteTo => Frame::RouteTo(self.route_to().await?),
+            FrameTag::Message => Frame::Message(self.message().await?),
+            FrameTag::SentUnreliable => Frame::SentUnreliable(self.sent_unreliable().await?),
+            FrameTag::FinishSender => Frame::FinishSender(self.finish_sender().await?),
+            FrameTag::CancelSender => Frame::CancelSender(self),
+            FrameTag::AckReliable => Frame::AckReliable(self.ack_nack_ranges().await?),
+            FrameTag::AckNackUnreliable => Frame::AckNackUnreliable(self.ack_nack_ranges().await?),
+            FrameTag::CloseReceiver => Frame::CloseReceiver(self),
+            FrameTag::ForgetChannel => Frame::ForgetChannel(self.forget_channel().await?),
+        }))
     }
 
-    /// Stop reading the `attachments` field. Panics if there are un-read attachments.
-    pub fn done(self) -> Message5 {
-        assert!(self.2 == 0, "Message4.done without reading all attachments");
-        Message5(self.0, self.1)
-    }
-}
-
-/// Part of typed API for reading a Message frame.
-#[must_use]
-pub struct Message5(QuicReader, ChanIdLocalReceiver);
-
-impl Message5 {
-    /// Read the byte length of the `payload` field.
-    pub async fn payload_len(mut self) -> ResetResult<(Message6, usize)> {
-        let len = self.0.read_vli_usize().await?;
-        Ok((Message6(self.0, self.1, len), len))
-    }
-}
-
-/// Part of typed API for reading a Message frame.
-#[must_use]
-pub struct Message6(QuicReader, ChanIdLocalReceiver, usize);
-
-impl Message6 {
-    /// Read the entire contents of the `payload` field.
-    pub async fn payload(mut self) -> ResetResult<(NextMessage, MultiBytes)> {
-        let o = self.0.read_zc(self.2).await?;
-        Ok((NextMessage(self.0, self.1), o))
-    }
-}
-
-/// Typed API for possibly reading more Message frames after at least one Message frame has already
-/// been read from the underlying byte sequence.
-#[must_use]
-pub struct NextMessage(QuicReader, ChanIdLocalReceiver);
-
-impl NextMessage {
-    /// Begin reading the next Message frame, or return `None` if the underlying byte sequence
-    /// finishes gracefully after the previous Message frame.
-    pub async fn next_message(mut self) -> ResetResult<Option<Message2>> {
-        Ok(if self.0.is_done().await? {
-            None
-        } else {
-            let ft = self.0.read_frame_type().await?;
-            if ft != FrameType::Message {
-                return Err(anyhow!("unexpected frame type {:?} in NextMessage context", ft).into());
+    async fn version(mut self) -> Result<Self> {
+        for b in VERSION_FRAME_MAGIC_BYTES {
+            if self.0.read_byte().await? != b {
+                return Err(anyhow!("wrong VERSION frame magic byte sequence").into());
             }
-            let o = self.0.read_chan_id().await?;
-            if o != self.1.into() {
-                return Err(anyhow!(
-                    "received Message frames in same stream/datagram with different sent_to"
-                ).into());
-            }
-            Some(Message2(self.0, self.1))
-        })
-    }
-}
-
-/// Typed API for reading a ClosedChannelLost frame.
-#[must_use]
-pub struct ClosedChannelLost(QuicReader);
-
-impl ClosedChannelLost {
-    /// Read the `channel_id` field.
-    pub async fn chan_id(mut self) -> Result<(ExpectFinishNoReset, ChanIdRemotelyMinted)> {
-        let o = self.0.read_chan_id().await.map_err(|e| e.no_reset("after ClosedChannelLost"))?;
-        let SortByMintedBy::RemotelyMinted(o) = o.sort_by_minted_by(self.0.side) else {
-            return Err(anyhow!("received ClosedChannelLost frame with locally minted channel id"));
-        };
-        Ok((ExpectFinishNoReset(self.0, "after ClosedChannelLost"), o))
-    }
-}
-
-/// Begin reading Aqueduct frames from a QUIC bidirectional stream.
-pub async fn bidi_stream(
-    stream: quinn::RecvStream,
-    side: Side,
-    received_version: Arc<AtomicBool>,
-) -> ResetResult<BidiFrames> {
-    let mut reader = QuicReader {
-        source: QuicReaderSource::Stream(quic_zc::QuicStreamReader::new(stream)),
-        side,
-        received_version,
-    };
-
-    let mut ft = reader.read_frame_type().await?;
-
-    if ft == FrameType::Version {
-        reader.read_version_frame().await?;
-        ft = reader.read_frame_type().await?;
-    } else {
-        if ft == FrameType::ConnectionControl {
-            return Err(anyhow!("ConnectionControl frame without preceding Version frame").into());
         }
-        reader.ensure_received_version("BidiFrames")?;
+        for b in VERSION_FRAME_HUMAN_TEXT {
+            if self.0.read_byte().await? != b {
+                return Err(anyhow!("wrong VERSION frame human text").into());
+            }
+        }
+        let version_number_length = self.0.read_varint_usize().await?;
+        let mut buf_space = [0; 0xff];
+        if version_number_length > buf_space.len() {
+            return Err(anyhow!("unreasonably long VERSION frame version number").into());
+        }
+        let buf = &mut buf_space[..version_number_length];
+        self.0.read(buf).await?;
+        let version_num = ascii_to_str(buf).ok_or(anyhow::Error::msg("non-ASCII version number"))?;
+        if version_num != VERSION {
+            return
+                Err(anyhow!("unknown VERSION frame version number: {:?}", version_num).into());
+        }
+        Ok(self)
     }
 
-    Ok(match ft {
-        FrameType::ConnectionControl => BidiFrames::ConnectionControl(ConnectionControl(reader)),
-        FrameType::ChannelControl => BidiFrames::ChannelControl(ChannelControl(reader)),
-        ft => return Err(anyhow!("unexpected frame type {:?} in BidiFrames context", ft).into()),
-    })
-}
-
-/// Typed API for starting to read Aqueduct frames from a QUIC bidirectional stream.
-#[must_use]
-pub enum BidiFrames {
-    /// Stream contains a Version frame, then a ConnectionControl frame, making the stream
-    /// the connection control stream.
-    ConnectionControl(ConnectionControl),
-    /// Stream contains (maybe a Version frame, then) a ChannelControl frame, making the stream a
-    /// channel control stream.
-    ChannelControl(ChannelControl),
-}
-
-/// Typed API for reading a ConnectionControl frame.
-#[must_use]
-pub struct ConnectionControl(QuicReader);
-
-impl ConnectionControl {
-    /// Skip past the `headers` field in its entirety.
-    ///
-    /// TODO: Actually utilize headers.
-    pub async fn skip_headers_inner(mut self) -> Result<ExpectFinishNoReset> {
-        let len = self.0.read_vli_usize().await.map_err(|e| e.no_reset("after ConnectionControl"))?;
-        self.0.read_zc(len).await.map_err(|e| e.no_reset("after ConnectionControl"))?;
-        Ok(ExpectFinishNoReset(self.0, "after ConnectionControl"))
+    async fn connection_headers(mut self) -> Result<ConnectionHeaders> {
+        let headers_bytes = self.0.read_varint_usize().await?;
+        Ok(ConnectionHeaders(self.0, headers_bytes))
     }
-}
 
-/// Typed API for reading a ChannelControl frame.
-#[must_use]
-pub struct ChannelControl(QuicReader);
+    async fn route_to(mut self) -> Result<RouteTo> {
+        let chan_id = ChanId(self.0.read_varint().await?);
+        Ok(RouteTo { chan_id, next: self })
+    }
 
-impl ChannelControl {
-    /// Read the `channel_id` field.
-    pub async fn chan_id(mut self) -> ResetResult<ChanCtrlFrames> {
-        let o = self.0.read_chan_id().await?;
-        let SortByMintedBy::LocallyMinted(o) = o.sort_by_minted_by(self.0.side) else {
-            return Err(anyhow!(
-                "received ChannelControl frame with remotely minted channel ID"
-            ).into());
-        };
-        Ok(match o.sort_by_dir(self.0.side) {
-            SortByDir::LocalSender(o) =>
-                ChanCtrlFrames::Sender(SenderChanCtrlFrames(self.0), o),
-            SortByDir::LocalReceiver(o) =>
-                ChanCtrlFrames::Receiver(ReceiverChanCtrlFrames(self.0), o),
+    async fn message(mut self) -> Result<Message> {
+        let message_num = self.0.read_varint().await?;
+        let message_headers_bytes = self.0.read_varint_usize().await?;
+        Ok(Message {
+            message_num,
+            message_headers: MessageHeaders(self.0, message_headers_bytes),
+        })
+    }
+
+    async fn sent_unreliable(mut self) -> Result<SentUnreliable> {
+        let count = self.0.read_varint().await?;
+        Ok(SentUnreliable { count, next: self })
+    }
+
+    async fn finish_sender(mut self) -> Result<FinishSender> {
+        let sent_reliable = self.0.read_varint().await?;
+        Ok(FinishSender { sent_reliable, next: self })
+    }
+
+    async fn ack_nack_ranges(mut self) -> Result<AckNackRanges> {
+        let bytes = self.0.read_varint_usize().await?;
+        Ok(AckNackRanges(self.0, bytes))
+    }
+
+    async fn forget_channel(mut self) -> Result<ForgetChannel> {
+        let chan_id = ChanId(self.0.read_varint().await?);
+        Ok(ForgetChannel {
+            chan_id,
+            next: self,
         })
     }
 }
 
-/// Typed API for reading Aqueduct frames from a channel control stream.
-#[must_use]
-pub enum ChanCtrlFrames {
-    /// The local side is the sender side of the channel.
-    Sender(SenderChanCtrlFrames, ChanIdLocalSenderLocallyMinted),
-    /// The local side is the receiver side of the channel.
-    Receiver(ReceiverChanCtrlFrames, ChanIdLocalReceiverLocallyMinted),
-}
-
-/// Typed API for reading Aqueduct frames from a channel control stream for which the local side is
-/// the sender side of the channel.
-#[must_use]
-pub struct SenderChanCtrlFrames(QuicReader);
-
-impl SenderChanCtrlFrames {
-    /// Begin reading the next frame.
-    pub async fn next_frame(mut self) -> ResetResult<SenderChanCtrlFrame> {
-        Ok(match self.0.read_frame_type().await? {
-            FrameType::AckReliable =>
-                SenderChanCtrlFrame::AckReliable(AckReliable(self.0)),
-            FrameType::AckNackUnreliable =>
-                SenderChanCtrlFrame::AckNackUnreliable(AckNackUnreliable(self.0)),
-            FrameType::CloseReceiver =>
-                SenderChanCtrlFrame::CloseReceiver(CloseReceiver(self.0)),
-            ft =>
-                return Err(
-                    anyhow!("unexpected frame type {:?} in SenderChanCtrlFrames context", ft).into()
-                ),
-        })
-    }
-}
-
-/// Typed API for starting to read an Aqueduct frame from a channel control stream for which the
-/// local side is the sender side of the channel.
-#[must_use]
-pub enum SenderChanCtrlFrame {
-    /// The frame currently being read is an AckReliable frame.
-    AckReliable(AckReliable),
-    /// The frame currently being read is an AckNackUnreliable frame.
-    AckNackUnreliable(AckNackUnreliable),
-    /// The frame currently being read is a CloseReceiver frame.
-    CloseReceiver(CloseReceiver),
-}
-
-/// Part of typed API for reading an AckReliable frame.
-#[must_use]
-pub struct AckReliable(QuicReader);
-
-impl AckReliable {
-    /// Read the byte length of the `acks` field (may not be the number of elements).
-    pub async fn acks_len(mut self) -> ResetResult<(AckReliable2, usize)> {
-        let o = self.0.read_vli_usize().await?;
-        Ok((AckReliable2(PosNegRangeReader::new(self.0, o)), o))
-    }
-}
-
-/// Part of typed API for reading an AckReliable frame.
-#[must_use]
-pub struct AckReliable2(PosNegRangeReader);
-
-impl AckReliable2 {
-    /// Read the next pos-neg range delta of the `acks` field, or return `None` if there are no
-    /// more.
-    ///
-    /// The first range represents acks, the second range represents not-yet-acks, and then
-    /// they alternate back and forth.
-    pub async fn next_delta(&mut self) -> ResetResult<Option<u64>> {
-        // TODO: error on trailing neg
-        self.0.next_delta().await
-    }
-
-    /// Stop reading the `acks` field. Panics if there are un-read deltas.
-    pub fn done(self) -> SenderChanCtrlFrames {
-        SenderChanCtrlFrames(self.0.done())
-    }
-}
-
-/// Part of typed API for reading an AckNackUnreliable frame.
-#[must_use]
-pub struct AckNackUnreliable(QuicReader);
-
-impl AckNackUnreliable {
-    /// Read the byte length of the `ack_nacks` field (may not be the number of elements).
-    pub async fn ack_nacks_len(mut self) -> ResetResult<(AckNackUnreliable2, usize)> {
-        let o = self.0.read_vli_usize().await?;
-        Ok((AckNackUnreliable2(PosNegRangeReader::new(self.0, o)), o))
-    }
-}
-
-/// Part of typed API for reading an AckNackUnreliable frame.
-#[must_use]
-pub struct AckNackUnreliable2(PosNegRangeReader);
-
-impl AckNackUnreliable2 {
-    /// Read the next pos-neg range delta of the `ack_nacks` field, or return `None` if there are
-    /// no more.
-    ///
-    /// The first range represents acks, the second range represents nacks, and then they alternate
-    /// back and forth.
-    pub async fn next_delta(&mut self) -> ResetResult<Option<u64>> {
-        self.0.next_delta().await
-    }
-
-    /// Stop reading the `ack_nacks` field. Panics if there are un-read deltas.
-    pub fn done(self) -> SenderChanCtrlFrames {
-        SenderChanCtrlFrames(self.0.done())
-    }
-}
-
-/// Part of typed API for reading a CloseReceiver frame.
-#[must_use]
-pub struct CloseReceiver(QuicReader);
-
-impl CloseReceiver {
-    /// Read the byte length of the `final_reliable_ack_nacks` field (may not be the number of
-    /// elements).
-    pub async fn final_reliable_ack_nacks_len(mut self) -> ResetResult<(CloseReceiver2, usize)> {
-        let o = self.0.read_vli_usize().await?;
-        Ok((CloseReceiver2(PosNegRangeReader::new(self.0, o)), o))
-    }
-}
-
-/// Part of typed API for reading an CloseReceiver frame.
-#[must_use]
-pub struct CloseReceiver2(PosNegRangeReader);
-
-impl CloseReceiver2 {
-    /// Read the next pos-neg range delta of the `final_reliable_ack_nacks` field, or return
-    /// `None` if there are no more.
-    ///
-    /// The first range represents acks, the second range represents nacks, and then they alternate
-    /// back and forth.
-    pub async fn next_delta(&mut self) -> ResetResult<Option<u64>> {
-        self.0.next_delta().await
-    }
-
-    /// Stop reading the `final_reliable_ack_nacks` field. Panics if there are un-read deltas.
-    pub fn done(self) -> ExpectFinishOrReset {
-        ExpectFinishOrReset(self.0.done(), "after CloseReceiver")
-    }
-}
-
-/// Typed API for reading Aqueduct frames from a channel control stream for which the local side is
-/// the receiver side of the channel.
-#[must_use]
-pub struct ReceiverChanCtrlFrames(QuicReader);
-
-impl ReceiverChanCtrlFrames {
-    /// Begin reading the next frame.
-    pub async fn next_frame(mut self) -> ResetResult<ReceiverChanCtrlFrame> {
-        Ok(match self.0.read_frame_type().await? {
-            FrameType::SentUnreliable =>
-                ReceiverChanCtrlFrame::SentUnreliable(SentUnreliable(self.0)),
-            FrameType::FinishSender =>
-                ReceiverChanCtrlFrame::FinishSender(FinishSender(self.0)),
-            ft =>
-                return Err(anyhow!(
-                    "unexpected frame type {:?} in ReceiverChanCtrlFrames context", ft
-                ).into()),
-        })
-    }
-}
-
-/// Typed API for starting to read an Aqueduct frame from a channel control stream for which the
-/// local side is the receiver side of the channel.
-#[must_use]
-pub enum ReceiverChanCtrlFrame {
-    /// The frame currently being read is an SentUnreliable frame.
+pub enum Frame {
+    Version(Frames),
+    AckVersion(Frames),
+    ConnectionHeaders(ConnectionHeaders),
+    RouteTo(RouteTo),
+    Message(Message),
     SentUnreliable(SentUnreliable),
-    /// The frame currently being read is an FinishSender frame.
     FinishSender(FinishSender),
+    CancelSender(Frames),
+    AckReliable(AckNackRanges),
+    AckNackUnreliable(AckNackRanges),
+    CloseReceiver(Frames),
+    ForgetChannel(ForgetChannel),
 }
 
-/// Typed API for reading a SentUnreliable frame.
-#[must_use]
-pub struct SentUnreliable(QuicReader);
+pub struct ConnectionHeaders(Reader, usize);
 
-impl SentUnreliable {
-    /// Read the `delta` field.
-    pub async fn delta(mut self) -> ResetResult<(ReceiverChanCtrlFrames, NonZero<u64>)> {
-        let o = self.0.read_vli().await?;
-        let Some(o) = NonZero::new(o)
+impl ConnectionHeaders {
+    pub fn remaining_bytes(&self) -> usize {
+        self.1
+    }
+
+    pub async fn header(&mut self) -> Result<(MultiBytes, MultiBytes)> {
+        Ok((
+            self.0.read_varbytes_with_limit(Some(&mut self.1)).await?,
+            self.0.read_varbytes_with_limit(Some(&mut self.1)).await?,
+        ))
+    }
+
+    pub fn done(self) -> Frames {
+        assert_eq!(self.remaining_bytes(), 0, "not done");
+        Frames(self.0)
+    }
+}
+
+pub struct RouteTo {
+    pub chan_id: ChanId,
+    pub next: Frames,
+}
+
+pub struct Message {
+    pub message_num: u64,
+    pub message_headers: MessageHeaders,
+}
+
+pub struct MessageHeaders(Reader, usize);
+
+impl MessageHeaders {
+    pub fn remaining_bytes(&self) -> usize {
+        self.1
+    }
+
+    pub async fn header(&mut self) -> Result<(MultiBytes, MultiBytes)> {
+        Ok((
+            self.0.read_varbytes_with_limit(Some(&mut self.1)).await?,
+            self.0.read_varbytes_with_limit(Some(&mut self.1)).await?,
+        ))
+    }
+
+    pub async fn done(mut self) -> Result<MessageAttachments> {
+        assert_eq!(self.remaining_bytes(), 0, "not done");
+        let attachments_bytes = self.0.read_varint_usize().await?;
+        Ok(MessageAttachments(self.0, attachments_bytes))
+    }
+}
+
+pub struct MessageAttachments(Reader, usize);
+
+impl MessageAttachments {
+    pub fn remaining_bytes(&self) -> usize {
+        self.1
+    }
+
+    pub async fn attachment(mut self) -> Result<MessageAttachment> {
+        let channel = ChanId(self.0.read_varint_with_limit(Some(&mut self.1)).await?);
+        let headers_bytes = self.0.read_varint_usize_with_limit(Some(&mut self.1)).await?;
+
+        let Some(attachments_remaining_bytes) = self.1.checked_sub(headers_bytes)
         else {
-            return Err(anyhow!("SentUnreliable delta of 0").into())
+            return Err(TooFewBytesError.into());
         };
-        Ok((ReceiverChanCtrlFrames(self.0), o))
+
+        Ok(MessageAttachment {
+            channel,
+            channel_headers: ChannelHeaders {
+                reader: self.0,
+                headers_remaining_bytes: headers_bytes,
+                attachments_remaining_bytes,
+            },
+        })
+    }
+
+    pub async fn done(mut self) -> Result<MessagePayload> {
+        assert_eq!(self.remaining_bytes(), 0, "not done");
+        let payload_bytes = self.0.read_varint_usize().await?;
+        Ok(MessagePayload(self.0, payload_bytes))
     }
 }
 
-/// Typed API for reading a FinishSender frame.
-#[must_use]
-pub struct FinishSender(QuicReader);
+pub struct MessageAttachment {
+    pub channel: ChanId,
+    pub channel_headers: ChannelHeaders,
+}
 
-impl FinishSender {
-    /// Read the `reliable_count` field. 
-    pub async fn reliable_count(mut self) -> ResetResult<(ExpectFinishOrReset, u64)> {
-        let o = self.0.read_vli().await?;
-        Ok((ExpectFinishOrReset(self.0, "after FinishSender"), o))
+pub struct ChannelHeaders {
+    reader: Reader,
+    headers_remaining_bytes: usize,
+    attachments_remaining_bytes: usize,
+}
+
+impl ChannelHeaders {
+    pub fn remaining_bytes(&self) -> usize {
+        self.headers_remaining_bytes
+    }
+
+    pub async fn header(&mut self) -> Result<(MultiBytes, MultiBytes)> {
+        Ok((
+            self.reader.read_varbytes_with_limit(Some(&mut self.headers_remaining_bytes)).await?,
+            self.reader.read_varbytes_with_limit(Some(&mut self.headers_remaining_bytes)).await?,
+        ))
+    }
+
+    pub fn done(self) -> MessageAttachments {
+        assert_eq!(self.remaining_bytes(), 0, "not done");
+        MessageAttachments(self.reader, self.attachments_remaining_bytes)
     }
 }
 
-/// Typed API for expecting a sequence of Aqueduct frames to gracefully finish after previously
-/// received frames, wherein receiving a reset of the underlying stream may still need to be
-/// handled gracefully.
-#[must_use]
-pub struct ExpectFinishOrReset(QuicReader, &'static str);
+pub struct MessagePayload(Reader, usize);
 
-impl ExpectFinishOrReset {
-    /// Wait to observe the graceful finishing of the underlying QUIC stream/datagram.
-    pub async fn finish(mut self) -> ResetResult<()> {
-        if self.0.is_done().await? {
-            Ok(())
-        } else {
-            Err(anyhow!("expected end of stream/datagram ({})", self.1).into())
-        }
+impl MessagePayload {
+    pub fn bytes(&self) -> usize {
+        self.1
+    }
+
+    pub async fn read(mut self) -> Result<(MultiBytes, Frames)> {
+        let payload = self.0.read_zc(self.1).await?;
+        Ok((payload, Frames(self.0)))
     }
 }
 
-/// Typed API for expecting a sequence of Aqueduct frames to gracefully finish after previously
-/// received frames.
-#[must_use]
-pub struct ExpectFinishNoReset(QuicReader, &'static str);
+pub struct SentUnreliable {
+    pub count: u64,
+    pub next: Frames,
+}
 
-impl ExpectFinishNoReset {
-    /// Wait to observe the graceful finishing of the underlying QUIC stream/datagram.
-    pub async fn finish(mut self) -> Result<()> {
-        if self.0.is_done().await.map_err(|e| e.no_reset(self.1))? {
-            Ok(())
-        } else {
-            Err(anyhow!("expected end of stream/datagram ({})", self.1).into())
-        }
+pub struct FinishSender {
+    pub sent_reliable: u64,
+    pub next: Frames,
+}
+
+pub struct AckNackRanges(Reader, usize);
+
+impl AckNackRanges {
+    pub fn remaining_bytes(&self) -> usize {
+        self.1
     }
+
+    pub async fn delta(&mut self) -> Result<u64> {
+        self.0.read_varint_with_limit(Some(&mut self.1)).await
+    }
+
+    pub fn done(self) -> Frames {
+        assert_eq!(self.remaining_bytes(), 0, "not done");
+        Frames(self.0)
+    }
+}
+
+pub struct ForgetChannel {
+    pub chan_id: ChanId,
+    pub next: Frames,
 }

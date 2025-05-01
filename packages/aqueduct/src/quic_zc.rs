@@ -11,20 +11,20 @@ const MAX_CHUNK_LENGTH: usize = 16384;
 
 
 /// Result type for QUIC zero-copy reading.
-pub type Result<T> = std::result::Result<T, ReadError>;
+pub type Result<T> = std::result::Result<T, Error>;
 
 /// Error type for QUIC zero-copy reading.
 #[derive(Debug)]
-pub enum ReadError {
+pub enum Error {
     /// Expected more bytes.
     TooFewBytes,
     /// Other QUIC error.
     Quic(quinn::ReadError),
 }
 
-impl From<quinn::ReadError> for ReadError {
+impl From<quinn::ReadError> for Error {
     fn from(e: quinn::ReadError) -> Self {
-        ReadError::Quic(e)
+        Error::Quic(e)
     }
 }
 
@@ -55,7 +55,7 @@ impl QuicStreamReader {
             if self.chunk.is_empty() {
                 self.chunk = self.stream
                     .read_chunk(MAX_CHUNK_LENGTH, true).await?
-                    .ok_or(ReadError::TooFewBytes)?
+                    .ok_or(Error::TooFewBytes)?
                     .bytes;
                 debug_assert!(!self.chunk.is_empty());
             }
@@ -78,7 +78,7 @@ impl QuicStreamReader {
             if self.chunk.is_empty() {
                 self.chunk = self.stream
                     .read_chunk(MAX_CHUNK_LENGTH, true).await?
-                    .ok_or(ReadError::TooFewBytes)?
+                    .ok_or(Error::TooFewBytes)?
                     .bytes;
                 debug_assert!(!self.chunk.is_empty());
             }

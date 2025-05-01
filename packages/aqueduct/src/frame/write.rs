@@ -13,9 +13,6 @@ use multibytes::*;
 use anyhow::*;
 
 
-// ==== internal Writer utility ====
-
-
 // utility internal to this module that wraps around MultiBytes and adds some helper functions.
 #[derive(Default, Clone)]
 struct Writer(MultiBytes);
@@ -37,9 +34,9 @@ impl Writer {
     }
 
     // write a var len int.
-    fn write_vli(&mut self, mut i: u64) {
+    fn write_varint(&mut self, mut i: u64) {
         for _ in 0..8 {
-            let mut b = (i as u8 & VLI_MASK) as u8;
+            let mut b = (i as u8 & VARINT_MASK) as u8;
             i >>= 7;
             b |= ((i != 0) as u8) << 7;
             self.write(&[b]);
@@ -51,20 +48,10 @@ impl Writer {
         self.write(&[i as u8]);
     }
 
-    // write a var len int, provided as a usize.
-    fn write_vli_usize(&mut self, i: usize) {
-        self.write_vli(i as u64);
-    }
-
-    // write a channel id.
-    fn write_chan_id(&mut self, chan_id: impl Into<ChanId>) {
-        self.write_vli(chan_id.into().0);
-    }
-
     // write a variable length-prefixed byte array (zero-copy-ly).
-    fn write_vlba<B: Into<MultiBytes>>(&mut self, bytes: B) {
+    fn write_varbytes<B: Into<MultiBytes>>(&mut self, bytes: B) {
         let bytes = bytes.into();
-        self.write_vli_usize(bytes.len());
+        self.write_varint(bytes.len() as u64);
         self.write_zc(bytes);
     }
 
@@ -115,18 +102,23 @@ impl Into<MultiBytes> for Writer {
 }
 
 
-// ==== API for writing frames ====
-
-
 /// Typed API for writing a sequence of Aqueduct frames to a QUIC stream or datagram.
 #[derive(Default)]
 pub struct Frames(Writer);
 
+macro_rules! tag_only_frame {
+    ($method:ident $variant:ident)=>{
+        pub fn $method(&mut self) {
+            self.0.write(&[FrameTag::$variant as u8]);
+        }
+    };
+}
+
 impl Frames {
     /// Construct, encoding a Version frame if must_send_version is true, but otherwise empty.
-    pub fn new_with_version_if(must_send_version: &Arc<AtomicBool>) -> Self {
+    pub fn new_with_version(remote_acked_version: &AtomicBool) -> Self {
         let mut frames = Frames::default();
-        if must_send_version.load(Relaxed) {
+        if !remote_acked_version.load(Relaxed) {
             frames.version();
         }
         frames
@@ -149,155 +141,90 @@ impl Frames {
         self.0.send_on_datagram(conn).await
     }
 
-    /// Encode a Version frame to `self`.
     pub fn version(&mut self) {
-        self.0.write(&[FrameType::Version as u8]);
+        self.0.write(&[FrameTag::Version as u8]);
         self.0.write(&VERSION_FRAME_MAGIC_BYTES);
         self.0.write(&VERSION_FRAME_HUMAN_TEXT);
-        self.0.write_vlba(VERSION);
+        self.0.write_varbytes(VERSION);
     }
 
-    /// Encode a ConnectionControl frame to `self`.
-    ///
-    /// TODO: headers
-    pub fn connection_control(&mut self) {
-        self.0.write(&[FrameType::ConnectionControl as u8]);
-        self.0.write(&[0]);
+    tag_only_frame!(ack_version AckVersion);
+
+    pub fn connection_headers(&mut self, connection_headers: Headers) {
+        self.0.write(&[FrameTag::ConnectionHeaders as u8]);
+        self.0.write_varbytes(connection_headers.0.0);
     }
 
-    /// Encode a ChannelControl frame to `self`.
-    pub fn channel_control(&mut self, chan_id: impl Into<ChanIdRemotelyMinted>) {
-        self.0.write(&[FrameType::ChannelControl as u8]);
-        self.0.write_chan_id(chan_id.into());
+    pub fn route_to(&mut self, chan_id: ChanId) {
+        self.0.write(&[FrameTag::RouteTo as u8]);
+        self.0.write_varint(chan_id.0);
     }
 
-    /// Encode a Message frame to `self`.
     pub fn message(
         &mut self,
-        sent_on: impl Into<ChanIdLocalSender>,
         message_num: u64,
+        message_headers: Headers,
         attachments: Attachments,
         payload: MultiBytes,
     ) {
-        self.0.write(&[FrameType::Message as u8]);
-        self.0.write_chan_id(sent_on.into());
-        self.0.write_vli(message_num);
-        self.0.write_vlba(attachments.0);
-        self.0.write_vlba(payload);
+        self.0.write(&[FrameTag::Message as u8]);
+        self.0.write_varint(message_num);
+        self.0.write_varbytes(message_headers.0.0);
+        self.0.write_varbytes(attachments.0.0);
+        self.0.write_varbytes(payload);
     }
 
-    /// Encode a SentUnreliable frame to `self`.
-    pub fn sent_unreliable(&mut self, delta: u64) {
-        self.0.write(&[FrameType::SentUnreliable as u8]);
-        self.0.write_vli(delta);
+    pub fn sent_unreliable(&mut self, count: u64) {
+        self.0.write(&[FrameTag::SentUnreliable as u8]);
+        self.0.write_varint(count);
     }
 
-    /// Encode an AckReliable frame to `self`.
-    pub fn ack_reliable(&mut self, acks: PosNegRanges) {
-        self.0.write(&[FrameType::AckReliable as u8]);
-        self.0.write_vlba(acks.finalize());
+    pub fn finish_sender(&mut self, sent_reliable: u64) {
+        self.0.write(&[FrameTag::FinishSender as u8]);
+        self.0.write_varint(sent_reliable);
     }
 
-    /// Encode an AckNackUnreliable frame to `self`.
-    pub fn ack_nack_unreliable(&mut self, ack_nacks: PosNegRanges) {
-        self.0.write(&[FrameType::AckNackUnreliable as u8]);
-        self.0.write_vlba(ack_nacks.finalize());
+    tag_only_frame!(cancel_sender CancelSender);
+    tag_only_frame!(ack_reliable AckReliable);
+
+    pub fn ack_nack_unreliable(&mut self, deltas: Deltas) {
+        self.0.write(&[FrameTag::AckNackUnreliable as u8]);
+        self.0.write_varbytes(deltas.0.0);
     }
 
-    /// Encode a FinishSender frame to `self`.
-    pub fn finish_sender(&mut self, reliable_count: u64) {
-        self.0.write(&[FrameType::FinishSender as u8]);
-        self.0.write_vli(reliable_count);
-    }
+    tag_only_frame!(close_receiver CloseReceiver);
 
-    /// Encode a CloseReceiver frame to `self`.
-    pub fn close_receiver(&mut self, reliable_ack_nacks: PosNegRanges) {
-        self.0.write(&[FrameType::CloseReceiver as u8]);
-        self.0.write_vlba(reliable_ack_nacks.written.0);
-    }
-
-    /// Encode a ClosedChannelLost frame to `self`.
-    pub fn closed_channel_lost(&mut self, chan_id: impl Into<ChanIdLocallyMinted>) {
-        self.0.write(&[FrameType::ClosedChannelLost as u8]);
-        self.0.write_chan_id(chan_id.into());
+    pub fn forget_channel(&mut self, chan_id: ChanId) {
+        self.0.write(&[FrameTag::ForgetChannel as u8]);
+        self.0.write_varint(chan_id.0);
     }
 }
 
-/// Typed API for encoding a sequence of Aqueduct message attachments to be included within an
-/// Aqueduct frame.
+#[derive(Default)]
+pub struct Headers(Writer);
+
+impl Headers {
+    pub fn header(&mut self, key: impl Into<MultiBytes>, val: impl Into<MultiBytes>) {
+        self.0.write_varbytes(key);
+        self.0.write_varbytes(val);
+    }
+}
+
 #[derive(Default)]
 pub struct Attachments(Writer);
 
 impl Attachments {
-    /// Encode an attachment.
-    pub fn attachment(&mut self, chan_id: impl Into<ChanIdLocallyMinted>) {
-        self.0.write_chan_id(chan_id.into());
+    pub fn attachment(&mut self, chan_id: ChanId, chan_headers: Headers) {
+        self.0.write_varint(chan_id.0);
+        self.0.write_varbytes(chan_headers.0.0);
     }
 }
 
-/// Typed API for encoding an Aqueduct pos-neg range sequence be included within an Aqueduct frame.
-///
-/// Automatically:
-///
-/// - Filters filters out empty ranges.
-/// - Merges adjacent pos/neg ranges.
-/// - Inserts an initial empty positive range if necessary.
-///
-/// As such, this can _mostly_ be used in arbitrary ways without panicking. However, if the user
-/// attempts to pass `self` to a function to encode a frame, and `self` does not include _any_
-/// non-empty ranges, that will panic.
 #[derive(Default)]
-pub struct PosNegRanges {
-    written: Writer,
-    pending: Option<(bool, u64)>,
-}
+pub struct Deltas(Writer);
 
-impl PosNegRanges {
-    /// Write a positive delta.
-    pub fn pos_delta(&mut self, delta: u64) {
-        if delta == 0 { return; }
-        match &mut self.pending {
-            &mut None => {
-                self.pending = Some((true, delta));
-            }
-            &mut Some((true, ref mut pending_delta)) => {
-                *pending_delta += delta;
-            }
-            &mut Some((false, pending_delta)) => {
-                debug_assert!(!self.written.is_empty());
-                self.written.write_vli(pending_delta);
-                self.pending = Some((true, delta));
-            }
-        }
-    }
-
-    /// Write a negative delta.
-    pub fn neg_delta(&mut self, delta: u64) {
-        if delta == 0 { return; }
-        match &mut self.pending {
-            &mut None => {
-                if self.written.is_empty() {
-                    // initial neg delta
-                    self.written.write_vli(0);
-                }
-                self.pending = Some((false, delta));
-            }
-            &mut Some((false, ref mut pending_delta)) => {
-                debug_assert!(!self.written.is_empty());
-                *pending_delta += delta;
-            }
-            &mut Some((true, pending_delta)) => {
-                self.written.write_vli(pending_delta);
-                self.pending = Some((true, delta));
-            }
-        }
-    }
-
-    fn finalize(mut self) -> MultiBytes {
-        if let Some((_, pending_delta)) = self.pending {
-            self.written.write_vli(pending_delta);
-        }
-        assert!(!self.written.is_empty(), "writing empty PosNegRanges (this is a bug)");
-        self.written.into()
+impl Deltas {
+    pub fn delta(&mut self, n: u64) {
+        self.0.write_varint(n);
     }
 }

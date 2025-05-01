@@ -19,6 +19,8 @@ where the lowest 7 bits of each byte encode the next lowest 7 bits of the
 integer, and the highest bit of each byte is 1 if there are additional bytes in
 the sequence.
 
+TODO: there is a discrepancy between this and my code
+
 ### 1.3 § Varbytes
 
 A variable length sequence of bytes is encoded as a varint conveying the number
@@ -92,8 +94,6 @@ The following frame types exist, and they are encoded as such:
 #### 2.2.3 § `CONNECTION_HEADERS`
 
 1. TAG: The byte 2.
-2. PER_CHANNEL_BUFFER: A varint.
-3. ALL_CHANNEL_BUFFER: A varint.
 4. CONNECTION_HEADERS: Header data.
 
 #### 2.2.4 § `ROUTE_TO`
@@ -146,7 +146,6 @@ Contextual: ROUTE_TO.CHANNEL.SENDER must be the frame receiver.
 Contextual: ROUTE_TO.CHANNEL.SENDER must be the frame receiver.
 
 1. TAG: The byte 9.
-2. CHANNEL: A chanid with SENDER equal to frame receiver.
 3. RANGES: A varbytes containing a sequence of varints. There must be more than
    zero varints. All varints must be nonzero, except the first if there are
    more than one.

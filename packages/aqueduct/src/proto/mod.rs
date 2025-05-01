@@ -1,589 +1,348 @@
 
-mod chan_id_mint;
-mod ack;
-
-use self::{
-    chan_id_mint::ChanIdMint,
-    ack::{
-        ReceiverReliableAckManager,
-        ReceiverUnreliableAckManager,
-    },
+use crate::frame::{
+    common::*,
+    read,
+    write,
 };
-use crate::{
-    channel::{
-        api::*,
-        error::*,
-    },
-    frame::{
-        common::*,
-        read::{self, ResetResult},
-        write,
-    },
-};
-use std::{
-    sync::{
-        atomic::{
-            AtomicBool,
-            Ordering::Relaxed,
-        },
-        Arc,
-    },
-    panic::{AssertUnwindSafe, catch_unwind},
-    num::NonZero,
+use std::sync::{
+    atomic::{Ordering, AtomicBool},
+    Mutex,
+    Condvar,
+    Arc,
 };
 use multibytes::MultiBytes;
-use dashmap::DashMap;
-use tokio::sync::mpsc::{
-    UnboundedSender as TokioUnboundedSender,
-    UnboundedReceiver as TokioUnboundedReceiver,
-    unbounded_channel as tokio_unbounded_channel,
+use tokio::sync::OnceCell;
+use dashmap::{
+    DashMap,
+    mapref::entry::Entry,
 };
-use anyhow::{Result, Context, anyhow};
+use anyhow::*;
 
 
-/// Top-level shared state of an Aqueduct connection.
-struct Connection {
-    /// The underlying QUIC connection.
-    quic_conn: quinn::Connection,
-    /// Whether we're the client or the server.
+pub fn connection(
+    conn: quinn::Connection,
     side: Side,
-    /// For minting new channel IDs.
-    chan_id_mint: ChanIdMint,
-    /// Whether we must (still) begin all outgoing QUIC streams/datagrams with a Version frame.
-    must_send_version: Arc<AtomicBool>,
-    /// Whether we have (as of yet) received an entire valid Version frame from the remote side.
-    has_received_version: Arc<AtomicBool>,
-    /// Receiver state for networked Aqueduct channels.
-    receivers: DashMap<ChanIdLocalReceiver, NetReceiver>,
-}
+    conn_headers: Vec<(MultiBytes, MultiBytes)>,
+) {
+    let state = Arc::new(State {
+        conn,
+        side,
+        local_acked_version: false.into(),
+        remote_acked_version: false.into(),
+        conn_headers: OnceCell::new(),
+        conn_headers_mutex: Mutex::new(()),
+        conn_headers_condvar: Condvar::new(),
+        senders: DashMap::new(),
+        receivers: DashMap::new(),
+    });
 
-/// Receiver state for a networked Aqueduct channel.
-struct NetReceiver {
-    /// Message sender to the local side's channel control task.
-    send_ctrl_task_msg: TokioUnboundedSender<ReceiverCtrlTaskMsg>,
-    /// Whether a ReceiverTaken message may be sent to the channel control task.
-    receiver_taken: AtomicBool,
-    /// Whether a CtrlStreamOpened message may be sent to the channel control task.
-    ctrl_stream_opened: AtomicBool,
-}
-
-/// Message to a receiver-side channel control task.
-enum ReceiverCtrlTaskMsg {
-    /// The local application took the receiver handle. That means that proto code constructed a
-    /// gateway Aqueduct channel, gave ownership of the receiver half to the application, and
-    /// wrapped the sender half plus application-provided serialization logic into the contained
-    /// gateway object.
-    ReceiverTaken(Box<dyn FnMut(ReceivedMessage) -> Result<()> + Send>),
-    /// A Message frame was received and routed to this receiver.
-    ReceivedMessage(ReceivedMessage),
-    /// The remote side opened the channel control stream for this receiver.
-    CtrlStreamOpened(quinn::SendStream),
-    /// A SentUnreliable frame was received on the channel control stream.
-    ReceivedSentUnreliable {
-        delta: NonZero<u64>,
-    },
-    /// A FinishSender frame was received on the channel control stream.
-    ReceivedFinishSender {
-        reliable_count: u64,
-    },
-    /// The remote side reset the channel control stream.
-    CtrlStreamReset(ResetCode),
-    /// Used internally by control task.
-    UnreliableAckTimer,
-    /// Used internally by control task.
-    ReliableAckTimer,
-}
-
-/// A fully received Message frame.
-struct ReceivedMessage {
-    message_num: MessageNum,
-    payload: MultiBytes,
-    /// These are all initially `Some`; they are wrapped in `Option` to simplify `DecoderDetacher`
-    /// implementation.
-    attachments: Vec<Option<ChanIdRemotelyMinted>>,
-}
-
-impl Connection {
-    /// Handle a sequence of incoming Message frames.
-    async fn handle_messages(&self, r: read::Message) -> ResetResult<()> {
-        // route
-        let (mut r, sent_on) = r.sent_on().await?;
-        let receiver = match sent_on.sort_by_minted_by(self.side) {
-            SortByMintedBy::LocallyMinted(_) => {
-                if let Some(receiver) = self.receivers.get(&sent_on) {
-                    receiver
-                } else {
-                    return Ok(());
-                }
+    // handle datagrams
+    state.spawn({
+        let state = state.clone();
+        async move {
+            loop {
+                let datagram = state.conn.read_datagram().await?;
+                let frames = read::Frames::from_datagram(datagram);
+                state.spawn(state.clone().handle_frames_ignore_reset(frames));
             }
-            SortByMintedBy::RemotelyMinted(_) => {
-                self.receivers
-                    .entry(sent_on)
-                    .or_insert_with(|| {
-                        let (send_ctrl_task_msg, recv_ctrl_task_msg) = tokio_unbounded_channel();
-                        let _ = recv_ctrl_task_msg; // TODO: spawn channel control task
-                        NetReceiver {
-                            send_ctrl_task_msg,
-                            receiver_taken: false.into(),
-                            ctrl_stream_opened: true.into(),
-                        }
-                    })
-                    .downgrade()
+        }
+    });
+
+    // handle streams
+    state.spawn({
+        let state = state.clone();
+        async move {
+            loop {
+                let stream = state.conn.accept_uni().await?;
+                let frames = read::Frames::from_stream(stream);
+                state.spawn(state.clone().handle_frames_ignore_reset(frames));
             }
-        };
-
-        // process Message frames
-        while let Some(r2) = self.handle_routed_message(&receiver, r).await? {
-            r = r2;
         }
+    });
 
-        Ok(())
-    }
-
-    /// Handle an incoming Message frame that has already been routed to a receiver.
-    async fn handle_routed_message(
-        &self,
-        receiver: &NetReceiver,
-        r: read::Message2,
-    ) -> ResetResult<Option<read::Message2>> {
-        // read the rest of the message
-        let (r, message_num) = r.message_num().await?;
-        let (mut r, _) = r.attachments_len().await?;
-        let mut attachments = Vec::new();
-        while let Some(attachment) = r.next_attachment().await? {
-            attachments.push(Some(attachment));
+    // send connection headers
+    state.spawn({
+        let state = state.clone();
+        async move {
+            let mut write_frames = write::Frames::default();
+            write_frames.version();
+            let mut write_headers = write::Headers::default();
+            for (key, val) in conn_headers {
+                write_headers.header(key, val);
+            }
+            write_frames.connection_headers(write_headers);
+            write_frames.send_on_new_stream(&state.conn).await
         }
-        let (r, _) = r.done().payload_len().await?;
-        let (r, payload) = r.payload().await?;
+    });
+}
 
-        // sent it to the control task
-        let task_msg = ReceiverCtrlTaskMsg::ReceivedMessage(ReceivedMessage {
-            message_num,
-            payload,
-            attachments,
+struct State {
+    conn: quinn::Connection,
+    side: Side,
+    local_acked_version: AtomicBool,
+    remote_acked_version: AtomicBool,
+    conn_headers: OnceCell<Vec<(MultiBytes, MultiBytes)>>,
+    conn_headers_mutex: Mutex<()>,
+    conn_headers_condvar: Condvar,
+    senders: DashMap<ChanId, Mutex<SenderState>>,
+    receivers: DashMap<ChanId, Mutex<ReceiverState>>,
+}
+
+struct SenderState {
+    net: Option<SenderNetState>,
+}
+
+struct SenderNetState {
+    un_acked_attachments: HashMap<MessageNum, Vec<ChanId>>,
+    acked_attachments: Option<Vec<ChanId>>,
+}
+
+struct ReceiverState {
+    net: Option<ReceiverNetState>,
+}
+
+struct ReceiverNetState {
+
+}
+
+impl State {
+    fn spawn(self: &Arc<Self>, task: impl Future<Output=Result<()>> + Send + 'static) {
+        let state = Arc::clone(self);
+        tokio::spawn(async move {
+            if let Err(e) = task.await {
+                error!(%e, "closing connection due to critical error");
+                state.conn.close(0u8.into(), b"");
+            }
         });
-        if receiver.send_ctrl_task_msg.send(task_msg).is_err() {
-            return Ok(None);
-        }
-
-        // read whether there will be another message
-        Ok(r.next_message().await?)
     }
 
-    /// Handle an incoming bidirectional QUIC stream.
-    async fn handle_bidi(
+    async fn handle_frames_ignore_reset(self: Arc<Self>, frames: read::Frames) -> Result<()> {
+        self.handle_frames(frames).await
+            .or_else(|e| match e {
+                read::Error::Reset => Ok(()),
+                read::Error::Other(e) => Err(e),
+            })
+    }
+
+    async fn handle_frames(self: &Arc<Self>, mut frames: read::Frames) -> read::Result<()> {
+        let mut version = false;
+        let mut route_to = None;
+
+        while let Some(frame) = frames.frame().await? {
+            // version negotiation logic
+            if !matches!(&frame, &read::Frame::Version(_))
+                && !version
+                && !self.local_acked_version.load(Ordering::Relaxed)
+            {
+                return read::Result::Err(anyhow!("expected VERSION frame").into());
+            }
+
+            // wait to process frames until connection headers received
+            if !matches!(&frame, &read::Frame::Version(_) | &read::Frame::ConnectionHeaders(_))
+                && !self.conn_headers.initialized()
+            {
+                drop(self.conn_headers_condvar.wait_while(
+                    self.conn_headers_mutex.lock().unwrap(),
+                    |_| !self.conn_headers.initialized(),
+                ).unwrap());
+            }
+
+            // fully read and process the frame
+            frames = self.handle_frame(frame, &mut version, &mut route_to).await?;
+        }
+        read::Result::Ok(())
+    }
+
+    async fn handle_frame(
         self: &Arc<Self>,
-        mut send_stream: quinn::SendStream,
-        recv_stream: quinn::RecvStream,
-    ) -> ResetResult<()> {
-        // TODO it's not clear to me why this should be able to reset
-        let r = read::bidi_stream(recv_stream, self.side, Arc::clone(&self.has_received_version))
-            .await?;
-        match r {
-            read::BidiFrames::ConnectionControl(r) => {
-                r.skip_headers_inner().await?.finish().await?;
-                let mut frames = write::Frames::default();
-                frames.version();
-                frames.connection_control();
-                frames.send_on_stream(&mut send_stream).await?;
-                send_stream.finish().unwrap();
+        frame: read::Frame,
+        version: &mut bool,
+        route_to: &mut Option<ChanId>,
+    ) -> read::Result<read::Frames> {
+        match frame {
+            read::Frame::Version(frames) => {
+                *version = true;
+                frames
             }
-            read::BidiFrames::ChannelControl(r) => match r.chan_id().await? {
-                read::ChanCtrlFrames::Sender(r, chan_id) => {
-                    let _ = (r, chan_id);
-                    todo!()
-                }
-                read::ChanCtrlFrames::Receiver(r, chan_id) => {
-                    self.handle_receiver_ctrl_frames(chan_id, send_stream, r).await?;
-                }
+            read::Frame::AckVersion(frames) => {
+                self.remote_acked_version.store(true, Ordering::Relaxed);
+                frames
             }
-        }
-        Ok(())
-    }
-
-    /// Handle an incoming control stream for a channel with a local receiver.
-    async fn handle_receiver_ctrl_frames(
-        self: &Arc<Self>,
-        chan_id: ChanIdLocalReceiverLocallyMinted,
-        mut send_stream: quinn::SendStream,
-        mut next_r: read::ReceiverChanCtrlFrames,
-    ) -> ResetResult<()> {
-        // get the local net receiver or short-circuit
-        let Some(receiver) = self.receivers.get(&ChanIdLocalReceiver::from(chan_id))
-        else {
-            send_stream.reset((ResetCode::Lost as u32).into()).unwrap();
-            return Ok(());
-        };
-
-        // claim the right to send a CtrlStreamOpened message to the control task or short-circuit
-        if receiver.ctrl_stream_opened.swap(true, Relaxed) {
-            send_stream.reset((ResetCode::Lost as u32).into()).unwrap();
-            return Ok(());
-        }
-
-        // send ownership of the send stream to the channel control task
-        // TODO: think harder about how we want to handle race conditions with the control task closing
-        // TODO: related to that, we need to relay ctrl stream resets to the control task
-        let task_msg = ReceiverCtrlTaskMsg::CtrlStreamOpened(send_stream);
-        let _todo = receiver.send_ctrl_task_msg.send(task_msg);
-
-        // read incoming control frames and relay them to the receiver task
-        // (loop breaks upon encountering beginning of final frame on stream)
-        let r = loop {
-            match next_r.next_frame().await? {
-                read::ReceiverChanCtrlFrame::SentUnreliable(r) => {
-                    let (r, delta) = r.delta().await?;
-                    let task_msg = ReceiverCtrlTaskMsg::ReceivedSentUnreliable { delta };
-                    let _todo = receiver.send_ctrl_task_msg.send(task_msg);
-                    next_r = r;
-                }
-                read::ReceiverChanCtrlFrame::FinishSender(r) => break r,
-            };
-        };
-
-        let (r, reliable_count) = r.reliable_count().await?;
-        let task_msg = ReceiverCtrlTaskMsg::ReceivedFinishSender { reliable_count };
-        r.finish().await?;
-        let _todo = receiver.send_ctrl_task_msg.send(task_msg);
-
-        Ok(())
-    }
-
-    /// Body of a receiver-side channel control task.
-    async fn receiver_ctrl(
-        &self,
-        send_ctrl_task_msg: TokioUnboundedSender<ReceiverCtrlTaskMsg>,
-        mut recv_ctrl_task_msg: TokioUnboundedReceiver<ReceiverCtrlTaskMsg>,
-    ) -> Result<()> {
-        let mut gateway_buf = Vec::new();
-        let mut gateway_obj = None;
-        let mut send_stream = None;
-
-        let mut reliable_ack_mgr = ReceiverReliableAckManager::default();
-
-        let mut unreliable_ack_mgr = ReceiverUnreliableAckManager::default();
-        let mut sent_unreliable_base = 0u64;
-
-        let mut finishing_reliable_count = None;
-
-        // loop until finish or cancel
-        loop {
-            let task_msg = recv_ctrl_task_msg.recv().await.expect("TODO better message");
-            match task_msg {
-                ReceiverCtrlTaskMsg::ReceiverTaken(mut gateway) => {
-                    // we now have the ability to convey received messages to the application
-                    for app_msg in gateway_buf.drain(..) {
-                        (gateway)(app_msg)?;
-                    }
-                    gateway_obj = Some(gateway);
-                },
-                ReceiverCtrlTaskMsg::ReceivedMessage(app_msg) => {
-                    // we have received a message from the remote side
-                    // let the ack managers do stuff
-                    match app_msg.message_num {
-                        MessageNum::Reliable(n) => {
-                            reliable_ack_mgr
-                                .on_receive(
-                                    n,
-                                    &send_ctrl_task_msg,
-                                    send_stream.is_some(),
-                                )?;
-                        },
-                        MessageNum::Unreliable(n) => {
-                            let already_received = unreliable_ack_mgr
-                                .on_receive(
-                                    n,
-                                    &send_ctrl_task_msg,
-                                    send_stream.is_some(),
-                                )?;
-                            if already_received {
-                                debug!("ignoring late-arriving unreliable message");
-                                continue;
-                            }
-                        }
-                    }
-
-                    // convey it to the application
-                    if let Some(gateway) = gateway_obj.as_mut() {
-                        (gateway)(app_msg)?;
-                    } else {
-                        gateway_buf.push(app_msg);
-                    }
-
-                    // maybe that unblocked finishing
-                    if let Some(reliable_count) = finishing_reliable_count {
-                        if reliable_ack_mgr.not_blocking_finish(reliable_count)
-                            && unreliable_ack_mgr.not_blocking_finish()
-                        {
-                            break;
-                        }
-                    }
-                },
-                ReceiverCtrlTaskMsg::CtrlStreamOpened(stream) => {
-                    // we now have the ability to send control frames to the remote side
-                    send_stream = Some(stream);
-                    unreliable_ack_mgr.on_ctrl_stream_opened(&send_ctrl_task_msg);
-                },
-                ReceiverCtrlTaskMsg::ReceivedSentUnreliable { delta } => {
-                    // the remote side declared having sent an unreliable message
-                    sent_unreliable_base = sent_unreliable_base
-                        .checked_add(delta.get())
-                        .ok_or_else(|| anyhow!("received SentUnreliable overflow"))?;
-                    // underflow safety: delta is non-zero
-                    let n = sent_unreliable_base - 1;
-
-                    unreliable_ack_mgr.on_declared(n, &send_ctrl_task_msg, send_stream.is_some())?;
-                },
-                ReceiverCtrlTaskMsg::ReceivedFinishSender { reliable_count } => {
-                    // the remote side gracefully finished the control stream
-                    finishing_reliable_count = Some(reliable_count);
-                    if reliable_ack_mgr.not_blocking_finish(reliable_count)
-                        && unreliable_ack_mgr.not_blocking_finish()
-                    {
-                        break;
-                    }
-                },
-                ReceiverCtrlTaskMsg::CtrlStreamReset(code) => {
-                    // the remote side intentionally reset the control stream
-                    match code {
-                        ResetCode::Cancelled => break,
-                        ResetCode::Lost => {
-                            debug!("receiver control task received loss reset code");
-                            // TODO reset send stream I think
-                            return Ok(())
-                        }
-                    }
-                },
-                ReceiverCtrlTaskMsg::ReliableAckTimer => {
-                    // reliable ack manager time-based event
-                    reliable_ack_mgr.on_timer_event(&mut send_stream).await?;
-
-                    // maybe that unblocked finishing
-                    if let Some(reliable_count) = finishing_reliable_count {
-                        if reliable_ack_mgr.not_blocking_finish(reliable_count)
-                            && unreliable_ack_mgr.not_blocking_finish()
-                        {
-                            break;
-                        }
-                    }
-                },
-                ReceiverCtrlTaskMsg::UnreliableAckTimer => {
-                    // unreliable ack manager time-based event
-                    unreliable_ack_mgr
-                        .on_timer_event(&send_ctrl_task_msg, &mut send_stream)
-                        .await?;
-
-                    // maybe that unblocked finishing
-                    if let Some(reliable_count) = finishing_reliable_count {
-                        if reliable_ack_mgr.not_blocking_finish(reliable_count)
-                            && unreliable_ack_mgr.not_blocking_finish()
-                        {
-                            break;
-                        }
-                    }
-                },
+            read::Frame::ConnectionHeaders(read) => {
+                self.handle_connection_headers_frame(read).await?,
             }
-        };
-
-        // TODO gateway stuff?
-        // TODO close due to receiver hangup
-
-        // close
-        while send_stream.is_none() {
-            let task_msg = recv_ctrl_task_msg.recv().await.expect("TODO better message");
-            match task_msg {
-                ReceiverCtrlTaskMsg::ReceiverTaken(_gateway) => todo!(),
-                ReceiverCtrlTaskMsg::ReceivedMessage(_app_msg) => todo!(),
-                ReceiverCtrlTaskMsg::CtrlStreamOpened(stream) => {
-                    send_stream = Some(stream);
-                },
-                ReceiverCtrlTaskMsg::ReceivedSentUnreliable { .. } => unreachable!(),
-                ReceiverCtrlTaskMsg::ReceivedFinishSender { .. } => unreachable!(),
-                ReceiverCtrlTaskMsg::CtrlStreamReset(_) => unreachable!(),
-                ReceiverCtrlTaskMsg::ReliableAckTimer => (),
-                ReceiverCtrlTaskMsg::UnreliableAckTimer => (),
+            read::Frame::RouteTo(read::RouteTo { chan_id, next }) => {
+                if self.handle_route_to_frame_chan_id(chan_id).await? {
+                    return;
+                }
+                *route_to = Some(chan_id);
+                next
             }
-        }
-        let mut send_stream = send_stream.unwrap();
-        reliable_ack_mgr.final_ack(&mut send_stream).await?;
-        unreliable_ack_mgr.final_ack_nack(&mut send_stream).await?;
-        // TODO: at this point encoding, we realized that the FinishReceiver frame as defined in
-        //       the protocol is unnecessary
-        send_stream.finish().unwrap();
-
-        Ok(())
-    }
-
-    /// Take messages from gateway, encode them, and transmit them on the given channel.
-    ///
-    /// Returning error triggers connection close.
-    async fn drive_sender<M, E: EncoderAttacher<M>>(
-        &self,
-        chan_id: ChanIdLocalSenderMultishot,
-        gateway: IntoReceiver<M>,
-        mut encoder: E,
-    ) -> Result<()> {
-        let gateway = gateway.into_receiver();
-        let mut single_stream = None;
-        let mut message_num = 0;
-        
-        // loop for as long as we receive messages from the gateway
-        let end_error: Option<RecvError> = loop {
-            let msg: M = match gateway.recv().await {
-                Ok(Some(msg)) => msg,
-                Ok(None) => break None,
-                Err(e) => break Some(e),
-            };
-
-            // encode-attach message payload
-            let attach_target = AttachTarget(std::marker::PhantomData);
-            let payload = catch_unwind(AssertUnwindSafe(|| encoder.encode(msg, attach_target)))
-                .map_err(|_| anyhow!("application's EncoderAttacher panicked"))
-                .and_then(|r| r.context("application's EncoderAttacher errored"))?;
-            
-            // encode frames
-            let mut frames = write::Frames::new_with_version_if(&self.must_send_version);
-            let attachments = write::Attachments::default();
-            // TODO encode attachments
-            frames.message(chan_id, message_num, attachments, payload);
-            message_num += 1;
-            
-            // transmit frames
-            match gateway.delivery_guarantees() {
-                DeliveryGuarantees::Unconverted => {
-                    unreachable!("we received a message, so it must be converted");
-                },
-                DeliveryGuarantees::Ordered => {
-                    if single_stream.is_none() {
-                        single_stream = Some(self.quic_conn.open_uni().await?);
-                    }
-                    frames.send_on_stream(single_stream.as_mut().unwrap()).await?;
-                }
-                DeliveryGuarantees::Unordered => {
-                    frames.send_on_new_stream(&self.quic_conn).await?;
-                }
-                DeliveryGuarantees::Unreliable => {
-                    frames.send_on_datagram(&self.quic_conn).await?;
-                }
-            };
-        };
-
-        // handle the optional end error
-        match end_error {
-            None => {
-                if let Some(mut single_stream) = single_stream {
-                    single_stream.finish().expect("this cannot error because we never reset it");
-                }
+            read::Frame::Message(read_message) => self.handle_message_frame(read_message).await?,
+            read::Frame::SentUnreliable(_) => {
                 todo!()
-            },
-            Some(RecvError::Cancelled(_)) => todo!(),
-            Some(RecvError::ConnectionLost(_)) => todo!(),
-            Some(RecvError::ChannelLostInTransit(_)) => todo!(),
+            }
+            read::Frame::FinishSender(_) => {
+                todo!()
+            }
+            read::Frame::CancelSender(_) => {
+                todo!()
+            }
+            read::Frame::AckReliable(_) => {
+                todo!()
+            }
+            read::Frame::AckNackUnreliable(_) => {
+                todo!()
+            }
+            read::Frame::CloseReceiver(_) => {
+                todo!()
+            }
+            read::Frame::ForgetChannel(_) => {
+                todo!()
+            }
         }
     }
 
-    /// Close the connection if result holds an error.
-    fn close_on_error(&self, result: Result<()>) {
-        if let Err(e) = result {
-            error!(%e, "closing connection due to error");
-            self.quic_conn.close(0u32.into(), &[]);
+    async fn handle_connection_headers_frame(
+        self: &Arc<Self>,
+        mut read_headers: read::ConnectionHeaders,
+    ) -> read::Result<read::Frames> {
+        if read_headers.remaining_bytes() > 64_000 {
+            return read::Result::Err(anyhow!("CONNECTION_HEADERS too large").into());
+        }
+        let mut headers = Vec::new();
+        while read_headers.remaining_bytes() > 0 {
+            headers.push(read_headers.header().await?);
+        }
+        let guard = self.conn_headers_mutex.lock().unwrap();
+        if self.conn_headers.initialized() {
+            return read::Result::Err(anyhow!("duplicate CONNECTION_HEADERS").into());
+        }
+        self.conn_headers.set(headers).unwrap();
+        self.conn_headers_condvar.notify_all();
+        drop(guard);
+        Ok(read_headers.done())
+    }
+
+    async fn handle_route_to_frame_chan_id(
+        self: &Arc<Self>,
+        chan_id: ChanId,
+    ) -> read::Result<bool> {
+        if chan_id.sender() == self.side {
+            return read::Result::Err(anyhow!("ROUTE_TO wrong direction").into());
+        }
+
+        if self.senders.get(&chan_id).is_some() {
+            return read::Result::Ok(false);
+        }
+
+        if chan_id.creator() == self.side {
+            drop(entry);
+            let mut write_frames =
+                write::Frames::new_with_version(&self.remote_acked_version);
+            write_frames.forget_channel(chan_id);
+            write_frames.send_on_new_stream(&self.conn).await?;
+            read::Result::Ok(true)
+        } else {
+            if !self.create_default_sender(chan_id) {
+                return read::Result::Ok(false); 
+            }
+
+            self.spawn({
+                let this = self.clone();
+                async move {
+                    let mut write_frames =
+                        write::Frames::new_with_version(&this.remote_acked_version);
+                    write_frames.route_to(chan_id);
+                    write_frames.send_on_new_stream(&this.conn).await?;
+                    Ok(())
+                }
+            });
+            read::Result::Ok(false)
         }
     }
-}
 
+    async fn handle_message_frame(
+        self: &Arc<Self>,
+        read_message: read::Message,
+    ) -> read::Result<read::Frames> {
+        // message headers
+        if read_message_headers.remaining_bytes() > 64_000 {
+            return read::Result::Err(anyhow!("MESSAGE headers too large").into());
+        }
+        let mut message_headers = Vec::new();
+        while read_message_headers.remaining_bytes() > 0 {
+            message_headers.push(read_message_headers.header().await?);
+        }
 
-/// Logic for encoding a message and attaching its attachments in some format.
-pub trait EncoderAttacher<M>: Send + Sync + 'static {
-    fn encode(&mut self, msg: M, attach: AttachTarget) -> Result<MultiBytes>;
-}
+        // message attached channels
+        let mut message_attachments = read_message_headers.done().await?;
+        while message_attachments.remaining_bytes() > 0 {
+            let read::MessageAttachment {
+                channel,
+                channel_headers: mut read_channel_headers,
+            } = message_attachments.attachment().await?;
+            
+            if channel.creator() == self.side {
+                return read::Result::Err(anyhow!("attachment wrong creator"));
+            }
 
-/// Logic for decoding a message and detaching its attachments in some format.
-pub trait DecoderDetacher<M>: Send + Sync + 'static {
-    fn decode(&mut self, encoded: MultiBytes, detach: DetachTarget) -> Result<M>;
-}
+            if channel.sender() == self.side {
+                self.create_default_sender(channel);
+            } else {
+                self.create_default_receiver(channel);
+            }
 
-/// Passed to an [`EncoderAttacher`] to attach attachments to.
-pub struct AttachTarget<'a>(std::marker::PhantomData<&'a ()>);
+            // message attached channel headers
+            if read_channel_headers.remaining_bytes() > 64_000 {
+                return read::Result::Err(anyhow!("channel headers too large").into());
+            }
+            let mut channel_headers = Vec::new();
+            while read_channel_headers.remaining_bytes() > 0 {
+                channel_headers.push(read_channel_headers.header().await?);
+            }
 
-impl<'a> AttachTarget<'a> {
-    pub fn attachments(&self) -> usize {
-        todo!()
+            message_attachments = read_channel_headers.done();
+        }
+
+        // message payload
+        let mut read_payload = message_attachments.done().await?;
+        if read_payload.bytes() > 16_000_000 {
+            return read::Result::Err(anyhow!("message too large").into());
+        }
+        let (payload, next) = read_payload.read().await?;
+
+        next
     }
 
-    pub fn attach_sender<M, D>(&mut self, sender: IntoSender<M>, decoder: D) -> usize
-    where
-        D: DecoderDetacher<M>,
-    {
-        let _ = (sender, decoder);
-        todo!()
+    fn create_default_sender(&self, chan_id: ChanId) -> bool {
+        debug_assert!(chan_id.sender() == self.side);
+        if let Entry::Vacant(entry) = self.senders.entry(chan_id) {
+            entry.insert(Mutex::new(SenderState {
+                net: Some(SenderNetState {
+                    un_acked_attachments: HashMap::new(),
+                    acked_attachments:
+                        if chan_id == ChanId::ENTRYPOINT || chan_id.side() != self.side {
+                            None
+                        } else {
+                            Some(Vec::new())
+                        },
+                }),
+            }));
+            true
+        } else {
+            false
+        }
     }
 
-    pub fn attach_receiver<M, E>(&mut self, receiver: IntoReceiver<M>, encoder: E) -> usize
-    where
-        E: EncoderAttacher<M>,
-    {
-        let _ = (receiver, encoder);
-        todo!()
+    fn create_default_receiver(&self, chan_id: ChanId) {
+        debug_assert!(chan_id.sender() != self.side);
+        if let Entry::Vacant(entry) = self.receivers.entry(chan_id) {
+            entry.insert(Mutex::new(ReceiverState {
+                net: Some(ReceiverNetState {
+                    
+                }),
+            }));
+        }
     }
-    /*
-    pub fn attach_oneshot_sender<M, D>(&mut self, sender: OneshotSender<M>, decoder: D) -> usize
-    where
-        D: DecoderDetacher<M>,
-    {
-        let _ = (sender, decoder);
-        todo!()
-    }
-
-    pub fn attach_oneshot_receiver<M, E>(&mut self, receiver: OneshotReceiver<M>, encoder: E) -> usize
-    where
-        E: EncoderAttacher<M>,
-    {
-        let _ = (receiver, encoder);
-        todo!()
-    }*/
-}
-
-/// Passed to an [`DecoderDetacher`] to detach attachments from.
-pub struct DetachTarget<'a>(std::marker::PhantomData<&'a ()>);
-
-impl<'a> DetachTarget<'a> {
-    pub fn attachments(&self) -> usize {
-        todo!()
-    }
-
-    pub fn detach_sender<M, E: EncoderAttacher<M>>(
-        &mut self,
-        attachment_idx: u32,
-        encoder: E,
-    ) -> Option<IntoSender<M>> {
-        let _ = (attachment_idx, encoder);
-        todo!()
-    }
-
-    pub fn detach_receiver<M, D: DecoderDetacher<M>>(
-        &mut self,
-        attachment_idx: u32,
-        decoder: D,
-    ) -> Option<IntoReceiver<M>> {
-        let _ = (attachment_idx, decoder);
-        todo!()
-    }
-    /*
-    pub fn detach_oneshot_sender<M, E: EncoderAttacher<M>>(
-        &mut self,
-        attachment_idx: u32,
-        encoder: E,
-    ) -> Option<OneshotSender<M>> {
-        let _ = (attachment_idx, encoder);
-        todo!()
-    }
-
-    pub fn detach_oneshot_receiver<M, D: DecoderDetacher<M>>(
-        &mut self,
-        attachment_idx: u32,
-        decoder: D,
-    ) -> Option<OneshotReceiver<M>> {
-        let _ = (attachment_idx, decoder);
-        todo!()
-    }*/
 }
