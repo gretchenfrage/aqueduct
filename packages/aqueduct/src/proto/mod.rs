@@ -4,11 +4,14 @@ use crate::frame::{
     read,
     write,
 };
-use std::sync::{
-    atomic::{Ordering, AtomicBool},
-    Mutex,
-    Condvar,
-    Arc,
+use std::{
+    sync::{
+        atomic::{Ordering, AtomicBool},
+        Mutex,
+        Condvar,
+        Arc,
+    },
+    collections::HashMap,
 };
 use multibytes::MultiBytes;
 use tokio::sync::OnceCell;
@@ -16,7 +19,7 @@ use dashmap::{
     DashMap,
     mapref::entry::Entry,
 };
-use anyhow::*;
+use anyhow::{anyhow, Result};
 
 
 pub fn connection(
@@ -102,7 +105,9 @@ struct ReceiverState {
 }
 
 struct ReceiverNetState {
-
+    ack_nack_unreliable_task: bool,
+    ack_nacked_unreliable_up_to: u64,
+    sent_unreliable: u64,
 }
 
 impl State {
@@ -159,7 +164,7 @@ impl State {
         version: &mut bool,
         route_to: &mut Option<ChanId>,
     ) -> read::Result<read::Frames> {
-        match frame {
+        read::Result::Ok(match frame {
             read::Frame::Version(frames) => {
                 *version = true;
                 frames
@@ -169,18 +174,19 @@ impl State {
                 frames
             }
             read::Frame::ConnectionHeaders(read) => {
-                self.handle_connection_headers_frame(read).await?,
+                self.handle_connection_headers_frame(read).await?
             }
             read::Frame::RouteTo(read::RouteTo { chan_id, next }) => {
                 if self.handle_route_to_frame_chan_id(chan_id).await? {
-                    return;
+                    return todo!();
                 }
                 *route_to = Some(chan_id);
                 next
             }
             read::Frame::Message(read_message) => self.handle_message_frame(read_message).await?,
-            read::Frame::SentUnreliable(_) => {
-                todo!()
+            read::Frame::SentUnreliable(read::SentUnreliable { count, next }) => {
+                self.handle_sent_unreliable_frame(*route_to, count).await?;
+                next
             }
             read::Frame::FinishSender(_) => {
                 todo!()
@@ -200,7 +206,7 @@ impl State {
             read::Frame::ForgetChannel(_) => {
                 todo!()
             }
-        }
+        })
     }
 
     async fn handle_connection_headers_frame(
@@ -237,7 +243,6 @@ impl State {
         }
 
         if chan_id.creator() == self.side {
-            drop(entry);
             let mut write_frames =
                 write::Frames::new_with_version(&self.remote_acked_version);
             write_frames.forget_channel(chan_id);
@@ -266,6 +271,11 @@ impl State {
         self: &Arc<Self>,
         read_message: read::Message,
     ) -> read::Result<read::Frames> {
+        let read::Message {
+            message_num,
+            message_headers: mut read_message_headers,
+        } = read_message;
+
         // message headers
         if read_message_headers.remaining_bytes() > 64_000 {
             return read::Result::Err(anyhow!("MESSAGE headers too large").into());
@@ -284,7 +294,7 @@ impl State {
             } = message_attachments.attachment().await?;
             
             if channel.creator() == self.side {
-                return read::Result::Err(anyhow!("attachment wrong creator"));
+                return read::Result::Err(anyhow!("attachment wrong creator").into());
             }
 
             if channel.sender() == self.side {
@@ -312,7 +322,16 @@ impl State {
         }
         let (payload, next) = read_payload.read().await?;
 
-        next
+        Ok(next)
+    }
+
+    async fn handle_sent_unreliable_frame(
+        self: &Arc<Self>,
+        route_to: Option<ChanId>,
+        count: u64,
+    ) -> read::Result<()> {
+        let route_to = route_to.ok_or_else(|| anyhow!("unrouted SENT_UNRELIABLE"))?;
+        todo!()
     }
 
     fn create_default_sender(&self, chan_id: ChanId) -> bool {
@@ -322,7 +341,7 @@ impl State {
                 net: Some(SenderNetState {
                     un_acked_attachments: HashMap::new(),
                     acked_attachments:
-                        if chan_id == ChanId::ENTRYPOINT || chan_id.side() != self.side {
+                        if chan_id == ChanId::ENTRYPOINT || chan_id.creator() != self.side {
                             None
                         } else {
                             Some(Vec::new())
@@ -339,9 +358,9 @@ impl State {
         debug_assert!(chan_id.sender() != self.side);
         if let Entry::Vacant(entry) = self.receivers.entry(chan_id) {
             entry.insert(Mutex::new(ReceiverState {
-                net: Some(ReceiverNetState {
-                    
-                }),
+                net: Some(/*ReceiverNetState {
+
+                }*/ todo!()),
             }));
         }
     }
