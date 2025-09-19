@@ -1,5 +1,7 @@
 // channel error types.
 
+// TODO make everything non-exhaustive
+
 // ==== base error types ====
 
 /// Error for trying to send into a channel for which all receivers have been dropped

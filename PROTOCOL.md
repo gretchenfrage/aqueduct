@@ -14,12 +14,12 @@ All values are encoded little-endian.
 
 ### 1.2 § Varint
 
-A variable length unsigned integer is encoded as a sequence of 1 or more bytes,
-where the lowest 7 bits of each byte encode the next lowest 7 bits of the
-integer, and the highest bit of each byte is 1 if there are additional bytes in
-the sequence.
-
-TODO: there is a discrepancy between this and my code
+A variable length unsigned integer is encoded as a sequence of between 1 and 9
+bytes, and can encode any 64-bit unsigned integer. For the first 8 bytes, if
+present, the lowest 7 bits of the byte encode the next lowest 7 bits of the
+integer, and the highest bit of the byte is 1 if there are additional bytes in
+the sequence. If a 9th byte is present, it encodes the highest 8 bits of the
+integer.
 
 ### 1.3 § Varbytes
 
@@ -231,8 +231,9 @@ Shortly after an endpoint receives a `MESSAGE` frame on a stream, it must send
 an `ACK_RELIABLE` frame acking it. This contains ranges of reliable message
 numbers the endpoint has received. The sequence of varints in RANGES alternates
 between the length of a gap before the next range, followed by the length of
-the next range. The first gap is relative to zero. Gaps merely represent ranges
-that this frame is not acking, rather than nacks.
+the next range. The first gap is relative to the lowest un-acked message
+number. Gaps merely represent ranges that this frame is not acking, rather than
+nacks.
 
 An endpoint must maintain an "unreliable receipt deadline" of how long to wait
 to receive an unreliable message before declaring it lost. This may be set to 1
