@@ -497,6 +497,7 @@ impl<T> Receiver<T> {
         recv_terminal_state(self.0.recv_state())
     }
 
+    #[allow(dead_code)]
     pub(crate) fn delivery_guarantees(&self) -> DeliveryGuarantees {
         DeliveryGuarantees::from_byte(self.0.delivery_guarantees_byte().load(Relaxed))
     }

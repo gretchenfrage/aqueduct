@@ -1,12 +1,9 @@
 //! Typed API for writing frames to quic streams and datagrams.
 
 use crate::frame::common::*;
-use std::sync::{
-    Arc,
-    atomic::{
-        Ordering::Relaxed,
-        AtomicBool,
-    },
+use std::sync::atomic::{
+    Ordering::Relaxed,
+    AtomicBool,
 };
 use quinn::{SendStream, Connection, SendDatagramError};
 use multibytes::*;

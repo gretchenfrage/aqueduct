@@ -48,6 +48,7 @@ impl NodeQueue {
     }
 
     // whether this queue is purged.
+    #[allow(dead_code)]
     pub(crate) fn is_purged(&self) -> bool {
         if self.purged {
             debug_assert!(self.front_back.is_none());
