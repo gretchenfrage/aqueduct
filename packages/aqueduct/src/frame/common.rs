@@ -1,4 +1,4 @@
-//! Aqueduct encoding/decoding shared types and functions. 
+//! Aqueduct encoding/decoding shared types and functions.
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub struct Side(pub bool);
@@ -7,7 +7,6 @@ impl Side {
     pub const CLIENT: Self = Side(false);
     pub const SERVER: Self = Side(true);
 }
-
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
 pub struct ChanId(pub u64);
@@ -39,7 +38,6 @@ impl ChanId {
         (self.0 & !0b111u64) >> 3
     }
 }
-
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 #[repr(u8)]
@@ -74,22 +72,21 @@ impl FrameTag {
             AckNackUnreliable,
             CloseReceiver,
             ForgetChannel,
-        ].into_iter().find(|&frame_type| frame_type as u8 == b)
+        ]
+        .into_iter()
+        .find(|&frame_type| frame_type as u8 == b)
     }
 }
-
 
 // constants for variable length integer coding.
 pub const VARINT_MASK: u8 = 0b01111111;
 pub const VARINT_MORE: u8 = 0b10000000;
 pub const VARINT_FINAL_SHIFT: u8 = 56;
 
-
 // constants for version frame coding.
 pub const VERSION_FRAME_MAGIC_BYTES: [u8; 7] = [80, 95, 166, 96, 15, 64, 142];
 pub const VERSION_FRAME_HUMAN_TEXT: [u8; 8] = *b"AQUEDUCT";
 pub const VERSION: &str = "0.0.0-AFTER";
-
 
 pub fn ascii_to_str(b: &[u8]) -> Option<&str> {
     if b.is_ascii() {

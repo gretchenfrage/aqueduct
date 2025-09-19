@@ -9,8 +9,8 @@ pub extern crate bytes;
 pub extern crate multibytes;
 
 mod channel;
-mod quic_zc;
 mod frame;
+mod quic_zc;
 
 pub use crate::channel::api::*;
 
@@ -25,5 +25,5 @@ pub mod future {
 }
 
 pub mod todo {
-	pub use crate::frame::*;
+    pub use crate::frame::*;
 }

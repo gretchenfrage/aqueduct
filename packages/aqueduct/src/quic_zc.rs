@@ -1,14 +1,10 @@
-///! Internal utilities for bridging between our MultiBytes types and QUIC.
-
-use multibytes::MultiBytes;
 use bytes::Bytes;
-
+///! Internal utilities for bridging between our MultiBytes types and QUIC.
+use multibytes::MultiBytes;
 
 const MAX_CHUNK_LENGTH: usize = 16384;
 
-
 // ==== error types ====
-
 
 /// Result type for QUIC zero-copy reading.
 pub type Result<T> = std::result::Result<T, Error>;
@@ -28,9 +24,7 @@ impl From<quinn::ReadError> for Error {
     }
 }
 
-
 // ==== QUIC stream reader ====
-
 
 /// Wrapper around a [`quinn::RecvStream`] which provides a `MultiBytes`-like API for zero-copy.
 #[derive(Debug)]
@@ -53,8 +47,10 @@ impl QuicStreamReader {
         while !buf.is_empty() {
             // maybe read chunk
             if self.chunk.is_empty() {
-                self.chunk = self.stream
-                    .read_chunk(MAX_CHUNK_LENGTH, true).await?
+                self.chunk = self
+                    .stream
+                    .read_chunk(MAX_CHUNK_LENGTH, true)
+                    .await?
                     .ok_or(Error::TooFewBytes)?
                     .bytes;
                 debug_assert!(!self.chunk.is_empty());
@@ -76,8 +72,10 @@ impl QuicStreamReader {
         while n > 0 {
             // maybe read chunk
             if self.chunk.is_empty() {
-                self.chunk = self.stream
-                    .read_chunk(MAX_CHUNK_LENGTH, true).await?
+                self.chunk = self
+                    .stream
+                    .read_chunk(MAX_CHUNK_LENGTH, true)
+                    .await?
                     .ok_or(Error::TooFewBytes)?
                     .bytes;
                 debug_assert!(!self.chunk.is_empty());

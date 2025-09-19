@@ -1,18 +1,10 @@
 // exposed API of channels
 
 use self::future::*;
-use super::{
-    error::*,
-    core,
-};
-use std::{
-    sync::atomic::Ordering::Relaxed,
-    mem::take,
-};
-
+use super::{core, error::*};
+use std::{mem::take, sync::atomic::Ordering::Relaxed};
 
 // ==== helper functions for adapting core API to exposed API ====
-
 
 // cancel the channel, avoiding locking if possible.
 fn cancel<T>(channel: &core::Channel<T>) {
@@ -121,19 +113,21 @@ impl DeliveryGuarantees {
             1 => DeliveryGuarantees::Ordered,
             2 => DeliveryGuarantees::Unordered,
             3 => DeliveryGuarantees::Unreliable,
-            n => unreachable!("invalid DeliveryGuarantees byte: {}", n)
+            n => unreachable!("invalid DeliveryGuarantees byte: {}", n),
         }
     }
 }
 
 // ==== the exposed API ====
 
-
 /// Create a channel
 pub fn channel<T>() -> (IntoSender<T>, IntoReceiver<T>) {
     let channel_1 = core::Channel::new();
     let channel_2 = channel_1.clone();
-    let send = IntoSender { channel: channel_1, cancel_on_drop: true };
+    let send = IntoSender {
+        channel: channel_1,
+        cancel_on_drop: true,
+    };
     let recv = IntoReceiver(channel_2);
     (send, recv)
 }
@@ -149,7 +143,9 @@ pub struct IntoSender<T> {
 impl<T> IntoSender<T> {
     /// Convert into an ordered, reliable, bounded sender
     pub fn into_ordered(mut self, bound: usize) -> Sender<T> {
-        self.channel.delivery_guarantees_byte().store(DeliveryGuarantees::Ordered as u8, Relaxed);
+        self.channel
+            .delivery_guarantees_byte()
+            .store(DeliveryGuarantees::Ordered as u8, Relaxed);
         self.channel.lock().set_bound(bound);
         self.channel.send_count().fetch_add(1, Relaxed);
         Sender {
@@ -160,7 +156,9 @@ impl<T> IntoSender<T> {
 
     /// Convert into an ordered, reliable, unbounded sender
     pub fn into_ordered_unbounded(mut self) -> NonBlockingSender<T> {
-        self.channel.delivery_guarantees_byte().store(DeliveryGuarantees::Ordered as u8, Relaxed);
+        self.channel
+            .delivery_guarantees_byte()
+            .store(DeliveryGuarantees::Ordered as u8, Relaxed);
         self.channel.send_count().fetch_add(1, Relaxed);
         NonBlockingSender {
             channel: clone_sender(&self.channel),
@@ -171,7 +169,8 @@ impl<T> IntoSender<T> {
 
     /// Convert into an unordered, reliable, bounded sender
     pub fn into_unordered(mut self, bound: usize) -> Sender<T> {
-        self.channel.delivery_guarantees_byte()
+        self.channel
+            .delivery_guarantees_byte()
             .store(DeliveryGuarantees::Unordered as u8, Relaxed);
         self.channel.lock().set_bound(bound);
         self.channel.send_count().fetch_add(1, Relaxed);
@@ -183,7 +182,8 @@ impl<T> IntoSender<T> {
 
     /// Convert into an unordered, reliable, unbounded sender
     pub fn into_unordered_unbounded(mut self) -> NonBlockingSender<T> {
-        self.channel.delivery_guarantees_byte()
+        self.channel
+            .delivery_guarantees_byte()
             .store(DeliveryGuarantees::Unordered as u8, Relaxed);
         self.channel.send_count().fetch_add(1, Relaxed);
         NonBlockingSender {
@@ -198,7 +198,8 @@ impl<T> IntoSender<T> {
     /// The send buffer may be bounded, but this does not create backpressure, because overflowing
     /// the buffer is handled by dropping the oldest buffered message.
     pub fn into_unreliable(mut self, bound: Option<usize>) -> NonBlockingSender<T> {
-        self.channel.delivery_guarantees_byte()
+        self.channel
+            .delivery_guarantees_byte()
             .store(DeliveryGuarantees::Unreliable as u8, Relaxed);
         self.channel.send_count().fetch_add(1, Relaxed);
         NonBlockingSender {
@@ -232,7 +233,6 @@ impl<T> Drop for IntoSender<T> {
         drop_sender(&self.channel, self.cancel_on_drop);
     }
 }
-
 
 /// Sender handle to a possibly networked channel, with backpressure
 pub struct Sender<T> {
@@ -351,7 +351,6 @@ impl<T> Drop for Sender<T> {
     }
 }
 
-
 /// Sender handle to a possibly networked channel, with no backpresure.
 pub struct NonBlockingSender<T> {
     channel: core::Channel<T>,
@@ -449,7 +448,6 @@ impl<T> Drop for NonBlockingSender<T> {
     }
 }
 
-
 /// Unconverted receiver half of a channel
 pub struct IntoReceiver<T>(core::Channel<T>);
 
@@ -465,7 +463,6 @@ impl<T> Drop for IntoReceiver<T> {
         drop_receiver(&self.0);
     }
 }
-
 
 /// Receiver handle to a possibly networked channel
 pub struct Receiver<T>(core::Channel<T>);
@@ -519,15 +516,14 @@ impl<T> Drop for Receiver<T> {
     }
 }
 
-
 // future types for channels.
 pub(crate) mod future {
     use super::*;
     use crate::channel::polling::{Timeout, poll};
     use std::{
-        task::{Poll, Context},
         future::Future,
         pin::{Pin, pin},
+        task::{Context, Poll},
         time::{Duration, Instant},
     };
 
@@ -554,17 +550,16 @@ pub(crate) mod future {
     }
 
     fn map_send_result<T>(
-        result: (Result<(), (u8, T)>, Option<core::Channel<T>>)
+        result: (Result<(), (u8, T)>, Option<core::Channel<T>>),
     ) -> Result<(), SendError<T>> {
         let (result, channel) = result;
         if let Some(channel) = channel {
             drop_sender(&channel, false);
         }
-        result
-            .map_err(|(send_state_byte, msg)| SendError {
-                msg,
-                cause: send_error(send_state_byte).unwrap(),
-            })
+        result.map_err(|(send_state_byte, msg)| SendError {
+            msg,
+            cause: send_error(send_state_byte).unwrap(),
+        })
     }
 
     fn map_try_send_result<T>(
@@ -585,9 +580,7 @@ pub(crate) mod future {
             if this.is_terminated() {
                 return Poll::Pending;
             }
-            pin!(&mut this.fut)
-                .poll(cx)
-                .map(map_send_result)
+            pin!(&mut this.fut).poll(cx).map(map_send_result)
         }
     }
 
@@ -598,13 +591,12 @@ pub(crate) mod future {
         /// If this future has not yet resolved or rescinded, this returns `Some`. Moreover, if
         /// this returns `Some` and `cancel` was passed as true, the channel will be cancelled.
         pub fn rescind(&mut self, cancel: bool) -> Option<T> {
-            self.fut.cancel()
-                .map(|(msg, channel)| {
-                    if let Some(channel) = channel {
-                        drop_sender(&channel, cancel);
-                    }
-                    msg
-                })
+            self.fut.cancel().map(|(msg, channel)| {
+                if let Some(channel) = channel {
+                    drop_sender(&channel, cancel);
+                }
+                msg
+            })
         }
 
         /// Shorthand for calling [`rescind`](Self::rescind) with `cancel` being true
@@ -629,7 +621,10 @@ pub(crate) mod future {
         /// other than [`WouldBlockError`], that counts as this future resolving. This method will
         /// panic if this future has already resolved or rescinded.
         pub fn try_now(&mut self) -> Result<(), TrySendError<T>> {
-            assert!(!self.is_terminated(), "SendFut.block called after terminated");
+            assert!(
+                !self.is_terminated(),
+                "SendFut.block called after terminated"
+            );
             map_try_send_result(poll(&mut self.fut, Timeout::NonBlocking))
         }
 
@@ -639,9 +634,13 @@ pub(crate) mod future {
         /// counts as this future resolving. This method will panic if this future has already
         /// resolved or rescinded.
         pub fn block(&mut self) -> Result<(), SendError<T>> {
-            assert!(!self.is_terminated(), "SendFut.block called after terminated");
+            assert!(
+                !self.is_terminated(),
+                "SendFut.block called after terminated"
+            );
             let result = poll(&mut self.fut, Timeout::Never)
-                .ok().expect("poll timed out with Timeout::Never");
+                .ok()
+                .expect("poll timed out with Timeout::Never");
             map_send_result(result)
         }
 
@@ -651,7 +650,10 @@ pub(crate) mod future {
         /// other than [`WouldBlockError`], that counts as this future resolving. This method will
         /// panic if this future has already resolved or rescinded.
         pub fn block_timeout(&mut self, timeout: Duration) -> Result<(), TrySendError<T>> {
-            assert!(!self.is_terminated(), "SendFut.block called after terminated");
+            assert!(
+                !self.is_terminated(),
+                "SendFut.block called after terminated"
+            );
             self.block_deadline(Instant::now() + timeout)
         }
 
@@ -661,7 +663,10 @@ pub(crate) mod future {
         /// other than [`WouldBlockError`], that counts as this future resolving. This method will
         /// panic if this future has already resolved or rescinded.
         pub fn block_deadline(&mut self, deadline: Instant) -> Result<(), TrySendError<T>> {
-            assert!(!self.is_terminated(), "SendFut.block called after terminated");
+            assert!(
+                !self.is_terminated(),
+                "SendFut.block called after terminated"
+            );
             map_try_send_result(poll(&mut self.fut, Timeout::At(deadline)))
         }
 
@@ -697,7 +702,6 @@ pub(crate) mod future {
         }
     }
 
-
     /// Future for receiving from a [`Receiver`]
     ///
     /// Resolves to `Ok(None)` to represent the "finished" state--a graceful termination. Once all
@@ -722,7 +726,7 @@ pub(crate) mod future {
     pub struct RecvFut<T>(pub(super) core::Recv<T>);
 
     fn map_recv_result<T>(
-        result: (Result<T, u8>, Option<core::Channel<T>>)
+        result: (Result<T, u8>, Option<core::Channel<T>>),
     ) -> Result<Option<T>, RecvError> {
         let (result, channel) = result;
         if let Some(channel) = channel {
@@ -733,12 +737,12 @@ pub(crate) mod future {
             Err(recv_state_byte) => match recv_terminal_state(recv_state_byte).unwrap() {
                 RecvTerminalState::Finished => Ok(None),
                 RecvTerminalState::Error(error) => Err(error),
-            }
+            },
         }
     }
 
     fn map_try_recv_result<T>(
-        result: Result<(Result<T, u8>, Option<core::Channel<T>>), ()>
+        result: Result<(Result<T, u8>, Option<core::Channel<T>>), ()>,
     ) -> Result<Option<T>, TryRecvError> {
         match result {
             Ok(recv_result) => map_recv_result(recv_result).map_err(TryRecvError::from),
@@ -755,9 +759,7 @@ pub(crate) mod future {
             if this.is_terminated() {
                 return Poll::Pending;
             }
-            pin!(&mut this.0)
-                .poll(cx)
-                .map(map_recv_result)
+            pin!(&mut this.0).poll(cx).map(map_recv_result)
         }
     }
 
@@ -778,9 +780,13 @@ pub(crate) mod future {
         /// counts as this future resolving. This method will panic if this future has already
         /// resolved or aborted.
         pub fn block(&mut self) -> Result<Option<T>, RecvError> {
-            assert!(!self.is_terminated(), "RecvFut.block called after terminated");
+            assert!(
+                !self.is_terminated(),
+                "RecvFut.block called after terminated"
+            );
             let result = poll(&mut self.0, Timeout::Never)
-                .ok().expect("poll timed out with Timeout::Never");
+                .ok()
+                .expect("poll timed out with Timeout::Never");
             map_recv_result(result)
         }
 
@@ -790,7 +796,10 @@ pub(crate) mod future {
         /// other than [`WouldBlockError`], that counts as this future resolving. This method will
         /// panic if this future has already resolved or aborted.
         pub fn try_now(&mut self) -> Result<Option<T>, TryRecvError> {
-            assert!(!self.is_terminated(), "RecvFut.block called after terminated");
+            assert!(
+                !self.is_terminated(),
+                "RecvFut.block called after terminated"
+            );
             map_try_recv_result(poll(&mut self.0, Timeout::NonBlocking))
         }
 
@@ -800,7 +809,10 @@ pub(crate) mod future {
         /// other than [`WouldBlockError`], that counts as this future resolving. This method will
         /// panic if this future has already resolved or aborted.
         pub fn block_timeout(&mut self, timeout: Duration) -> Result<Option<T>, TryRecvError> {
-            assert!(!self.is_terminated(), "RecvFut.block called after terminated");
+            assert!(
+                !self.is_terminated(),
+                "RecvFut.block called after terminated"
+            );
             self.block_deadline(Instant::now() + timeout)
         }
 
@@ -810,7 +822,10 @@ pub(crate) mod future {
         /// other than [`WouldBlockError`], that counts as this future resolving. This method will
         /// panic if this future has already resolved or aborted.
         pub fn block_deadline(&mut self, deadline: Instant) -> Result<Option<T>, TryRecvError> {
-            assert!(!self.is_terminated(), "RecvFut.block called after terminated");
+            assert!(
+                !self.is_terminated(),
+                "RecvFut.block called after terminated"
+            );
             map_try_recv_result(poll(&mut self.0, Timeout::At(deadline)))
         }
 
@@ -828,9 +843,7 @@ pub(crate) mod future {
     }
 }
 
-
 // ==== tests ====
-
 
 #[cfg(test)]
 mod tests {
@@ -838,10 +851,7 @@ mod tests {
 
     #[test]
     fn basic_1000_test() {
-        use std::{
-            time::Duration,
-            thread,
-        };
+        use std::{thread, time::Duration};
 
         let (send, recv) = channel();
         let send = send.into_ordered(500);
@@ -849,7 +859,9 @@ mod tests {
 
         let join_1 = thread::spawn(move || {
             for i in 1..=1000 {
-                send.send(i).block_timeout(Duration::from_millis(10)).unwrap();
+                send.send(i)
+                    .block_timeout(Duration::from_millis(10))
+                    .unwrap();
                 if i < 1000 && i % 100 == 0 {
                     thread::sleep(Duration::from_millis(50));
                 }
@@ -858,10 +870,19 @@ mod tests {
         });
         let join_2 = thread::spawn(move || {
             for i in 1..=1000 {
-                let j = recv.recv().block_timeout(Duration::from_millis(60)).unwrap().unwrap();
+                let j = recv
+                    .recv()
+                    .block_timeout(Duration::from_millis(60))
+                    .unwrap()
+                    .unwrap();
                 assert_eq!(i, j);
             }
-            assert!(recv.recv().block_timeout(Duration::from_millis(10)).unwrap().is_none());
+            assert!(
+                recv.recv()
+                    .block_timeout(Duration::from_millis(10))
+                    .unwrap()
+                    .is_none()
+            );
         });
         join_1.join().unwrap();
         join_2.join().unwrap();

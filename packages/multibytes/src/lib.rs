@@ -5,9 +5,8 @@ pub extern crate bytes;
 mod small_queue;
 
 use crate::small_queue::SmallQueue;
-use thiserror::Error;
 use bytes::{Bytes, BytesMut};
-
+use thiserror::Error;
 
 // this many Bytes may be stored without allocating a heap allocated array of Bytes
 const IN_PLACE_FRAGMENTS: usize = 2;
@@ -15,7 +14,6 @@ const IN_PLACE_FRAGMENTS: usize = 2;
 const START_CAPACITY: usize = 64;
 // if write_zc is called with a Bytes smaller than this, it will just be copied in in a non-zc way.
 const MIN_ZC_BYTES: usize = 64;
-
 
 /// Sequence of bytes stored as an array of [`bytes::Bytes`].
 ///
@@ -50,14 +48,13 @@ impl MultiBytes {
     pub fn read(&mut self, mut buf: &mut [u8]) -> Result<(), TooFewBytesError> {
         self.len = self.len.checked_sub(buf.len()).ok_or(TooFewBytesError)?;
         while buf.len() > 0 {
-            let copy_src =
-                if buf.len() < self.fragments[0].len() {
-                    // copy part of the next fragment
-                    self.fragments[0].split_to(buf.len())
-                } else {
-                    // copy the entirety of the next fragment
-                    self.fragments.pop_front().unwrap()
-                };
+            let copy_src = if buf.len() < self.fragments[0].len() {
+                // copy part of the next fragment
+                self.fragments[0].split_to(buf.len())
+            } else {
+                // copy the entirety of the next fragment
+                self.fragments.pop_front().unwrap()
+            };
             let (buf1, buf2) = buf.split_at_mut(copy_src.len());
             buf1.copy_from_slice(&copy_src);
             buf = buf2;
@@ -74,20 +71,18 @@ impl MultiBytes {
 
         let mut out = MultiBytes::default();
         while n > 0 {
-            let out_fragment =
-                if n < self.fragments[0].len() {
-                    // add part of the next fragment
-                    self.fragments[0].split_to(n)
-                } else {
-                    // add the entirety of the next fragment
-                    self.fragments.pop_front().unwrap()
-                };
+            let out_fragment = if n < self.fragments[0].len() {
+                // add part of the next fragment
+                self.fragments[0].split_to(n)
+            } else {
+                // add the entirety of the next fragment
+                self.fragments.pop_front().unwrap()
+            };
             n -= out_fragment.len();
             out.write_zc(out_fragment);
         }
         Ok(out)
     }
-
 
     /// Advance `self` past the next `n` bytes without copying them to anywhere.
     ///
@@ -96,14 +91,13 @@ impl MultiBytes {
         self.len = self.len.checked_sub(n).ok_or(TooFewBytesError)?;
 
         while n > 0 {
-            let skip_fragment =
-                if n < self.fragments[0].len() {
-                    // skip part of the next fragment
-                    self.fragments[0].split_to(n)
-                } else {
-                    // skip the entirety of the next fragment
-                    self.fragments.pop_front().unwrap()
-                };
+            let skip_fragment = if n < self.fragments[0].len() {
+                // skip part of the next fragment
+                self.fragments[0].split_to(n)
+            } else {
+                // skip the entirety of the next fragment
+                self.fragments.pop_front().unwrap()
+            };
             n -= skip_fragment.len();
         }
         Ok(())
@@ -112,10 +106,13 @@ impl MultiBytes {
     /// Extend the byte sequence by copying in `buf`.
     pub fn write(&mut self, mut buf: &[u8]) {
         self.len += buf.len();
-        if buf.len() == 0 { return; }
+        if buf.len() == 0 {
+            return;
+        }
 
         // try to write as much as possible into existing spare capacity
-        if let Some(mut back) = self.fragments
+        if let Some(mut back) = self
+            .fragments
             .len()
             .checked_sub(1)
             .and_then(|back_idx| self.fragments[back_idx].clone().try_into_mut().ok())
@@ -126,8 +123,10 @@ impl MultiBytes {
             buf = buf2;
         }
 
-        if buf.len() == 0 { return; }
-        
+        if buf.len() == 0 {
+            return;
+        }
+
         // manage the successive doublings of allocation size as bytes are copied in
         while START_CAPACITY << self.doublings < buf.len() {
             self.doublings += 1;
@@ -164,7 +163,7 @@ impl MultiBytes {
     ///
     /// It is strongly recommended not to ascribe any particular meaning to page boundaries. They
     /// are considered an optimizations and may be automatically mangled in various cases.
-    pub fn fragments(self) -> impl Iterator<Item=Bytes> {
+    pub fn fragments(self) -> impl Iterator<Item = Bytes> {
         self.fragments
     }
 
@@ -220,7 +219,6 @@ impl Extend<Bytes> for MultiBytes {
     }
 }
 
-
 impl FromIterator<Bytes> for MultiBytes {
     fn from_iter<I: IntoIterator<Item = Bytes>>(bytes_iter: I) -> Self {
         let mut out = MultiBytes::new();
@@ -231,10 +229,14 @@ impl FromIterator<Bytes> for MultiBytes {
 
 impl PartialEq<[u8]> for MultiBytes {
     fn eq(&self, mut rhs: &[u8]) -> bool {
-        if self.len() != rhs.len() { return false; }
+        if self.len() != rhs.len() {
+            return false;
+        }
         for fragment in self.fragments.iter() {
             let (rhs1, rhs2) = rhs.split_at(fragment.len());
-            if &*fragment != rhs1 { return false; }
+            if &*fragment != rhs1 {
+                return false;
+            }
             rhs = rhs2;
         }
         true
@@ -243,7 +245,9 @@ impl PartialEq<[u8]> for MultiBytes {
 
 impl PartialEq<MultiBytes> for MultiBytes {
     fn eq(&self, rhs: &MultiBytes) -> bool {
-        if self.len() != rhs.len() { return false; }
+        if self.len() != rhs.len() {
+            return false;
+        }
 
         let mut fragments_1 = self.fragments.iter().peekable();
         let mut fragments_2 = rhs.fragments.iter().peekable();

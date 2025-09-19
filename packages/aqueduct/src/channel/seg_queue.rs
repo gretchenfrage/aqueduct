@@ -1,12 +1,11 @@
 // segment queue part of a channel.
 
 use std::{
+    alloc::{Layout, alloc, dealloc, handle_alloc_error},
+    marker::PhantomData,
     mem::{self, size_of},
     ptr::{NonNull, drop_in_place},
-    marker::PhantomData,
-    alloc::{Layout, alloc, dealloc, handle_alloc_error},
 };
-
 
 // compute segment capacity in elems.
 //
@@ -76,9 +75,16 @@ impl<T> SegPtr<T> {
     // allocate on the heap and initialize as empty
     unsafe fn alloc() -> Self {
         let (layout, _) = seg_layout::<T>();
-        let Some(ptr) = NonNull::new(alloc(layout)) else { handle_alloc_error(layout) };
+        let Some(ptr) = NonNull::new(alloc(layout)) else {
+            handle_alloc_error(layout)
+        };
         let meta = ptr.as_ptr() as *mut SegMeta<T>;
-        meta.write(SegMeta { to_back: None, to_front: None, start: 0, len: 0 });
+        meta.write(SegMeta {
+            to_back: None,
+            to_front: None,
+            start: 0,
+            len: 0,
+        });
         SegPtr(ptr, PhantomData)
     }
 
@@ -107,7 +113,9 @@ impl<T> SegPtr<T> {
         debug_assert!(!self.is_empty());
         let meta = &mut *(self.0.as_ptr() as *mut SegMeta<T>);
         let (_, offset) = seg_layout::<T>();
-        let t = (self.0.as_ptr().add(offset) as *mut T).add(meta.start as usize).read();
+        let t = (self.0.as_ptr().add(offset) as *mut T)
+            .add(meta.start as usize)
+            .read();
         meta.start = (meta.start + 1) % cap::<T>() as u16;
         meta.len -= 1;
         t
@@ -159,7 +167,11 @@ pub(crate) struct SegQueue<T> {
 impl<T> SegQueue<T> {
     // construct empty
     pub(crate) fn new() -> Self {
-        SegQueue { len: 0, front_back: None, spare: None }
+        SegQueue {
+            len: 0,
+            front_back: None,
+            spare: None,
+        }
     }
 
     // elements in queue
@@ -199,7 +211,9 @@ impl<T> SegQueue<T> {
     // pop from front
     pub(crate) fn pop(&mut self) -> Option<T> {
         unsafe {
-            if self.len() == 0 { return None; }
+            if self.len() == 0 {
+                return None;
+            }
             self.len -= 1;
             if size_of::<T>() == 0 {
                 // ZST special case
@@ -263,7 +277,6 @@ impl<T> Drop for SegQueue<T> {
 unsafe impl<T: Send> Send for SegQueue<T> {}
 unsafe impl<T: Sync> Sync for SegQueue<T> {}
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -284,12 +297,8 @@ mod tests {
     }
 
     fn elem_size_test<const ELEM_SIZE: usize>() {
-        use std::{
-            collections::VecDeque,
-            cmp::min,
-            env,
-        };
-        
+        use std::{cmp::min, collections::VecDeque, env};
+
         let outer_iterations = env::var("SEG_QUEUE_TEST_OUTER_ITERATIONS")
             .ok()
             .map(|s| s.parse::<u32>().unwrap())

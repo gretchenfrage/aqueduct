@@ -1,10 +1,6 @@
 // linked nodes part of channel.
 
-use std::{
-    ptr::NonNull,
-    task::Waker,
-};
-
+use std::{ptr::NonNull, task::Waker};
 
 // intrusively linked list of nodes.
 #[derive(Default)]
@@ -168,7 +164,9 @@ impl NodeQueue {
     // not empty, and the node at the front has a waker.
     pub(crate) fn wake_front(&mut self) {
         unsafe {
-            if self.purged { return; }
+            if self.purged {
+                return;
+            }
             if let Some((mut front, _)) = self.front_back {
                 if let Some(waker) = front.as_mut().waker.take() {
                     waker.wake();
@@ -180,7 +178,9 @@ impl NodeQueue {
     // purge the queue, if it is not already purged. this causes all wakers to be waked.
     pub(crate) fn purge(&mut self) {
         unsafe {
-            if self.purged { return; }
+            if self.purged {
+                return;
+            }
             self.purged = true;
             let mut next = self.front_back.map(|(front, _)| front);
             while let Some(curr) = next {
@@ -229,13 +229,11 @@ impl Drop for NodeHandle {
     }
 }
 
-
 unsafe impl Send for NodeHandle {}
 unsafe impl Sync for NodeHandle {}
 
 unsafe impl Send for NodeQueue {}
 unsafe impl Sync for NodeQueue {}
-
 
 #[cfg(test)]
 mod tests {

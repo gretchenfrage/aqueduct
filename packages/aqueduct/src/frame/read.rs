@@ -1,16 +1,11 @@
 //! Typed API for reading frames from quic streams and datagrams.
 
-use crate::{
-    frame::common::*,
-    quic_zc,
-};
-use multibytes::*;
-use bytes::Bytes;
+use crate::{frame::common::*, quic_zc};
 use anyhow::anyhow;
-
+use bytes::Bytes;
+use multibytes::*;
 
 // ==== error handling ====
-
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -44,9 +39,7 @@ impl From<quic_zc::Error> for Error {
     }
 }
 
-
 // ==== module-internal utilities ====
-
 
 // - abstracts over zero-copy layer for QUIC stream versus datagram
 // - provides helper methods for reading common primitives
@@ -125,7 +118,8 @@ impl Reader {
     // read a var len int, then cast to usize or error if unable.
     async fn read_varint_usize_with_limit(&mut self, limit: Option<&mut usize>) -> Result<usize> {
         let n = self.read_varint_with_limit(limit).await?;
-        n.try_into().map_err(|_| anyhow!("overflow casting var len int to usize: {}", n).into())
+        n.try_into()
+            .map_err(|_| anyhow!("overflow casting var len int to usize: {}", n).into())
     }
 
     async fn read_varint_usize(&mut self) -> Result<usize> {
@@ -134,22 +128,24 @@ impl Reader {
 
     // read a varbytes (varint encoding length, followed by bytes). if limit is Some, decrements
     // the referenced usize by the number of bytes read, or errors if doing so would underflow.
-    async fn read_varbytes_with_limit(&mut self, mut limit: Option<&mut usize>) -> Result<MultiBytes> {
-        let len = self.read_varint_usize_with_limit(limit.as_mut().map(|l| &mut **l)).await?;
+    async fn read_varbytes_with_limit(
+        &mut self,
+        mut limit: Option<&mut usize>,
+    ) -> Result<MultiBytes> {
+        let len = self
+            .read_varint_usize_with_limit(limit.as_mut().map(|l| &mut **l))
+            .await?;
         if let Some(limit) = limit.as_mut() {
-            let Some(new_limit) = limit.checked_sub(len)
-            else {
+            let Some(new_limit) = limit.checked_sub(len) else {
                 return Err(TooFewBytesError.into());
             };
-            **limit = new_limit; 
+            **limit = new_limit;
         }
         self.read_zc(len).await
     }
 }
 
-
 // ==== the actual API for reading frames ====
-
 
 /// Typed API for reading a sequence of Aqueduct frames from a QUIC stream or datagram.
 pub struct Frames(Reader);
@@ -175,7 +171,9 @@ impl Frames {
         Ok(Some(match tag {
             FrameTag::Version => Frame::Version(self.version().await?),
             FrameTag::AckVersion => Frame::AckVersion(self),
-            FrameTag::ConnectionHeaders => Frame::ConnectionHeaders(self.connection_headers().await?),
+            FrameTag::ConnectionHeaders => {
+                Frame::ConnectionHeaders(self.connection_headers().await?)
+            }
             FrameTag::RouteTo => Frame::RouteTo(self.route_to().await?),
             FrameTag::Message => Frame::Message(self.message().await?),
             FrameTag::SentUnreliable => Frame::SentUnreliable(self.sent_unreliable().await?),
@@ -206,10 +204,10 @@ impl Frames {
         }
         let buf = &mut buf_space[..version_number_length];
         self.0.read(buf).await?;
-        let version_num = ascii_to_str(buf).ok_or(anyhow::Error::msg("non-ASCII version number"))?;
+        let version_num =
+            ascii_to_str(buf).ok_or(anyhow::Error::msg("non-ASCII version number"))?;
         if version_num != VERSION {
-            return
-                Err(anyhow!("unknown VERSION frame version number: {:?}", version_num).into());
+            return Err(anyhow!("unknown VERSION frame version number: {:?}", version_num).into());
         }
         Ok(self)
     }
@@ -221,7 +219,10 @@ impl Frames {
 
     async fn route_to(mut self) -> Result<RouteTo> {
         let chan_id = ChanId(self.0.read_varint().await?);
-        Ok(RouteTo { chan_id, next: self })
+        Ok(RouteTo {
+            chan_id,
+            next: self,
+        })
     }
 
     async fn message(mut self) -> Result<Message> {
@@ -240,7 +241,10 @@ impl Frames {
 
     async fn finish_sender(mut self) -> Result<FinishSender> {
         let sent_reliable = self.0.read_varint().await?;
-        Ok(FinishSender { sent_reliable, next: self })
+        Ok(FinishSender {
+            sent_reliable,
+            next: self,
+        })
     }
 
     async fn ack_nack_ranges(mut self) -> Result<AckNackRanges> {
@@ -332,10 +336,12 @@ impl MessageAttachments {
 
     pub async fn attachment(mut self) -> Result<MessageAttachment> {
         let channel = ChanId(self.0.read_varint_with_limit(Some(&mut self.1)).await?);
-        let headers_bytes = self.0.read_varint_usize_with_limit(Some(&mut self.1)).await?;
+        let headers_bytes = self
+            .0
+            .read_varint_usize_with_limit(Some(&mut self.1))
+            .await?;
 
-        let Some(attachments_remaining_bytes) = self.1.checked_sub(headers_bytes)
-        else {
+        let Some(attachments_remaining_bytes) = self.1.checked_sub(headers_bytes) else {
             return Err(TooFewBytesError.into());
         };
 
@@ -374,8 +380,12 @@ impl ChannelHeaders {
 
     pub async fn header(&mut self) -> Result<(MultiBytes, MultiBytes)> {
         Ok((
-            self.reader.read_varbytes_with_limit(Some(&mut self.headers_remaining_bytes)).await?,
-            self.reader.read_varbytes_with_limit(Some(&mut self.headers_remaining_bytes)).await?,
+            self.reader
+                .read_varbytes_with_limit(Some(&mut self.headers_remaining_bytes))
+                .await?,
+            self.reader
+                .read_varbytes_with_limit(Some(&mut self.headers_remaining_bytes))
+                .await?,
         ))
     }
 

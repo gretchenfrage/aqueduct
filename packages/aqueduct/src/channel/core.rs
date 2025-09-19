@@ -1,33 +1,24 @@
 // minimal safe API for the channel. the exposed API is a convenience wrapper around this.
 
 use super::{
-    seg_queue::SegQueue,
-    node_queue::{NodeQueue, NodeHandle},
+    node_queue::{NodeHandle, NodeQueue},
     polling::DropWakers,
+    seg_queue::SegQueue,
 };
 use std::{
-    sync::{
-        atomic::{
-            Ordering::Relaxed,
-            AtomicU64,
-            AtomicU8,
-        },
-        Arc,
-        Mutex,
-        MutexGuard,
-    },
-    task::{Poll, Context},
     future::Future,
     pin::Pin,
+    sync::{
+        Arc, Mutex, MutexGuard,
+        atomic::{AtomicU8, AtomicU64, Ordering::Relaxed},
+    },
+    task::{Context, Poll},
 };
 use tokio::sync::watch;
 
-
 // ==== the channel itself ====
 
-
 const NODE_POOL_SIZE: usize = 4;
-
 
 // handle to a channel.
 pub(crate) struct Channel<T>(Arc<Shared<T>>);
@@ -210,7 +201,10 @@ impl<'a, T> Lock<'a, T> {
 
     // take an unlinked node from the pool or allocate a new one
     fn allocate_node(&mut self) -> NodeHandle {
-        let node = self.lock.node_pool.iter_mut()
+        let node = self
+            .lock
+            .node_pool
+            .iter_mut()
             .filter_map(|opt| opt.take())
             .next()
             .unwrap_or_else(|| NodeHandle::new());
@@ -223,7 +217,11 @@ impl<'a, T> Lock<'a, T> {
     // panics if SendState is not Normal.
     pub(crate) fn send(&mut self, elem: T) -> Send<T> {
         // safety check
-        assert_eq!(self.shared.send_state.load(Relaxed), SendState::Normal as u8, "internal bug");
+        assert_eq!(
+            self.shared.send_state.load(Relaxed),
+            SendState::Normal as u8,
+            "internal bug"
+        );
 
         // allocate unlinked node
         let mut node = self.allocate_node();
@@ -232,10 +230,16 @@ impl<'a, T> Lock<'a, T> {
         // safety:
         // - we know that send state is normal, therefore the send node queue is not purged.
         // - node is either newly allocated or from the pool, so it is not linked.
-        unsafe { self.lock.send_nodes.push(&mut node); }
+        unsafe {
+            self.lock.send_nodes.push(&mut node);
+        }
 
         // construct future
-        let inner = SendInnerLinked { shared: Channel(Arc::clone(self.shared)), elem, node };
+        let inner = SendInnerLinked {
+            shared: Channel(Arc::clone(self.shared)),
+            elem,
+            node,
+        };
         Send(Some(SendInner::Linked(inner)))
     }
 
@@ -244,7 +248,11 @@ impl<'a, T> Lock<'a, T> {
     // panics if RecvState is not normal.
     pub(crate) fn recv(&mut self) -> Recv<T> {
         // safety check
-        assert_eq!(self.shared.recv_state.load(Relaxed), RecvState::Normal as u8, "internal bug");
+        assert_eq!(
+            self.shared.recv_state.load(Relaxed),
+            RecvState::Normal as u8,
+            "internal bug"
+        );
 
         // allocate unlinked node
         let mut node = self.allocate_node();
@@ -253,10 +261,15 @@ impl<'a, T> Lock<'a, T> {
         // safety:
         // - we know that recv state is normal, therefore the recv node queue is not purged.
         // - node is either newly allocated or from the pool, so it is not linked.
-        unsafe { self.lock.recv_nodes.push(&mut node); }
+        unsafe {
+            self.lock.recv_nodes.push(&mut node);
+        }
 
         // construct future
-        let inner = RecvInnerLinked { shared: Channel(Arc::clone(self.shared)), node };
+        let inner = RecvInnerLinked {
+            shared: Channel(Arc::clone(self.shared)),
+            node,
+        };
         Recv(Some(RecvInner::Linked(inner)))
     }
 
@@ -267,7 +280,9 @@ impl<'a, T> Lock<'a, T> {
     // other non-normal state.
     pub(crate) fn finish(&mut self) {
         // short-circuit if already finished
-        if self.lock.finished { return; }
+        if self.lock.finished {
+            return;
+        }
 
         // mark as finished
         self.lock.finished = true;
@@ -275,11 +290,16 @@ impl<'a, T> Lock<'a, T> {
         // if conditions are met, transition receivers into finished state
         let recv_state = self.shared.recv_state.load(Relaxed);
         if recv_state == RecvState::Normal as u8 && self.lock.elems.len() == 0 {
-            self.shared.recv_state.store(RecvState::Finished as u8, Relaxed);
+            self.shared
+                .recv_state
+                .store(RecvState::Finished as u8, Relaxed);
             self.lock.recv_nodes.purge();
 
-
-            self.shared.watch_recv_state.0.send(RecvState::Finished as u8).unwrap();
+            self.shared
+                .watch_recv_state
+                .0
+                .send(RecvState::Finished as u8)
+                .unwrap();
         }
     }
 
@@ -323,9 +343,7 @@ impl<'a, T> Lock<'a, T> {
     }
 }
 
-
 // ==== send futures ====
-
 
 // send future. internally locks the channel when dropped.
 pub(crate) struct Send<T>(Option<SendInner<T>>);
@@ -364,16 +382,15 @@ impl<T> Future for Send<T> {
         let this = self.get_mut();
 
         // assert linked. make sure to return ownership of inner state back if we return pending.
-        let inner = this.0.take()
+        let inner = this
+            .0
+            .take()
             .expect("send future polled after already resolved or cancelled");
         let mut inner = match inner {
             SendInner::Linked(linked) => linked,
             SendInner::Cheap(send_state, elem) => {
-                return Poll::Ready((
-                    Err((send_state, elem)),
-                    None,
-                ));
-            },
+                return Poll::Ready((Err((send_state, elem)), None));
+            }
         };
 
         // try to check for error without locking
@@ -382,10 +399,7 @@ impl<T> Future for Send<T> {
             // resolve to error
             // safety: if send state is not normal, then send node queue has been purged, which
             //         would mean any previously cloned waker has already been dropped.
-            return Poll::Ready((
-                Err((send_state, inner.elem)),
-                Some(inner.shared),
-            ));
+            return Poll::Ready((Err((send_state, inner.elem)), Some(inner.shared)));
         }
 
         // lock the channel
@@ -396,10 +410,7 @@ impl<T> Future for Send<T> {
         if send_state != SendState::Normal as u8 {
             // safety: same as above
             drop(lock);
-            return Poll::Ready((
-                Err((send_state, inner.elem)),
-                Some(inner.shared)
-            ));
+            return Poll::Ready((Err((send_state, inner.elem)), Some(inner.shared)));
         }
 
         // next, check whether we'll return pending.
@@ -438,16 +449,13 @@ impl<T> Future for Send<T> {
         if let Some(slot) = lock.lock.node_pool.iter_mut().find(|opt| opt.is_none()) {
             *slot = Some(inner.node);
         }
-        
+
         // send elem and notify futures that are now unblocked
         lock.enqueue(inner.elem);
 
         // done
         drop(lock);
-        Poll::Ready((
-            Ok(()),
-            Some(inner.shared),
-        ))
+        Poll::Ready((Ok(()), Some(inner.shared)))
     }
 }
 
@@ -468,7 +476,9 @@ impl<T> Send<T> {
     // when polling are dropped by the time `cancel` returns.
     pub(crate) fn cancel(&mut self) -> Option<(T, Option<Channel<T>>)> {
         // assert linked or short-circuit
-        let Some(inner) = self.0.take() else { return None };
+        let Some(inner) = self.0.take() else {
+            return None;
+        };
         let mut inner = match inner {
             SendInner::Linked(linked) => linked,
             SendInner::Cheap(_send_state, elem) => return Some((elem, None)),
@@ -551,7 +561,9 @@ unsafe impl<T> DropWakers for Send<T> {
         let send_state = inner.shared.0.send_state.load(Relaxed);
         // safety: if send state is not normal, then send node queue has been purged, which would
         //         mean any previously cloned waker has already been dropped.
-        if send_state != SendState::Normal as u8 { return };
+        if send_state != SendState::Normal as u8 {
+            return;
+        };
 
         // lock the channel
         let mut lock = inner.shared.0.lockable.lock().unwrap();
@@ -559,7 +571,9 @@ unsafe impl<T> DropWakers for Send<T> {
         // now that channel is locked, check send state again without race conditions
         let send_state = inner.shared.0.send_state.load(Relaxed);
         // safety: same as above
-        if send_state != SendState::Normal as u8 { return };
+        if send_state != SendState::Normal as u8 {
+            return;
+        };
 
         // safety:
         // - send state is normal, therefore send nodes is not purged.
@@ -579,9 +593,7 @@ impl<T> Drop for Send<T> {
     }
 }
 
-
 // ==== recv futures ====
-
 
 // recv future. internally locks the channel when dropped.
 pub(crate) struct Recv<T>(Option<RecvInner<T>>);
@@ -617,16 +629,15 @@ impl<T> Future for Recv<T> {
         let this = self.get_mut();
 
         // assert linked. make sure to return ownership of inner state back if we return pending.
-        let inner = this.0.take()
+        let inner = this
+            .0
+            .take()
             .expect("recv future polled after already resolved or cancelled");
         let mut inner = match inner {
             RecvInner::Linked(linked) => linked,
             RecvInner::Cheap(recv_state) => {
-                return Poll::Ready((
-                    Err(recv_state),
-                    None,
-                ));
-            },
+                return Poll::Ready((Err(recv_state), None));
+            }
         };
 
         // try to check recv state without locking
@@ -635,10 +646,7 @@ impl<T> Future for Recv<T> {
             // resolve to error
             // safety: if recv state is not normal, then recv node queue has been purged, which
             //         would mean that any previously cloned waker has already been dropped.
-            return Poll::Ready((
-                Err(recv_state),
-                Some(inner.shared),
-            ));
+            return Poll::Ready((Err(recv_state), Some(inner.shared)));
         }
 
         // lock the chanel
@@ -650,10 +658,7 @@ impl<T> Future for Recv<T> {
             // resolve to error
             // safety: same as above
             drop(lock);
-            return Poll::Ready((
-                Err(recv_state),
-                Some(inner.shared),
-            ));
+            return Poll::Ready((Err(recv_state), Some(inner.shared)));
         }
 
         // next, check whether we'll return pending.
@@ -703,10 +708,20 @@ impl<T> Future for Recv<T> {
                 // elems is empty and senders are finished
                 // transition recv state to finished and purge recv node queue
                 // (this automatically notifies all nodes in recv queue all at once)
-                inner.shared.0.recv_state.store(RecvState::Finished as u8, Relaxed);
+                inner
+                    .shared
+                    .0
+                    .recv_state
+                    .store(RecvState::Finished as u8, Relaxed);
                 lock.recv_nodes.purge();
 
-                inner.shared.0.watch_recv_state.0.send(RecvState::Finished as u8).unwrap();
+                inner
+                    .shared
+                    .0
+                    .watch_recv_state
+                    .0
+                    .send(RecvState::Finished as u8)
+                    .unwrap();
             }
         } else {
             // elems is not yet empty, so notify next recv ndoe
@@ -718,10 +733,7 @@ impl<T> Future for Recv<T> {
         }
 
         drop(lock);
-        Poll::Ready((
-            Ok(elem),
-            Some(inner.shared),
-        ))
+        Poll::Ready((Ok(elem), Some(inner.shared)))
     }
 }
 
@@ -742,7 +754,9 @@ impl<T> Recv<T> {
     // when polling are dropped by the time `cancel` returns.
     pub(crate) fn cancel(&mut self) -> Option<Channel<T>> {
         // assert linked or short-circuit
-        let Some(inner) = self.0.take() else { return None };
+        let Some(inner) = self.0.take() else {
+            return None;
+        };
         let mut inner = match inner {
             RecvInner::Linked(linked) => linked,
             RecvInner::Cheap(_recv_state) => return None,
@@ -826,14 +840,18 @@ unsafe impl<T> DropWakers for Recv<T> {
         let recv_state = inner.shared.0.recv_state.load(Relaxed);
         // safety: if recv state is not normal, then recv node queue has been purged, which would
         //         mean any previously cloned waker has already been dropped.
-        if recv_state != RecvState::Normal as u8 { return };
+        if recv_state != RecvState::Normal as u8 {
+            return;
+        };
 
         // lock the channel
         let mut lock = inner.shared.0.lockable.lock().unwrap();
 
         // now that channel is locked, check recv state again without race conditions
         let recv_state = inner.shared.0.recv_state.load(Relaxed);
-        if recv_state != RecvState::Normal as u8 { return };
+        if recv_state != RecvState::Normal as u8 {
+            return;
+        };
 
         // safety:
         // - recv state is normal, therefore recv nodes is not purged.
@@ -853,9 +871,7 @@ impl<T> Drop for Recv<T> {
     }
 }
 
-
 // ==== tests ====
-
 
 #[cfg(test)]
 mod tests {

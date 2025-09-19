@@ -1,14 +1,10 @@
 //! Typed API for writing frames to quic streams and datagrams.
 
 use crate::frame::common::*;
-use std::sync::atomic::{
-    Ordering::Relaxed,
-    AtomicBool,
-};
-use quinn::{SendStream, Connection, SendDatagramError};
-use multibytes::*;
 use anyhow::*;
-
+use multibytes::*;
+use quinn::{Connection, SendDatagramError, SendStream};
+use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 
 // utility internal to this module that wraps around MultiBytes and adds some helper functions.
 #[derive(Default, Clone)]
@@ -70,7 +66,8 @@ impl Writer {
 
     // send written data in a QUIC datagram, or fall back to send_new_stream if too large.
     async fn send_on_datagram(self, conn: &Connection) -> Result<()> {
-        let max_datagram_size = conn.max_datagram_size()
+        let max_datagram_size = conn
+            .max_datagram_size()
             .ok_or_else(|| anyhow!("datagrams disabled"))?;
         if self.0.len() > max_datagram_size {
             self.send_on_new_stream(conn).await
@@ -98,13 +95,12 @@ impl Into<MultiBytes> for Writer {
     }
 }
 
-
 /// Typed API for writing a sequence of Aqueduct frames to a QUIC stream or datagram.
 #[derive(Default)]
 pub struct Frames(Writer);
 
 macro_rules! tag_only_frame {
-    ($method:ident $variant:ident)=>{
+    ($method:ident $variant:ident) => {
         pub fn $method(&mut self) {
             self.0.write(&[FrameTag::$variant as u8]);
         }

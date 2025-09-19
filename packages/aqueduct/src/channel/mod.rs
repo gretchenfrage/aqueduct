@@ -44,10 +44,10 @@
 // there is also the error module, which contains the relevant error types, which is also
 // re-exported publically.
 
-pub(crate) mod error;
 pub(crate) mod api;
+pub(crate) mod error;
 
-mod seg_queue;
+mod core;
 mod node_queue;
 mod polling;
-mod core;
+mod seg_queue;

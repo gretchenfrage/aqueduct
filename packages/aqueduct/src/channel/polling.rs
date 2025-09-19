@@ -4,12 +4,11 @@
 
 use std::{
     future::Future,
-    sync::{Condvar, Mutex},
-    task::{Context, Poll, Waker, RawWaker, RawWakerVTable},
-    time::Instant,
     pin::Pin,
+    sync::{Condvar, Mutex},
+    task::{Context, Poll, RawWaker, RawWakerVTable, Waker},
+    time::Instant,
 };
-
 
 // `Future` with the ability to drop all wakers it previously cloned.
 //
@@ -69,7 +68,7 @@ where
         // clean up before returning.
         // safety: drop_wakers may panic. however, DropWakers requires that if drop_wakers does
         //         exit via panic, it drops any cloned wakers before doing so, so there will be no
-        //         dangling poiinters to the signal local variable as unwinding occurs. 
+        //         dangling poiinters to the signal local variable as unwinding occurs.
         let to_return = resolved.ok_or_else(|| fut.drop_wakers());
         // safety: fut unsafe-implements DropWakers, so:
         //
@@ -117,21 +116,25 @@ where
         *lock = State::Waiting;
         match &timeout {
             // block on mutex + condvar indefinitely
-            &Timeout::Never =>
+            &Timeout::Never => {
                 while let &State::Waiting = &*lock {
                     lock = signal.cond.wait(lock).unwrap();
-                },
+                }
+            }
 
             // block on mutex + condvar until deadline, at which point return none
-            &Timeout::At(deadline) =>
+            &Timeout::At(deadline) => {
                 while let &State::Waiting = &*lock {
-                    let Some(duration) =
-                        deadline.checked_duration_since(Instant::now())
-                        else { return None };
+                    let Some(duration) = deadline.checked_duration_since(Instant::now()) else {
+                        return None;
+                    };
                     let (lock2, wait_result) = signal.cond.wait_timeout(lock, duration).unwrap();
                     lock = lock2;
-                    if wait_result.timed_out() { return None; }
-                },
+                    if wait_result.timed_out() {
+                        return None;
+                    }
+                }
+            }
 
             // dont block on mutex + condvar, return none instead
             &Timeout::NonBlocking => return None,
@@ -152,7 +155,6 @@ struct Signal {
     state: Mutex<State>,
     cond: Condvar,
 }
-
 
 // ==== vtable ====
 

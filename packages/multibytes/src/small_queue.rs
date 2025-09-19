@@ -1,16 +1,14 @@
 //! Queue that can store a small number of elements inline.
 
 use std::{
+    fmt::{self, Debug, Formatter},
     mem::MaybeUninit,
-    ptr::drop_in_place,
     ops::{Index, IndexMut},
-    fmt::{self, Formatter, Debug},
+    ptr::drop_in_place,
 };
-
 
 // heap allocation size to make in elements upon first heap allocating
 const INITIAL_ALLOC_LEN: usize = 16;
-
 
 /// Queue that can store a small number of elements inline.
 pub struct SmallQueue<T, const N: usize> {
@@ -33,7 +31,7 @@ impl<T, const N: usize> SmallQueue<T, N> {
         Self::with_alloc_cap(0)
     }
 
-    /// Construct empty with a given capacity of the heap allocated part. 
+    /// Construct empty with a given capacity of the heap allocated part.
     pub fn with_alloc_cap(alloc_cap: usize) -> Self {
         SmallQueue {
             start: 0,
@@ -55,7 +53,10 @@ impl<T, const N: usize> SmallQueue<T, N> {
 
     // convert from logical index to storage index, or panic on out-of-bounds.
     fn storage_idx(&self, idx: usize) -> usize {
-        debug_assert!(self.len() <= self.cap(), "SmallQueue len > cap (internal bug)");
+        debug_assert!(
+            self.len() <= self.cap(),
+            "SmallQueue len > cap (internal bug)"
+        );
         assert!(idx < self.len(), "SmallQueue index out of bounds");
         (self.start + idx) % self.cap()
     }
@@ -91,7 +92,9 @@ impl<T, const N: usize> SmallQueue<T, N> {
             new_self.len = self.len();
             // copy elements
             for i in 0..self.len() {
-                unsafe { new_self.pointer_mut(i).write(self.pointer(i).read()); }
+                unsafe {
+                    new_self.pointer_mut(i).write(self.pointer(i).read());
+                }
             }
             // mark old elements as uninitialized to prevent their destructors running
             self.len = 0;
@@ -102,13 +105,17 @@ impl<T, const N: usize> SmallQueue<T, N> {
         // add element
         let idx = self.len;
         self.len += 1;
-        unsafe { self.pointer_mut(idx).write(elem); }
+        unsafe {
+            self.pointer_mut(idx).write(elem);
+        }
     }
 
     /// Pop from front of queue.
     pub fn pop_front(&mut self) -> Option<T> {
         // short-circuit if empty
-        if self.len() == 0 { return None; }
+        if self.len() == 0 {
+            return None;
+        }
 
         // take element, mark as no longer initialized / updated indexes
         let elem = unsafe { self.pointer(0).read() };
@@ -120,7 +127,7 @@ impl<T, const N: usize> SmallQueue<T, N> {
     }
 
     /// Create iterator from front to back by reference.
-    pub fn iter(&self) -> impl Iterator<Item=&T> {
+    pub fn iter(&self) -> impl Iterator<Item = &T> {
         (0..self.len()).map(move |i| &self[i])
     }
 }
@@ -129,7 +136,9 @@ impl<T, const N: usize> Drop for SmallQueue<T, N> {
     fn drop(&mut self) {
         // drop initialized elements
         for i in 0..self.len() {
-            unsafe { drop_in_place(self.pointer_mut(i)); }
+            unsafe {
+                drop_in_place(self.pointer_mut(i));
+            }
         }
     }
 }

@@ -1,8 +1,6 @@
 // channel error types.
 
-
 // ==== base error types ====
-
 
 /// Error for trying to send into a channel for which all receivers have been dropped
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
@@ -35,13 +33,11 @@ pub struct ConnectionLostError;
 pub struct ChannelLostInTransitError; // TODO: use thread local variables to make this trigger
 
 /// Error for attempting to use a channel with no or limited blocking, and the operation not
-/// completing immediately or by the specified deadline 
+/// completing immediately or by the specified deadline
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct WouldBlockError;
 
-
 // ==== compound error types ====
-
 
 /// Error for trying to send into a channel
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
