@@ -21,11 +21,6 @@ impl Writer {
         self.0.write_zc(bytes);
     }
 
-    // whether no bytes have been written
-    fn is_empty(&self) -> bool {
-        self.0.len() == 0
-    }
-
     // write a var len int.
     fn write_varint(&mut self, mut i: u64) {
         for _ in 0..8 {
