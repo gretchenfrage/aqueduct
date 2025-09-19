@@ -9,6 +9,7 @@ pub extern crate bytes;
 pub extern crate multibytes;
 
 mod channel;
+#[allow(dead_code)]
 mod frame;
 mod quic_zc;
 
@@ -22,8 +23,4 @@ pub mod error {
 /// Future types
 pub mod future {
     pub use crate::channel::api::future::*;
-}
-
-pub mod todo {
-    pub use crate::frame::*;
 }

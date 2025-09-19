@@ -162,7 +162,7 @@ impl MultiBytes {
     /// Convert into an iterator over fragments.
     ///
     /// It is strongly recommended not to ascribe any particular meaning to page boundaries. They
-    /// are considered an optimizations and may be automatically mangled in various cases.
+    /// are considered an optimization and may be automatically mangled in various cases.
     pub fn fragments(self) -> impl Iterator<Item = Bytes> {
         self.fragments
     }
