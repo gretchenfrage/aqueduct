@@ -147,7 +147,6 @@ impl<T> IntoSender<T> {
             .delivery_guarantees_byte()
             .store(DeliveryGuarantees::Ordered as u8, Relaxed);
         self.channel.lock().set_bound(bound);
-        self.channel.send_count().fetch_add(1, Relaxed);
         Sender {
             channel: clone_sender(&self.channel),
             cancel_on_drop: take(&mut self.cancel_on_drop),
@@ -159,7 +158,6 @@ impl<T> IntoSender<T> {
         self.channel
             .delivery_guarantees_byte()
             .store(DeliveryGuarantees::Ordered as u8, Relaxed);
-        self.channel.send_count().fetch_add(1, Relaxed);
         NonBlockingSender {
             channel: clone_sender(&self.channel),
             cancel_on_drop: take(&mut self.cancel_on_drop),
@@ -173,7 +171,6 @@ impl<T> IntoSender<T> {
             .delivery_guarantees_byte()
             .store(DeliveryGuarantees::Unordered as u8, Relaxed);
         self.channel.lock().set_bound(bound);
-        self.channel.send_count().fetch_add(1, Relaxed);
         Sender {
             channel: clone_sender(&self.channel),
             cancel_on_drop: take(&mut self.cancel_on_drop),
@@ -185,7 +182,6 @@ impl<T> IntoSender<T> {
         self.channel
             .delivery_guarantees_byte()
             .store(DeliveryGuarantees::Unordered as u8, Relaxed);
-        self.channel.send_count().fetch_add(1, Relaxed);
         NonBlockingSender {
             channel: clone_sender(&self.channel),
             cancel_on_drop: take(&mut self.cancel_on_drop),
@@ -201,7 +197,6 @@ impl<T> IntoSender<T> {
         self.channel
             .delivery_guarantees_byte()
             .store(DeliveryGuarantees::Unreliable as u8, Relaxed);
-        self.channel.send_count().fetch_add(1, Relaxed);
         NonBlockingSender {
             channel: clone_sender(&self.channel),
             cancel_on_drop: take(&mut self.cancel_on_drop),
