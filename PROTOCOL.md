@@ -258,3 +258,7 @@ exception to this is that the endpoint does not have to uphold this behavior in
 cases when its receiver state machine for the channel was destroyed then
 re-created since sending the nack.
 
+
+### 3.5 § Channel lost in transit detection
+
+
