@@ -51,16 +51,21 @@ side of a channel sends to convey a message being sent on that channel. A
 MESSAGE frame morally contains the channel ID it is being sent on, the message
 payload (a byte string), and a list of additional channel IDs that are attached
 to the message (corresponding to a collection of additional channels that get
-newly created by the sending of this message). If a sender is operating in
-ORDERED mode, all of its MESSAGE frames are sent on the same QUIC stream. If a
-sender is operating in UNORDERED mode, each of its MESSAGE frames are sent on
-different QUIC streams. If a sender is operating in UNRELIABLE mode, each of
-its MESSAGE frames are sent on QUIC unreliable datagrams, unless they are too
-big to fit in an unreliable datagram, in which case Aqueduct falls back to
-sending it in a QUIC stream. MESSAGE frames are morally the only frame type
-that Aqueduct sometimes sends in unreliable datagrams. There are a variety of
-other frame types dedicated to maintaining and the lifecycle of channels, the
-connection, and other important things; and these are only sent on QUIC streams.
+newly created by the sending of this message).
+
+- If a sender is operating in ORDERED mode, all of its MESSAGE frames are sent
+  on the same QUIC stream.
+- If a sender is operating in UNORDERED mode, each of its MESSAGE frames are
+  sent on different QUIC streams.
+- If a sender is operating in UNRELIABLE mode, each of its MESSAGE frames are
+  sent on QUIC unreliable datagrams, unless they are too big to fit in an
+  unreliable datagram, in which case Aqueduct falls back to sending it in a
+  QUIC stream.
+
+MESSAGE frames are morally the only frame type that Aqueduct sometimes sends in
+unreliable datagrams. There are a variety of other frame types dedicated to
+maintaining and the lifecycle of channels, the connection, and other important
+things; and these are only sent on QUIC streams.
 
 This document will guide the reader to an intuitive understanding of the design
 of the Aqueduct protocol in the following way:
@@ -85,18 +90,10 @@ channel:
 
 |frames client sends to server|
 |-----------------------------|
-|msg 1                        |
-|msg 2                        |
-|msg 2                        |
+|msg                          |
+|msg                          |
+|msg                          |
 |finish                       |
-
-
-	client            server
-	     |--[msg 1]-->|
-	     |--[msg 2]-->|
-	     |--[msg 3]-->|
-	     |--[finish]->|
-	     v            v
 
 The server would simply enqueue these messages into a buffer for the
 server-side application to dequeue. Once the server receives the frame
@@ -111,23 +108,52 @@ a channel:
 - By the receiver-side dropping the receiver.
 
 If the client closed this channel by cancelling it rather than by finishing it,
+this simplified protocol execution could be quite similar. Rather than sending
+a FINISH frame, the client could send a CANCEL frame. The main difference would
+be that upon the server receving this frame it would drop any of the messages
+it enqueued in its buffer that the server-side application hadn't yet dequeued:
 
+|frames client sends to server|
+|-----------------------------|
+|msg                          |
+|msg                          |
+|msg                          |
+|cancel                       |
+
+In the case that the server-side application closed the channel by dropping its
+receiver, the server could drop any enqueued messages and send back a frame to
+the client telling it that the receiver has been dropped. Upon receiving this,
+the client would allow its application to observe this fact:
+
+|frames client sends to server|frames server sends to client|
+|-----------------------------|-----------------------------|
+|msg                          |drop receiver                |
+|msg                          |                             |
+|msg                          |                             |
+
+It's worth noting that, in both such cases, the client doesn't inherently know
+how many of the messages it sent the server-side application dequeued before
+dropping the rest and entering a state of ignoring additional ones. Moreover,
+in the receiver-dropping case, the client sending message frames and even
+possibly even a finish or cancel frame can occur in parallel to the server
+sending a drop receiver frame, such that both occur before their transmitting
+side has received the frames from the other.
 
 Imagine, then, that the client creates an additional client-to-server channel
 by attaching it to one of the entrypoint channel messages, and sends messages
 on the second channel as well:
 
-	client                        server
-	     |--[chan 1 msg 1]------->|
-	     |--[chan 1 msg 2]------->|
-	     |  [attachment: chan 2]->|
-	     |----[chan 2 msg 1]----->|
-	     |----[chan 2 msg 2]----->|
-	     |--[chan 1 msg 3]------->|
-	     |--[finish chan 1]------>|
-	     |----[chan 2 msg 3]----->|
-	     |----[finish chan 2]---->|
-	     v                        v
+|frames client sends to server    |
+|---------------------------------|
+|chan 1 msg                       |
+|chan 1 msg                       |
+|chan 1 msg (attachments=[chan 2])|
+|chan 2 msg                       |
+|chan 2 msg                       |
+|chan 1 msg                       |
+|chan 1 finish                    |
+|chan 2 msg                       |
+|chan 2 finish                    |
 
 When the server receives chan 1 msg 2, it knows to create a receiver state
 machine for chan 2, since it was attached. After that point, the server can
@@ -135,5 +161,10 @@ process messages pertaining to chan 2. In this simplified protocol, the
 relative ordering between frames pertaining to chan 1 and chan 2 doesn't matter
 except that messages pertaining to chan 2 must occur after the chan 1 frame
 which creates chan 2.
+
+Things can get tricky when we combine these two concepts of channel creation
+and channel cancelling (or other things that cause messages never to be
+dequeued). Imagine that chan 1 was used to create chan 2, but then chan 1 was
+cancelled:
 
 
