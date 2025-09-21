@@ -1,3 +1,7 @@
+<img align="right" height="75" src=".assets/aqueduct.png"/>
+
+# The Aqueduct Protocol: Pedagogical Explantion of Protocol Design
+
 This is a non-normative document intended to give an intuitive understanding of
 the Aqueduct protocol’s architecture.
 
@@ -100,6 +104,18 @@ server-side application to dequeue. Once the server receives the frame
 indicating that the channel is finished, it similarly allows its application to
 observe this fact.
 
+In the real protocol, there may be race conditions between MESSAGES frames and
+a FINISH frame on a channel. For example, if the sender is in UNORDERED mode
+then each MESSAGE frame will be sent in a different QUIC stream, meaning that
+there is no one QUIC stream the FINISH frame can be sent on to ensure it's
+processed after all MESSAGE frames. However, this can be easily fixed by having
+the FINISH frame contain the total number of messages sent before finishing,
+and if the receiver receives it before receiving that many messages it simply
+marks down that the stream finishes after that many messages, and waits until
+that number of messages have been received before actually considering the
+channel finished. On the other hand, a finishing a sender that is in UNRELIABLE
+mode creates some entirely new complications.
+
 There are basically 3 ways the Aqueduct API can be used to intentionally close
 a channel:
 
@@ -107,11 +123,12 @@ a channel:
 - By the sender-side cancelling it.
 - By the receiver-side dropping the receiver.
 
-If the client closed this channel by cancelling it rather than by finishing it,
-this simplified protocol execution could be quite similar. Rather than sending
-a FINISH frame, the client could send a CANCEL frame. The main difference would
-be that upon the server receving this frame it would drop any of the messages
-it enqueued in its buffer that the server-side application hadn't yet dequeued:
+In the above example execution, if the client closed this channel by cancelling
+it rather than by finishing it, this simplified protocol execution could be
+quite similar. Rather than sending a FINISH frame, the client could send a
+CANCEL frame. The main difference would be that upon the server receving this
+frame it would drop any of the messages it enqueued in its buffer that the
+server-side application hadn't yet dequeued:
 
 |frames client sends to server|
 |-----------------------------|
@@ -167,4 +184,99 @@ and channel cancelling (or other things that cause messages never to be
 dequeued). Imagine that chan 1 was used to create chan 2, but then chan 1 was
 cancelled:
 
+|frames client sends to server    |
+|---------------------------------|
+|chan 1 msg                       |
+|chan 1 msg                       |
+|chan 1 msg (attachments=[chan 2])|
+|chan 2 msg                       |
+|chan 2 msg                       |
+|chan 1 msg                       |
+|chan 1 cancel                    |
+|chan 2 msg                       |
+|chan 2 finish                    |
 
+The implications of this situation depend largely on whether the server-side
+application dequeued the chan 1 msg containing chan 2 before the server
+received the chan 2 finish frame:
+
+- If so, then the server-side application would experience dequeueing 3 or 4
+  messages from channel 1, the 3rd of which would contain the receiver for
+  channel 2, before experiencing channel 1 being cancelled--and it would also
+  experience receiving 3 messages from channel 2 followed by channel 2
+  finishing.
+- If not, then the server-side application would experience dequeueing between
+  0 and 3 messages from channel 1, followed by channel 1 being cancelled. The
+  server-side application would _not_ experience anything about channel 2
+  whatsoever, since, even if the server (protocol implementation) received and
+  buffered messages for channel 2 and the fact that channel 2 finished, there
+  would be no API calls the server-side application could reasonably be
+  expected to perform to observe and handle this, since the server-side
+  application never received the handle to channel 2 in the first place.
+
+Similar situations could occur due to other reasons than the sender cancelling
+the channel as well. The receiver dropping is one example. Another notable one
+is if the sender is operating in UNRELIABLE mode, which creates the possibility
+that any individual MESSAGE frame will not merely be actively rejected by the
+receiver but that it will simply never arrive.
+
+Moreover, there is an element of transitivity to this situation. Consider the
+following simplified protocol execution:
+
+|frames client sends to server    |
+|---------------------------------|
+|chan 1 msg (attachments=[chan 2])|
+|chan 2 msg (attachments=[chan 3])|
+|chan 2 finish                    |
+|chan 3 msg                       |
+|chan 3 finish                    |
+|chan 1 cancel                    |
+
+Thinking back to how channels naturally form a tree of which channels were used
+to create them, channel 1 was used to create channel 2 which was used to create
+channel 3. Since channel 1 was cancelled, channel 2 may or may not be
+inaccessible to the server-side application. If it is, this necessarily means
+that channel 3 is also inaccessible to the server-side application, since the
+application would never be able to dequeue the channel 3 receiver from channel
+2 if it is never able to dequeue the channel 2 receiver from channel 1.
+
+Thus, we arrive at the notion of loss in transit detection. The principle here
+is that, given the possibility of situations where the application on one side
+of the connection has a handle to a channel but where the application on the
+other side of the connection will never have a handle to that channel, the
+Aqueduct protocol automatically detects this situation and ensures that:
+
+- For the side that does have the handles, Aqueduct surfaces "LostInTransit"
+  errors so that the application can properly clean up application-level state.
+- For the side that will never have the handles, Aqueduct ensures that the
+  protocol implementation will be able to garbage-collect any in-memory state
+  it has accumulated pertaining to this channel.
+
+At a high level, Aqueduct's strategy for achieving this is as such: For a given
+channel, as the sender side sends MESSAGE frames, the receiver side sends back:
+
+- Acks, for message numbers it has received and processed.
+- Committing nacks, wherein it not only certifies that is has never received a
+  certain message number, but also commits to rejecting and ignoring that
+  message number if it happens to receive it in the future.
+
+For senders in ORDERED or UNORDERED mode, nacks don't come into play until the
+channel is closed via sender-cancelling or receiver-dropping. For senders in
+UNRELIABLE mode, however, the sender pairs unreliable transmission of MESSAGE
+frames with reliable transmission of metadata about which message numbers it
+has unreliably transmitted, so that in the event these messages don't arrive
+within a reasonable time bound the receiver knows to nack them and record state
+to ensures it rejects them if they're simply arriving late.
+
+The sender-side of the channel, on the other hand, tracks information about
+which additional channels it has created by sending messages on the current
+one. When it receives a nack for any such message, it knows that any such
+additional channel is lost in transit, as it all of its descendants, and
+handles this by garbage-collecting its local state for these channels,
+surfacing a LostInTransit error to its local application, and transmitting
+LOST_IN_TRANSIT frames for those channels to the remote side so that it knows
+to garbage-collect its state for them.
+
+The reason why the receiver side transmits back acks, in addition to nacks, is
+just so that the sender side can garbage-collect the necessary tracking state
+for the above mechanism once it is known that it is no longer necessary.
