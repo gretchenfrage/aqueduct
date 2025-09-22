@@ -179,6 +179,15 @@ relative ordering between frames pertaining to chan 1 and chan 2 doesn't matter
 except that messages pertaining to chan 2 must occur after the chan 1 frame
 which creates chan 2.
 
+In the real protocol, on the other hand, there may be race conditions between
+the receipt of the message that creates chan 2 and the receipt of frames
+pertaining to chan 2. Since they are different channels, their respective
+frames will be sent on different QUIC streams, meaning that one side may start
+receiving frames pertaining to a remotely created channel before it learns the
+context in which that channel was created. This is handled by simply implicitly
+creating the state machine for a channel upon first receiving a frame addressed
+to it.
+
 Things can get tricky when we combine these two concepts of channel creation
 and channel cancelling (or other things that cause messages never to be
 dequeued). Imagine that chan 1 was used to create chan 2, but then chan 1 was
@@ -198,7 +207,7 @@ cancelled:
 
 The implications of this situation depend largely on whether the server-side
 application dequeued the chan 1 msg containing chan 2 before the server
-received the chan 2 finish frame:
+received the chan 2 cancel frame:
 
 - If so, then the server-side application would experience dequeueing 3 or 4
   messages from channel 1, the 3rd of which would contain the receiver for
@@ -280,3 +289,5 @@ to garbage-collect its state for them.
 The reason why the receiver side transmits back acks, in addition to nacks, is
 just so that the sender side can garbage-collect the necessary tracking state
 for the above mechanism once it is known that it is no longer necessary.
+
+
