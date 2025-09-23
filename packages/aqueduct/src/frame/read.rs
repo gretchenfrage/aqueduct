@@ -17,17 +17,19 @@ pub enum Error {
     Other(anyhow::Error),
 }
 
-impl From<anyhow::Error> for Error {
-    fn from(e: anyhow::Error) -> Self {
-        Error::Other(e)
-    }
+macro_rules! other_from {
+    ($t:ty) => {
+        impl From<$t> for Error {
+            fn from(t: $t) -> Self {
+                Error::Other(<$t as Into<anyhow::Error>>::into(t))
+            }
+        }
+    };
 }
 
-impl From<TooFewBytesError> for Error {
-    fn from(TooFewBytesError: TooFewBytesError) -> Self {
-        anyhow::Error::msg("too few bytes").into()
-    }
-}
+other_from!(anyhow::Error);
+other_from!(TooFewBytesError);
+other_from!(quinn::ConnectionError);
 
 impl From<quic_zc::Error> for Error {
     fn from(e: quic_zc::Error) -> Self {
@@ -402,7 +404,7 @@ impl MessagePayload {
         self.1
     }
 
-    pub async fn read(mut self) -> Result<(MultiBytes, Frames)> {
+    pub async fn payload(mut self) -> Result<(MultiBytes, Frames)> {
         let payload = self.0.read_zc(self.1).await?;
         Ok((payload, Frames(self.0)))
     }

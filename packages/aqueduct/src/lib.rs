@@ -11,6 +11,8 @@ pub extern crate multibytes;
 mod channel;
 #[allow(dead_code)]
 mod frame;
+#[allow(dead_code)]
+mod proto;
 mod quic_zc;
 
 pub use crate::channel::api::*;
