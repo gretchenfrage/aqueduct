@@ -30,7 +30,7 @@ impl ChanId {
         Side(self.0 & 0b010 != 0)
     }
 
-    pub fn oneshot(self) -> bool {
+    pub fn is_oneshot(self) -> bool {
         self.0 & 0b100 != 0
     }
 

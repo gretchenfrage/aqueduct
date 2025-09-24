@@ -41,6 +41,22 @@ impl From<quic_zc::Error> for Error {
     }
 }
 
+macro_rules! bail {
+    ($($t:tt)*)=>{
+        return Err(anyhow::anyhow!($($t)*).into());
+    };
+}
+pub(crate) use bail;
+
+macro_rules! ensure {
+    ($b:expr, $($t:tt)*)=>{
+        if !$b {
+            $crate::frame::read::bail!($($t)*);
+        }
+    };
+}
+pub(crate) use ensure;
+
 // ==== module-internal utilities ====
 
 // - abstracts over zero-copy layer for QUIC stream versus datagram
@@ -190,27 +206,32 @@ impl Frames {
 
     async fn version(mut self) -> Result<Self> {
         for b in VERSION_FRAME_MAGIC_BYTES {
-            if self.0.read_byte().await? != b {
-                return Err(anyhow!("wrong VERSION frame magic byte sequence").into());
-            }
+            ensure!(
+                self.0.read_byte().await? == b,
+                "wrong VERSION frame magic byte sequence"
+            );
         }
         for b in VERSION_FRAME_HUMAN_TEXT {
-            if self.0.read_byte().await? != b {
-                return Err(anyhow!("wrong VERSION frame human text").into());
-            }
+            ensure!(
+                self.0.read_byte().await? == b,
+                "wrong VERSION frame human text"
+            );
         }
         let version_number_length = self.0.read_varint_usize().await?;
         let mut buf_space = [0; 0xff];
-        if version_number_length > buf_space.len() {
-            return Err(anyhow!("unreasonably long VERSION frame version number").into());
-        }
+        ensure!(
+            version_number_length <= buf_space.len(),
+            "unreasonably long VERSION frame version number"
+        );
         let buf = &mut buf_space[..version_number_length];
         self.0.read(buf).await?;
         let version_num =
             ascii_to_str(buf).ok_or(anyhow::Error::msg("non-ASCII version number"))?;
-        if version_num != VERSION {
-            return Err(anyhow!("unknown VERSION frame version number: {:?}", version_num).into());
-        }
+        ensure!(
+            version_num == VERSION,
+            "unknown VERSION frame version number: {:?}",
+            version_num
+        );
         Ok(self)
     }
 
