@@ -2,15 +2,15 @@ use crate::frame::common::*;
 use std::ops::Index;
 
 #[derive(Default)]
-pub struct PerCreator<T>(pub [T; 2]);
+pub struct PerCreatorSide<T>(pub [T; 2]);
 
-impl<T> PerCreator<T> {
+impl<T> PerCreatorSide<T> {
     pub fn by_creator(&self, creator: Side) -> &T {
         &self.0[creator.0 as usize]
     }
 }
 
-impl<T> Index<ChanId> for PerCreator<T> {
+impl<T> Index<ChanId> for PerCreatorSide<T> {
     type Output = T;
 
     fn index(&self, idx: ChanId) -> &Self::Output {
@@ -19,15 +19,15 @@ impl<T> Index<ChanId> for PerCreator<T> {
 }
 
 #[derive(Default)]
-pub struct PerSender<T>(pub [T; 2]);
+pub struct PerSenderSide<T>(pub [T; 2]);
 
-impl<T> PerSender<T> {
+impl<T> PerSenderSide<T> {
     pub fn by_sender(&self, sender: Side) -> &T {
         &self.0[sender.0 as usize]
     }
 }
 
-impl<T> Index<ChanId> for PerSender<T> {
+impl<T> Index<ChanId> for PerSenderSide<T> {
     type Output = T;
 
     fn index(&self, idx: ChanId) -> &Self::Output {

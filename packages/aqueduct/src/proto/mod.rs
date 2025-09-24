@@ -2,7 +2,7 @@ mod per_chan_id_bit;
 mod range_set;
 
 use self::{
-    per_chan_id_bit::{PerCreator, PerIsOneshot, PerSender},
+    per_chan_id_bit::{PerCreatorSide, PerIsOneshot, PerSenderSide},
     range_set::RangeSetU64,
 };
 use crate::frame::{common::*, read, write};
@@ -20,22 +20,24 @@ struct Connection {
     // the underlying QUIC connection
     quic_connection: quinn::Connection,
     // the next channel ID indexes for channel IDs the local side creates
-    next_chan_id_idxs: PerSender<PerIsOneshot<AtomicU64>>,
+    next_chan_id_idxs: PerSenderSide<PerIsOneshot<AtomicU64>>,
     // senders that currently exist for which the local side is the sender side
     senders: DashMap<ChanId, SenderState>,
-    // keys that have been removed from self.senders (u64 representation of ChanIds)
-    removed_senders: RwLock<RangeSetU64>,
     // receivers that currently exist for which the local side is the receiver side
     receivers: DashMap<ChanId, ReceiverState>,
-    // keys that have been removed from self.receivers (u64 representation of ChanIds)
-    removed_receivers: RwLock<RangeSetU64>,
+    // the idx part of all chan IDs that have been removed from self.senders or self.receivers and
+    // for which the remote side is the creator side
+    removed_channels: PerSenderSide<PerIsOneshot<RwLock<RangeSetU64>>>,
 }
 
 #[derive(Default)]
-struct SenderState {}
+struct SenderState {
+    received_creating_message: bool,
+}
 
 #[derive(Default)]
 struct ReceiverState {
+    received_creating_message: bool,
     received_messages: Vec<ReceivedMessage>,
 }
 
@@ -57,13 +59,24 @@ impl Connection {
             quic_connection,
             next_chan_id_idxs: Default::default(),
             senders: Default::default(),
-            removed_senders: Default::default(),
             receivers: Default::default(),
-            removed_receivers: Default::default(),
+            removed_channels: Default::default(),
         });
 
+        // initialize entrypoint channel
         if side == Side::CLIENT {
             this.next_chan_id_idxs[ChanId::ENTRYPOINT][ChanId::ENTRYPOINT].store(1, Relaxed);
+            this.senders.insert(ChanId::ENTRYPOINT, SenderState {
+                received_creating_message: true,
+            });
+        } else {
+            this.receivers.insert(
+                ChanId::ENTRYPOINT,
+                ReceiverState {
+                    received_messages: Vec::new(),
+                    received_creating_message: true,
+                },
+            );
         }
 
         // handle streams
@@ -141,6 +154,7 @@ impl Connection {
                 read::Frame::ConnectionHeaders(r) => todo!(),
                 read::Frame::RouteTo(r) => todo!(),
                 read::Frame::Message(r) => {
+                    // read message
                     let read::Message {
                         message_num,
                         message_headers: mut r,
@@ -183,27 +197,28 @@ impl Connection {
                         payload,
                     };
 
+                    // process message
                     read::ensure!(
                         chan_id.sender() != self.side,
                         "received MESSAGE frame for channel ID for which local side is the sender"
                     );
-                    let mut receiver = self.receivers.entry(chan_id).or_try_insert_with(|| {
-                        if self.removed_receivers.read().unwrap().contains(chan_id.0) {
-                            trace!(
-                                ?chan_id,
-                                "received MESSAGE frame for channel ID for which receiver has
-                                already been removed (late-arriving, ignoring)"
-                            );
-                            return Err(read::Error::Reset);
-                        }
+                    for attached_channel in &received_message.attached_channels {
                         read::ensure!(
-                            chan_id.creator() != self.side,
-                            "received MESSAGE frame for channel ID {:?} for which local side is the
-                            creator and local side has never created it",
-                            chan_id
+                            attached_channel.chan_id.creator() != self.side,
+                            "received MESSAGE frame with attached channel ID for which local side
+                            is the creator"
                         );
-                        Ok(Default::default())
-                    })?;
+                        if attached_channel.chan_id.sender() == self.side {
+                            let mut sender = self.sender_state(attached_channel.chan_id)?;
+                            read::ensure!(!sender.received_creating_message, "TODO");
+                            sender.received_creating_message = true;
+                        } else {
+                            let mut receiver = self.receiver_state(attached_channel.chan_id)?;
+                            read::ensure!(!receiver.received_creating_message, "TODO");
+                            receiver.received_creating_message = true;
+                        }
+                    }
+                    let mut receiver = self.receiver_state(chan_id)?;
                     receiver.received_messages.push(received_message);
                     drop(receiver);
 
@@ -219,5 +234,47 @@ impl Connection {
             };
         }
         Ok(())
+    }
+
+    fn sender_state(
+        &self,
+        chan_id: ChanId,
+    ) -> read::Result<dashmap::mapref::one::RefMut<ChanId, SenderState>> {
+        debug_assert!(chan_id.sender() == self.side);
+        self.senders.entry(chan_id).or_try_insert_with(|| {
+            if chan_id.creator() == self.side {
+                // TODO: could do an optional removery assertion here
+                return Err(read::Error::Reset);
+            }
+            if self.removed_channels[chan_id][chan_id]
+                .read()
+                .unwrap()
+                .contains(chan_id.idx())
+            {
+                return Err(read::Error::Reset);
+            }
+            Ok(SenderState::default())
+        })
+    }
+
+    fn receiver_state(
+        &self,
+        chan_id: ChanId,
+    ) -> read::Result<dashmap::mapref::one::RefMut<ChanId, ReceiverState>> {
+        debug_assert!(chan_id.sender() != self.side);
+        self.receivers.entry(chan_id).or_try_insert_with(|| {
+            if chan_id.creator() == self.side {
+                // TODO: could do an optional removery assertion here
+                return Err(read::Error::Reset);
+            }
+            if self.removed_channels[chan_id][chan_id]
+                .read()
+                .unwrap()
+                .contains(chan_id.idx())
+            {
+                return Err(read::Error::Reset);
+            }
+            Ok(ReceiverState::default())
+        })
     }
 }
