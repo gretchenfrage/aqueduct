@@ -9,9 +9,12 @@ use crate::frame::{common::*, read, write};
 use dashmap::DashMap;
 use multibytes::MultiBytes;
 use quinn;
-use std::sync::{
-    Arc, RwLock,
-    atomic::{AtomicU64, Ordering::Relaxed},
+use std::{
+    sync::{
+        Arc, RwLock,
+        atomic::{AtomicU64, Ordering::Relaxed},
+    },
+    time::Duration,
 };
 
 struct Connection {
@@ -39,6 +42,10 @@ struct SenderState {
 struct ReceiverState {
     received_creating_message: bool,
     received_messages: Vec<ReceivedMessage>,
+    reliable_received_acked: RangeSetU64,
+    reliable_received_unacked: RangeSetU64,
+    reliable_ack_task_exists: bool,
+    ctrl_stream: Option<quinn::SendStream>,
 }
 
 struct ReceivedMessage {
@@ -66,15 +73,19 @@ impl Connection {
         // initialize entrypoint channel
         if side == Side::CLIENT {
             this.next_chan_id_idxs[ChanId::ENTRYPOINT][ChanId::ENTRYPOINT].store(1, Relaxed);
-            this.senders.insert(ChanId::ENTRYPOINT, SenderState {
-                received_creating_message: true,
-            });
+            this.senders.insert(
+                ChanId::ENTRYPOINT,
+                SenderState {
+                    received_creating_message: true,
+                    ..Default::default()
+                },
+            );
         } else {
             this.receivers.insert(
                 ChanId::ENTRYPOINT,
                 ReceiverState {
-                    received_messages: Vec::new(),
                     received_creating_message: true,
+                    ..Default::default()
                 },
             );
         }
@@ -88,7 +99,7 @@ impl Connection {
                     let r = read::Frames::from_stream(stream);
                     this.spawn({
                         let this = this.clone();
-                        async move { this.handle_frames(r).await }
+                        async move { this.handle_frames(r, true).await }
                     });
                 }
             }
@@ -103,7 +114,7 @@ impl Connection {
                     let r = read::Frames::from_datagram(datagram);
                     this.spawn({
                         let this = this.clone();
-                        async move { this.handle_frames(r).await }
+                        async move { this.handle_frames(r, false).await }
                     });
                 }
             }
@@ -125,13 +136,13 @@ impl Connection {
         });
     }
 
-    async fn handle_frames(&self, r: read::Frames) -> read::Result<()> {
+    async fn handle_frames(self: &Arc<Self>, r: read::Frames, reliable: bool) -> read::Result<()> {
         while let Some(r) = r.frame().await? {
             match r {
                 read::Frame::Version(r) => todo!(),
                 read::Frame::AckVersion(r) => todo!(),
                 read::Frame::ConnectionHeaders(r) => todo!(),
-                read::Frame::RouteTo(r) => return self.handle_routed_frames(r).await,
+                read::Frame::RouteTo(r) => return self.handle_routed_frames(r, reliable).await,
                 read::Frame::Message(r) => todo!(),
                 read::Frame::SentUnreliable(r) => todo!(),
                 read::Frame::FinishSender(r) => todo!(),
@@ -145,7 +156,11 @@ impl Connection {
         Ok(())
     }
 
-    async fn handle_routed_frames(&self, r: read::RouteTo) -> read::Result<()> {
+    async fn handle_routed_frames(
+        self: &Arc<Self>,
+        r: read::RouteTo,
+        reliable: bool,
+    ) -> read::Result<()> {
         let read::RouteTo { chan_id, mut next } = r;
         while let Some(r) = next.frame().await? {
             next = match r {
@@ -210,16 +225,40 @@ impl Connection {
                         );
                         if attached_channel.chan_id.sender() == self.side {
                             let mut sender = self.sender_state(attached_channel.chan_id)?;
-                            read::ensure!(!sender.received_creating_message, "TODO");
+                            read::ensure!(
+                                !sender.received_creating_message,
+                                "received channel ID attached to multiple messages"
+                            );
                             sender.received_creating_message = true;
                         } else {
                             let mut receiver = self.receiver_state(attached_channel.chan_id)?;
-                            read::ensure!(!receiver.received_creating_message, "TODO");
+                            read::ensure!(
+                                !receiver.received_creating_message,
+                                "received channel ID attached to multiple messages"
+                            );
                             receiver.received_creating_message = true;
                         }
                     }
                     let mut receiver = self.receiver_state(chan_id)?;
                     receiver.received_messages.push(received_message);
+                    if reliable {
+                        read::ensure!(
+                            !receiver
+                                .reliable_received_unacked
+                                .insert(message_num, message_num),
+                            "received reliable message num in duplicate"
+                        );
+                        if !receiver.reliable_ack_task_exists {
+                            receiver.reliable_ack_task_exists = true;
+                            let this = self.clone();
+                            self.spawn(async move {
+                                tokio::time::sleep(Duration::from_secs(1)).await;
+                                this.reliable_ack(chan_id).await;
+                                Ok(())
+                            });
+                        }
+                    } else {
+                    }
                     drop(receiver);
 
                     r
@@ -236,14 +275,18 @@ impl Connection {
         Ok(())
     }
 
+    // get the SenderState for the channel ID if it currently exists. if it used to exist but
+    // doesn't any more, return a Reset error. if it never existed, create it with defaults the
+    // channel ID creator side is the remote side, or fatally error if it is the local side.
     fn sender_state(
         &self,
         chan_id: ChanId,
-    ) -> read::Result<dashmap::mapref::one::RefMut<ChanId, SenderState>> {
+    ) -> read::Result<dashmap::mapref::one::RefMut<'_, ChanId, SenderState>> {
         debug_assert!(chan_id.sender() == self.side);
         self.senders.entry(chan_id).or_try_insert_with(|| {
             if chan_id.creator() == self.side {
-                // TODO: could do an optional removery assertion here
+                self.ensure_local_created(chan_id)?;
+                trace!("received frame containing chan ID which has been removed, ignoring");
                 return Err(read::Error::Reset);
             }
             if self.removed_channels[chan_id][chan_id]
@@ -251,20 +294,25 @@ impl Connection {
                 .unwrap()
                 .contains(chan_id.idx())
             {
+                trace!("received frame containing chan ID which has been removed, ignoring");
                 return Err(read::Error::Reset);
             }
             Ok(SenderState::default())
         })
     }
 
+    // get the ReceiverState for the channel ID if it currently exists. if it used to exist but
+    // doesn't any more, return a Reset error. if it never existed, create it with defaults the
+    // channel ID creator side is the remote side, or fatally error if it is the local side.
     fn receiver_state(
         &self,
         chan_id: ChanId,
-    ) -> read::Result<dashmap::mapref::one::RefMut<ChanId, ReceiverState>> {
+    ) -> read::Result<dashmap::mapref::one::RefMut<'_, ChanId, ReceiverState>> {
         debug_assert!(chan_id.sender() != self.side);
         self.receivers.entry(chan_id).or_try_insert_with(|| {
             if chan_id.creator() == self.side {
-                // TODO: could do an optional removery assertion here
+                self.ensure_local_created(chan_id)?;
+                trace!("received frame containing chan ID which has been removed, ignoring");
                 return Err(read::Error::Reset);
             }
             if self.removed_channels[chan_id][chan_id]
@@ -272,9 +320,76 @@ impl Connection {
                 .unwrap()
                 .contains(chan_id.idx())
             {
+                trace!("received frame containing chan ID which has been removed, ignoring");
                 return Err(read::Error::Reset);
             }
             Ok(ReceiverState::default())
         })
+    }
+
+    // error if the channel ID, for which the creator side is the local side, has never been
+    // created by the local side.
+    fn ensure_local_created(&self, chan_id: ChanId) -> read::Result<()> {
+        debug_assert!(chan_id.creator() == self.side);
+        read::ensure!(
+            chan_id.idx() < self.next_chan_id_idxs[chan_id][chan_id].load(Relaxed),
+            "received frame containing chan ID which local side never created"
+        );
+        Ok(())
+    }
+
+    async fn reliable_ack(&self, chan_id: ChanId) -> read::Result<()> {
+        let Some(mut receiver_guard) = self.receivers.get_mut(&chan_id) else {
+            trace!("reliable ack timer elapsed for non-existent receiver, ignoring");
+            return Ok(());
+        };
+        let receiver = &mut *receiver_guard;
+
+        debug_assert!(receiver.reliable_ack_task_exists);
+        receiver.reliable_ack_task_exists = false;
+        debug_assert!(!receiver.reliable_received_unacked.is_empty());
+
+        let first_unacked = receiver
+            .reliable_received_acked
+            .iter()
+            .next()
+            .filter(|&(s2, _)| s2 == 0)
+            .map(|(_, e2)| e2 + 1)
+            .unwrap_or(0);
+
+        for (s, e) in receiver.reliable_received_unacked.iter() {
+            read::ensure!(
+                !receiver.reliable_received_acked.insert(s, e),
+                "received reliable message num in duplicate",
+            );
+        }
+
+        let mut deltas = write::Deltas::default();
+        let mut acking = receiver.reliable_received_unacked.iter().peekable();
+        let first_unacked = acking
+            .next_if(|&(s1, _)| s1 == first_unacked)
+            .map(|(s, e)| {
+                let new_first_unacked = e + 1;
+                deltas.delta(new_first_unacked - s);
+                new_first_unacked
+            })
+            .unwrap_or_else(|| {
+                deltas.delta(0);
+                first_unacked
+            });
+        let mut base = Some(first_unacked);
+        for (s, e) in acking {
+            deltas.delta(s - base.unwrap());
+            deltas.delta(e - s);
+            base = e.checked_add(1);
+        }
+
+        receiver.reliable_received_unacked.clear();
+
+        drop(receiver_guard);
+
+        let mut w = write::Frames::new_with_version(todo!());
+
+        Ok(())
     }
 }

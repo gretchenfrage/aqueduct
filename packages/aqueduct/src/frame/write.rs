@@ -173,7 +173,11 @@ impl Frames {
     }
 
     tag_only_frame!(cancel_sender CancelSender);
-    tag_only_frame!(ack_reliable AckReliable);
+
+    pub fn ack_reliable(&mut self, deltas: Deltas) {
+        self.0.write(&[FrameTag::AckReliable as u8]);
+        self.0.write_varbytes(deltas.0.0);
+    }
 
     pub fn ack_nack_unreliable(&mut self, deltas: Deltas) {
         self.0.write(&[FrameTag::AckNackUnreliable as u8]);
