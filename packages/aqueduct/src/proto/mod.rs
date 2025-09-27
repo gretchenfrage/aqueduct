@@ -40,12 +40,32 @@ struct SenderState {
 
 #[derive(Default)]
 struct ReceiverState {
+    // whether the local side has received the message that this channel was attached to, or true
+    // this is the entrypoint channel
     received_creating_message: bool,
+    // buffer of all messages we have received on this channel
     received_messages: Vec<ReceivedMessage>,
+
+    // set of reliable message numbers the local side has received and sent back acks for
     reliable_received_acked: RangeSetU64,
+    // set of reliable message numbers the local side has received but not sent acks for
     reliable_received_unacked: RangeSetU64,
+    // whether a task currently exists to sent acks for reliable message nums for this channel
     reliable_ack_task_exists: bool,
-    ctrl_stream: Option<quinn::SendStream>,
+
+    // set of unreliable message numbers the local side has ack-nacked (exclusive upper bound)
+    unreliable_ack_nacked_lt: u64,
+    // set of unreliable message numbers we know the remote side has sent (exclusive upper)
+    unreliable_known_sent_lt: u64,
+    // set of unreliable message numbers the local side has received and not acked
+    unreliable_received_unacked: RangeSetU64,
+    // whether a task currently exists to sent acks for unreliable message nums for this channel
+    unreliable_ack_nack_task_exists: bool,
+
+    // the receiver-to-sender feedback control stream for this channel. we utilize tokio Mutex's
+    // strict FIFO guarantees to form a queue of control data to asynchronously write without
+    // holding a receiver state lock across await boundaries.
+    ctrl_stream: Arc<tokio::sync::Mutex<Option<quinn::SendStream>>>,
 }
 
 struct ReceivedMessage {
@@ -214,9 +234,55 @@ impl Connection {
 
                     // process message
                     read::ensure!(
+                        message_num < u64::MAX,
+                        "received MESSAGE frame with message num u64::MAX"
+                    );
+                    read::ensure!(
                         chan_id.sender() != self.side,
                         "received MESSAGE frame for channel ID for which local side is the sender"
                     );
+                    let mut receiver = self.receiver_state(chan_id)?;
+                    if reliable {
+                        let is_duplicate = receiver
+                            .reliable_received_unacked
+                            .insert(message_num, message_num);
+                        read::ensure!(!is_duplicate, "received reliable message num in duplicate");
+                        if !receiver.reliable_ack_task_exists {
+                            receiver.reliable_ack_task_exists = true;
+                            let this = self.clone();
+                            self.spawn(async move {
+                                tokio::time::sleep(Duration::from_secs(1)).await;
+                                this.reliable_ack(chan_id).await
+                            });
+                        }
+                    } else {
+                        if message_num < receiver.unreliable_ack_nacked_lt {
+                            trace!(
+                                "received unreliable message num that has already been nacked (or
+                                acked), ignoring"
+                            );
+                            next = r;
+                            continue; // TODO: reset instead?
+                        }
+                        let is_duplicate = receiver
+                            .unreliable_received_unacked
+                            .insert(message_num, message_num);
+                        read::ensure!(
+                            !is_duplicate,
+                            "received unreliable message num in duplicate"
+                        );
+
+                        let ack_nack_lt = receiver.unreliable_known_sent_lt.max(message_num + 1);
+                        receiver.unreliable_known_sent_lt = ack_nack_lt;
+                        if !receiver.unreliable_ack_nack_task_exists {
+                            receiver.unreliable_ack_nack_task_exists = true;
+                            let this = self.clone();
+                            self.spawn(async move {
+                                tokio::time::sleep(Duration::from_secs(1)).await;
+                                this.unreliable_ack_nack(chan_id, ack_nack_lt).await
+                            });
+                        }
+                    }
                     for attached_channel in &received_message.attached_channels {
                         read::ensure!(
                             attached_channel.chan_id.creator() != self.side,
@@ -239,26 +305,7 @@ impl Connection {
                             receiver.received_creating_message = true;
                         }
                     }
-                    let mut receiver = self.receiver_state(chan_id)?;
                     receiver.received_messages.push(received_message);
-                    if reliable {
-                        read::ensure!(
-                            !receiver
-                                .reliable_received_unacked
-                                .insert(message_num, message_num),
-                            "received reliable message num in duplicate"
-                        );
-                        if !receiver.reliable_ack_task_exists {
-                            receiver.reliable_ack_task_exists = true;
-                            let this = self.clone();
-                            self.spawn(async move {
-                                tokio::time::sleep(Duration::from_secs(1)).await;
-                                this.reliable_ack(chan_id).await;
-                                Ok(())
-                            });
-                        }
-                    } else {
-                    }
                     drop(receiver);
 
                     r
@@ -339,6 +386,7 @@ impl Connection {
     }
 
     async fn reliable_ack(&self, chan_id: ChanId) -> read::Result<()> {
+        // lock receiver state
         let Some(mut receiver_guard) = self.receivers.get_mut(&chan_id) else {
             trace!("reliable ack timer elapsed for non-existent receiver, ignoring");
             return Ok(());
@@ -366,7 +414,8 @@ impl Connection {
 
         let mut deltas = write::Deltas::default();
         let mut acking = receiver.reliable_received_unacked.iter().peekable();
-        let first_unacked = acking
+        // there is always a single ack delta, representing a range length beyond 0
+        let new_first_unacked = acking
             .next_if(|&(s1, _)| s1 == first_unacked)
             .map(|(s, e)| {
                 let new_first_unacked = e + 1;
@@ -377,18 +426,115 @@ impl Connection {
                 deltas.delta(0);
                 first_unacked
             });
-        let mut base = Some(first_unacked);
+        // it is followed by 0 or more (not-ack, ack) delta pairs, representing range lengths
+        // beyond 1
+        let mut base = new_first_unacked;
         for (s, e) in acking {
-            deltas.delta(s - base.unwrap());
+            debug_assert!(e < u64::MAX);
+            deltas.delta(s - base);
             deltas.delta(e - s);
-            base = e.checked_add(1);
+            base = e + 1;
         }
-
         receiver.reliable_received_unacked.clear();
 
+        let ctrl_stream_guard_fut = receiver.ctrl_stream.clone().lock_owned();
         drop(receiver_guard);
+        let mut ctrl_stream_guard = ctrl_stream_guard_fut.await;
 
-        let mut w = write::Frames::new_with_version(todo!());
+        if ctrl_stream_guard.is_none() {
+            let mut w = write::Frames::default();
+            w.route_to(chan_id);
+            let ctrl_stream = w.send_on_new_stream(&self.quic_connection).await?;
+            *ctrl_stream_guard = Some(ctrl_stream);
+        }
+
+        let ctrl_stream = ctrl_stream_guard.as_mut().unwrap();
+        let mut w = write::Frames::default();
+        w.ack_reliable(deltas);
+        w.send_on_stream(ctrl_stream).await?;
+
+        Ok(())
+    }
+
+    async fn unreliable_ack_nack(
+        self: &Arc<Self>,
+        chan_id: ChanId,
+        ack_nack_lt: u64,
+    ) -> read::Result<()> {
+        let Some(mut receiver_guard) = self.receivers.get_mut(&chan_id) else {
+            trace!("unreliable ack timer elapsed for non-existent receiver, ignoring");
+            return Ok(());
+        };
+        let receiver = &mut *receiver_guard;
+
+        debug_assert!(receiver.unreliable_ack_nack_task_exists);
+        receiver.unreliable_ack_nack_task_exists = false;
+        debug_assert!(ack_nack_lt > receiver.unreliable_ack_nacked_lt);
+
+        let mut deltas = write::Deltas::default();
+
+        // there is always a single ack delta, representing a range length beyond 0
+        let range = receiver
+            .unreliable_received_unacked
+            .iter()
+            .next()
+            .filter(|&(s, _)| {
+                debug_assert!(receiver.unreliable_ack_nacked_lt <= s);
+                s == receiver.unreliable_ack_nacked_lt
+            });
+        if let Some((s, e)) = range {
+            // TODO the following if/else is repetitive
+            if e < ack_nack_lt {
+                deltas.delta(e - s + 1);
+                receiver.unreliable_ack_nacked_lt = e + 1;
+                receiver
+                    .unreliable_received_unacked
+                    .delete_range_by_start(s);
+            } else {
+                deltas.delta(ack_nack_lt - s);
+                receiver.unreliable_ack_nacked_lt = ack_nack_lt;
+                receiver
+                    .unreliable_received_unacked
+                    .delete_range_prefix(s, ack_nack_lt - 1);
+            }
+        } else {
+            deltas.delta(0);
+        }
+
+        while receiver.unreliable_ack_nacked_lt < ack_nack_lt {
+            let range = receiver
+                .unreliable_received_unacked
+                .iter()
+                .next()
+                .filter(|&(s, _)| {
+                    debug_assert!(receiver.unreliable_ack_nacked_lt < s);
+                    s < ack_nack_lt
+                });
+            // TODO the following if/else is repetitive
+            if let Some((s, e)) = range {
+                // it is followed by 0 or more (nack, ack) delta pairs, representing range lengths
+                // beyond 1
+                deltas.delta(s - receiver.unreliable_ack_nacked_lt - 1);
+                if e < ack_nack_lt {
+                    deltas.delta(e - s + 1);
+                    receiver.unreliable_ack_nacked_lt = e + 1;
+                    receiver
+                        .unreliable_received_unacked
+                        .delete_range_by_start(s);
+                } else {
+                    deltas.delta(ack_nack_lt - s);
+                    receiver.unreliable_ack_nacked_lt = ack_nack_lt;
+                    receiver
+                        .unreliable_received_unacked
+                        .delete_range_prefix(s, ack_nack_lt - 1);
+                }
+            } else {
+                // finally, there is sometimes a final nack delta, representing a range length
+                // beyond 1
+                deltas.delta(ack_nack_lt - receiver.unreliable_ack_nacked_lt);
+                receiver.unreliable_ack_nacked_lt = ack_nack_lt;
+            }
+        }
 
         Ok(())
     }

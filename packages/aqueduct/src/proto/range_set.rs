@@ -4,7 +4,7 @@ use std::{cell::Cell, collections::BTreeMap};
 //
 // internally, map from non-overlapping non-empty non-contiguous ranges' start to end (inclusive).
 #[derive(Default)]
-pub struct RangeSetU64(BTreeMap<Cell<u64>, u64>);
+pub struct RangeSetU64(BTreeMap<UnsafeAssertSync<Cell<u64>>, u64>);
 
 impl RangeSetU64 {
     // insert a new [n, m] range, returning whether any of it was already present
@@ -14,11 +14,11 @@ impl RangeSetU64 {
         loop {
             let mut ranges = self
                 .0
-                .range_mut(..=Cell::new(m.saturating_add(1)))
+                .range_mut(..=UnsafeAssertSync(Cell::new(m.saturating_add(1))))
                 .rev()
                 .take_while(|&(_, ref e)| **e >= m.saturating_sub(1));
             if let Some((s, e)) = ranges.next() {
-                if *e >= n || s.get() <= m {
+                if *e >= n || s.0.get() <= m {
                     intersected = true;
                 }
                 if ranges.next().is_some() {
@@ -26,40 +26,43 @@ impl RangeSetU64 {
                     let s = s.clone();
                     self.0.remove(&s);
                 } else {
-                    s.set(n);
+                    s.0.set(n);
                     *e = m;
                     break;
                 }
             } else {
-                self.0.insert(Cell::new(n), m);
+                self.0.insert(UnsafeAssertSync(Cell::new(n)), m);
                 break;
             }
         }
         intersected
     }
 
+    pub fn delete_range_by_start(&mut self, start: u64) {
+        self.0.remove(&UnsafeAssertSync(Cell::new(start))).unwrap();
+    }
+
+    pub fn delete_range_prefix(&mut self, old_start: u64, new_start: u64) {
+        assert!(new_start > new_start);
+        let (start, &end) = self
+            .0
+            .get_key_value(&UnsafeAssertSync(Cell::new(old_start)))
+            .unwrap();
+        assert!(new_start <= end);
+        start.0.set(new_start);
+    }
+
     // get whether self contains n
     pub fn contains(&self, n: u64) -> bool {
         self.0
-            .range(..=Cell::new(n))
+            .range(..=UnsafeAssertSync(Cell::new(n)))
             .next_back()
             .is_some_and(|(_, &e)| e >= n)
     }
 
-    // get lowest u64 that is not contained within self
-    // returns None iff self contains [0, u64::MAX]
-    pub fn lowest_absent(&self) -> Option<u64> {
-        self.0
-            .iter()
-            .next()
-            .filter(|&(ref start, _)| start.get() == 0)
-            .map(|(_, &end)| end.checked_add(1))
-            .unwrap_or(Some(0))
-    }
-
     // iterate through ranges
-    pub fn iter(&self) -> impl Iterator<Item = (u64, u64)> {
-        self.0.iter().map(|(k, &v)| (k.get(), v))
+    pub fn iter(&self) -> impl Iterator<Item = (u64, u64)> + Send {
+        self.0.iter().map(|(k, &v)| (k.0.get(), v))
     }
 
     // remove all content
@@ -68,10 +71,13 @@ impl RangeSetU64 {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.0.is_empty();
+        self.0.is_empty()
     }
 }
 
 // safety: RangeSetU64 is naturally !Sync because of Cell keys, but any writes to them are guarded
 //         by a &mut reference to the RangeSetU64.
-unsafe impl Sync for RangeSetU64 {}
+#[derive(Ord, PartialOrd, Eq, PartialEq, Copy, Clone)]
+struct UnsafeAssertSync<T>(T);
+
+unsafe impl<T> Sync for UnsafeAssertSync<T> {}

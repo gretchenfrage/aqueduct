@@ -52,11 +52,11 @@ impl Writer {
     }
 
     // open new unidirectional QUIC stream, send written data on it, finish stream.
-    async fn send_on_new_stream(self, conn: &Connection) -> Result<()> {
+    async fn send_on_new_stream(self, conn: &Connection) -> Result<quinn::SendStream> {
         let mut stream = conn.open_uni().await?;
         self.send_on_stream(&mut stream).await?;
         stream.finish().unwrap();
-        Ok(())
+        Ok(stream)
     }
 
     // send written data in a QUIC datagram, or fall back to send_new_stream if too large.
@@ -65,7 +65,8 @@ impl Writer {
             .max_datagram_size()
             .ok_or_else(|| anyhow!("datagrams disabled"))?;
         if self.0.len() > max_datagram_size {
-            self.send_on_new_stream(conn).await
+            self.send_on_new_stream(conn).await?;
+            Ok(())
         } else {
             let bytes = self.0.defragment();
             if let Err(e) = conn.send_datagram(bytes.clone()) {
@@ -119,7 +120,7 @@ impl Frames {
 
     /// Open a new unidirectional QUIC stream, send bytes written to `self` on it, then finish the
     /// stream.
-    pub async fn send_on_new_stream(self, conn: &Connection) -> Result<()> {
+    pub async fn send_on_new_stream(self, conn: &Connection) -> Result<quinn::SendStream> {
         self.0.send_on_new_stream(conn).await
     }
 
