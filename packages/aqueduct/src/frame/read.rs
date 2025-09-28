@@ -41,9 +41,16 @@ impl From<quic_zc::Error> for Error {
     }
 }
 
+macro_rules! error {
+    ($($t:tt)*)=>{
+        $crate::frame::read::Error::Other(anyhow::anyhow!($($t)*))
+    };
+}
+pub(crate) use error;
+
 macro_rules! bail {
     ($($t:tt)*)=>{
-        return Err(anyhow::anyhow!($($t)*).into());
+        return Err($crate::frame::read::error!($($t)*))
     };
 }
 pub(crate) use bail;

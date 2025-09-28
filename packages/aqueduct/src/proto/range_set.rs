@@ -68,7 +68,7 @@ impl RangeSetU64 {
     }
 
     // get an entry for in-place manipulation of the first range
-    pub fn first_range_entry(&mut self) -> Option<RangeEntry> {
+    pub fn first_range_entry(&mut self) -> Option<RangeEntry<'_>> {
         self.0.first_entry().map(RangeEntry)
     }
 }
