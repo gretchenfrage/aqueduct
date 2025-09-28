@@ -163,7 +163,7 @@ impl Connection {
                 read::Frame::AckVersion(r) => todo!(),
                 read::Frame::ConnectionHeaders(r) => todo!(),
                 read::Frame::RouteTo(r) => return self.handle_routed_frames(r, reliable).await,
-                read::Frame::Message(r) => todo!(),
+                read::Frame::Message(_) => read::bail!("received un-routed MESSAGE frame"),
                 read::Frame::SentUnreliable(r) => todo!(),
                 read::Frame::FinishSender(r) => todo!(),
                 read::Frame::CancelSender(r) => todo!(),
@@ -187,135 +187,8 @@ impl Connection {
                 read::Frame::Version(r) => todo!(),
                 read::Frame::AckVersion(r) => todo!(),
                 read::Frame::ConnectionHeaders(r) => todo!(),
-                read::Frame::RouteTo(r) => todo!(),
-                read::Frame::Message(r) => {
-                    // read message, do basic stateless validation
-                    let read::Message {
-                        message_num,
-                        message_headers: mut r,
-                    } = r;
-                    read::ensure!(
-                        message_num < u64::MAX,
-                        "received MESSAGE frame with message num u64::MAX"
-                    );
-                    read::ensure!(
-                        chan_id.sender() != self.side,
-                        "received MESSAGE frame for channel ID for which local side is the sender"
-                    );
-                    let mut message_headers = Vec::new();
-                    while r.remaining_bytes() > 0 {
-                        let (message_header_key, message_header_val) = r.header().await?;
-                        message_headers.push((message_header_key, message_header_val));
-                    }
-                    let mut r = r.done().await?;
-                    let mut attached_channels = Vec::new();
-                    while r.remaining_bytes() > 0 {
-                        r = {
-                            let r = r.attachment().await?;
-                            let read::MessageAttachment {
-                                channel: attached_chan_id,
-                                channel_headers: mut r,
-                            } = r;
-                            let mut attached_channel_headers = Vec::new();
-                            while r.remaining_bytes() > 0 {
-                                let (attached_channel_header_key, attached_channel_header_val) =
-                                    r.header().await?;
-                                attached_channel_headers.push((
-                                    attached_channel_header_key,
-                                    attached_channel_header_val,
-                                ));
-                            }
-                            attached_channels.push(ReceivedMessageAttachedChannel {
-                                chan_id: attached_chan_id,
-                                channel_headers: attached_channel_headers,
-                            });
-                            r.done()
-                        };
-                    }
-                    let r = r.done().await?;
-                    let (payload, r) = r.payload().await?;
-                    let received_message = ReceivedMessage {
-                        message_headers,
-                        attached_channels,
-                        payload,
-                    };
-
-                    // lookup receiver / implicitly create receiver / short-circuit due to receiver
-                    // not existing (either with reset error or fatal error)
-                    let mut receiver = self.receiver_state(chan_id)?;
-
-                    if reliable {
-                        // deal with reliable acking
-                        let is_duplicate = receiver
-                            .reliable_received_unacked
-                            .insert(message_num, message_num);
-                        read::ensure!(!is_duplicate, "received reliable message num in duplicate");
-                        if !receiver.reliable_ack_task_exists {
-                            receiver.reliable_ack_task_exists = true;
-                            let this = self.clone();
-                            self.spawn(async move {
-                                tokio::time::sleep(Duration::from_secs(1)).await;
-                                this.reliable_ack(chan_id).await
-                            });
-                        }
-                    } else {
-                        // deal with unreliable ack-nacking / reset if previously nacked
-                        if message_num < receiver.unreliable_ack_nacked_lt {
-                            trace!(
-                                "received unreliable message num that has already been nacked (or
-                                acked), ignoring"
-                            );
-                            return Err(read::Error::Reset);
-                        }
-                        let is_duplicate = receiver
-                            .unreliable_received_unacked
-                            .insert(message_num, message_num);
-                        read::ensure!(
-                            !is_duplicate,
-                            "received unreliable message num in duplicate"
-                        );
-
-                        let ack_nack_lt = receiver.unreliable_known_sent_lt.max(message_num + 1);
-                        receiver.unreliable_known_sent_lt = ack_nack_lt;
-                        if !receiver.unreliable_ack_nack_task_exists {
-                            receiver.unreliable_ack_nack_task_exists = true;
-                            let this = self.clone();
-                            self.spawn(async move {
-                                tokio::time::sleep(Duration::from_secs(1)).await;
-                                this.unreliable_ack_nack(chan_id, ack_nack_lt).await
-                            });
-                        }
-                    }
-
-                    // create attached channels / mark them as having received creating message
-                    for attached_channel in &received_message.attached_channels {
-                        read::ensure!(
-                            attached_channel.chan_id.creator() != self.side,
-                            "received MESSAGE frame with attached channel ID for which local side
-                            is the creator"
-                        );
-                        if attached_channel.chan_id.sender() == self.side {
-                            let mut sender = self.sender_state(attached_channel.chan_id)?;
-                            read::ensure!(
-                                !sender.received_creating_message,
-                                "received channel ID attached to multiple messages"
-                            );
-                            sender.received_creating_message = true;
-                        } else {
-                            let mut receiver = self.receiver_state(attached_channel.chan_id)?;
-                            read::ensure!(
-                                !receiver.received_creating_message,
-                                "received channel ID attached to multiple messages"
-                            );
-                            receiver.received_creating_message = true;
-                        }
-                    }
-
-                    // buffer message
-                    receiver.received_messages.push(received_message);
-
-                    r
-                }
+                read::Frame::RouteTo(_) => read::bail!("received routed ROUTE_TO frame"),
+                read::Frame::Message(r) => self.handle_message_frame(chan_id, reliable, r).await?,
                 read::Frame::SentUnreliable(r) => todo!(),
                 read::Frame::FinishSender(r) => todo!(),
                 read::Frame::CancelSender(r) => todo!(),
@@ -328,10 +201,142 @@ impl Connection {
         Ok(())
     }
 
+    async fn handle_message_frame(
+        self: &Arc<Self>,
+        chan_id: ChanId,
+        reliable: bool,
+        mut r: read::Message,
+    ) -> read::Result<read::Frames> {
+        // read message, do basic stateless validation
+        let read::Message {
+            message_num,
+            message_headers: mut r,
+        } = r;
+        read::ensure!(
+            message_num < u64::MAX,
+            "received MESSAGE frame with message num u64::MAX"
+        );
+        read::ensure!(
+            chan_id.sender() != self.side,
+            "received MESSAGE frame for channel ID for which local side is the sender"
+        );
+        let mut message_headers = Vec::new();
+        while r.remaining_bytes() > 0 {
+            let (message_header_key, message_header_val) = r.header().await?;
+            message_headers.push((message_header_key, message_header_val));
+        }
+        let mut r = r.done().await?;
+        let mut attached_channels = Vec::new();
+        while r.remaining_bytes() > 0 {
+            r = {
+                let r = r.attachment().await?;
+                let read::MessageAttachment {
+                    channel: attached_chan_id,
+                    channel_headers: mut r,
+                } = r;
+                let mut attached_channel_headers = Vec::new();
+                while r.remaining_bytes() > 0 {
+                    let (attached_channel_header_key, attached_channel_header_val) =
+                        r.header().await?;
+                    attached_channel_headers
+                        .push((attached_channel_header_key, attached_channel_header_val));
+                }
+                attached_channels.push(ReceivedMessageAttachedChannel {
+                    chan_id: attached_chan_id,
+                    channel_headers: attached_channel_headers,
+                });
+                r.done()
+            };
+        }
+        let r = r.done().await?;
+        let (payload, r) = r.payload().await?;
+        let received_message = ReceivedMessage {
+            message_headers,
+            attached_channels,
+            payload,
+        };
+
+        // lookup receiver / implicitly create receiver / short-circuit due to receiver not
+        // existing (either with reset error or fatal error)
+        let mut receiver = self.setup_receiver_state(chan_id)?;
+
+        if reliable {
+            // deal with reliable acking
+            let is_duplicate = receiver
+                .reliable_received_unacked
+                .insert(message_num, message_num);
+            read::ensure!(!is_duplicate, "received reliable message num in duplicate");
+            if !receiver.reliable_ack_task_exists {
+                receiver.reliable_ack_task_exists = true;
+                let this = self.clone();
+                self.spawn(async move {
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    this.reliable_ack(chan_id).await
+                });
+            }
+        } else {
+            // deal with unreliable ack-nacking / reset if previously nacked
+            if message_num < receiver.unreliable_ack_nacked_lt {
+                trace!(
+                    "received unreliable message num that has already been nacked (or acked),
+                    ignoring"
+                );
+                return Err(read::Error::Reset);
+            }
+            let is_duplicate = receiver
+                .unreliable_received_unacked
+                .insert(message_num, message_num);
+            read::ensure!(
+                !is_duplicate,
+                "received unreliable message num in duplicate"
+            );
+
+            let ack_nack_lt = receiver.unreliable_known_sent_lt.max(message_num + 1);
+            receiver.unreliable_known_sent_lt = ack_nack_lt;
+            if !receiver.unreliable_ack_nack_task_exists {
+                receiver.unreliable_ack_nack_task_exists = true;
+                let this = self.clone();
+                self.spawn(async move {
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    this.unreliable_ack_nack(chan_id, ack_nack_lt).await
+                });
+            }
+        }
+
+        // create attached channels / mark them as having received creating message
+        for attached_channel in &received_message.attached_channels {
+            read::ensure!(
+                attached_channel.chan_id.creator() != self.side,
+                "received MESSAGE frame with attached channel ID for which local side is the
+                creator"
+            );
+            if attached_channel.chan_id.sender() == self.side {
+                let mut sender = self.setup_sender_state(attached_channel.chan_id)?;
+                read::ensure!(
+                    !sender.received_creating_message,
+                    "received channel ID attached to multiple messages"
+                );
+                sender.received_creating_message = true;
+            } else {
+                let mut receiver = self.setup_receiver_state(attached_channel.chan_id)?;
+                read::ensure!(
+                    !receiver.received_creating_message,
+                    "received channel ID attached to multiple messages"
+                );
+                receiver.received_creating_message = true;
+            }
+        }
+
+        // buffer message
+        receiver.received_messages.push(received_message);
+
+        Ok(r)
+    }
+
     // get the SenderState for the channel ID if it currently exists. if it used to exist but
     // doesn't any more, return a Reset error. if it never existed, create it with defaults if the
     // channel ID creator side is the remote side, or fatally error if it is the local side.
-    fn sender_state(
+    fn setup_sender_state(
         &self,
         chan_id: ChanId,
     ) -> read::Result<dashmap::mapref::one::RefMut<'_, ChanId, SenderState>> {
@@ -357,7 +362,7 @@ impl Connection {
     // get the ReceiverState for the channel ID if it currently exists. if it used to exist but
     // doesn't any more, return a Reset error. if it never existed, create it with defaults if the
     // channel ID creator side is the remote side, or fatally error if it is the local side.
-    fn receiver_state(
+    fn setup_receiver_state(
         &self,
         chan_id: ChanId,
     ) -> read::Result<dashmap::mapref::one::RefMut<'_, ChanId, ReceiverState>> {
