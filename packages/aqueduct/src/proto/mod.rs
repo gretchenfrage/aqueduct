@@ -181,7 +181,7 @@ impl Connection {
         r: read::RouteTo,
         reliable: bool,
     ) -> read::Result<()> {
-        let mut sent_unreliable_count_total = 0u64;
+        let mut sent_unreliable_count_total = 0;
 
         let read::RouteTo { chan_id, mut next } = r;
         while let Some(r) = next.frame().await? {
@@ -192,30 +192,7 @@ impl Connection {
                 read::Frame::RouteTo(_) => read::bail!("received routed ROUTE_TO frame"),
                 read::Frame::Message(r) => self.handle_message_frame(chan_id, reliable, r).await?,
                 read::Frame::SentUnreliable(r) => {
-                    let read::SentUnreliable { count, next: r } = r;
-                    sent_unreliable_count_total = sent_unreliable_count_total
-                        .checked_add(count)
-                        .and_then(|n| n.checked_add(1))
-                        .filter(|&n| n < u64::MAX)
-                        .ok_or_else(|| {
-                            read::error!("received overflowing SENT_UNRELIABLE frame count total")
-                        })?;
-                    let mut receiver = self.setup_receiver_state(chan_id)?;
-                    receiver.unreliable_known_sent_lt = receiver
-                        .unreliable_known_sent_lt
-                        .max(sent_unreliable_count_total + 1);
-                    if receiver.unreliable_known_sent_lt > receiver.unreliable_ack_nacked_lt
-                        && !receiver.unreliable_ack_nack_task_exists
-                    {
-                        receiver.unreliable_ack_nack_task_exists;
-                        // TODO: maybe factor this logic out from its other call sites
-                        self.spawn_unreliable_ack_nack_task(
-                            chan_id,
-                            receiver.unreliable_known_sent_lt,
-                        );
-                    }
-
-                    r
+                    self.handle_sent_unreliable_frame(&mut sent_unreliable_count_total, chan_id, r)?
                 }
                 read::Frame::FinishSender(r) => todo!(),
                 read::Frame::CancelSender(r) => todo!(),
@@ -318,12 +295,7 @@ impl Connection {
                 "received unreliable message num in duplicate"
             );
 
-            let ack_nack_lt = receiver.unreliable_known_sent_lt.max(message_num + 1);
-            receiver.unreliable_known_sent_lt = ack_nack_lt;
-            if !receiver.unreliable_ack_nack_task_exists {
-                receiver.unreliable_ack_nack_task_exists = true;
-                self.spawn_unreliable_ack_nack_task(chan_id, ack_nack_lt);
-            }
+            self.maybe_spawn_unreliable_ack_nack_task(chan_id, &mut *receiver, message_num + 1);
         }
 
         // create attached channels / mark them as having received creating message
@@ -354,6 +326,29 @@ impl Connection {
         receiver.received_messages.push(received_message);
 
         Ok(r)
+    }
+
+    fn handle_sent_unreliable_frame(
+        self: &Arc<Self>,
+        sent_unreliable_count_total: &mut u64,
+        chan_id: ChanId,
+        r: read::SentUnreliable,
+    ) -> read::Result<read::Frames> {
+        let read::SentUnreliable { count, next: r } = r;
+        sent_unreliable_count_total = sent_unreliable_count_total
+            .checked_add(count)
+            .and_then(|n| n.checked_add(1))
+            .filter(|&n| n < u64::MAX)
+            .ok_or_else(|| {
+                read::error!("received overflowing SENT_UNRELIABLE frame count total")
+            })?;
+        let mut receiver = self.setup_receiver_state(chan_id)?;
+        self.maybe_spawn_unreliable_ack_nack_task(
+            chan_id,
+            &mut *receiver,
+            sent_unreliable_count_total + 1,
+        );
+        r
     }
 
     // get the SenderState for the channel ID if it currently exists. if it used to exist but
@@ -493,12 +488,26 @@ impl Connection {
         Ok(())
     }
 
-    fn spawn_unreliable_ack_nack_task(self: &Arc<Self>, chan_id: ChanId, ack_nack_lt: u64) {
-        let this = self.clone();
-        self.spawn(async move {
-            tokio::time::sleep(Duration::from_secs(1)).await;
-            this.unreliable_ack_nack(chan_id, ack_nack_lt).await
-        });
+    fn maybe_spawn_unreliable_ack_nack_task(
+        self: &Arc<Self>,
+        chan_id: ChanId,
+        receiver: &mut ReceiverState,
+        learned_unreliable_sent_lt: u64,
+    ) {
+        receiver.unreliable_known_sent_lt = receiver
+            .unreliable_known_sent_lt
+            .max(learned_unreliable_sent_lt);
+        if !receiver.unreliable_ack_nack_task_exists
+            && receiver.unreliable_known_sent_lt < receiver.unreliable_ack_nacked_lt
+        {
+            receiver.unreliable_ack_nack_task_exists = true;
+            let this = self.clone();
+            let ack_nack_lt = receiver.unreliable_known_sent_lt;
+            self.spawn(async move {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                this.unreliable_ack_nack(chan_id, ack_nack_lt).await
+            });
+        }
     }
 
     async fn unreliable_ack_nack(
@@ -555,11 +564,7 @@ impl Connection {
         debug_assert!(receiver.unreliable_ack_nacked_lt == ack_nack_lt);
 
         // potentially immediately create another unreliable ack-nack task
-        let new_ack_nack_lt = receiver.unreliable_known_sent_lt;
-        if ack_nack_lt < new_ack_nack_lt {
-            receiver.unreliable_ack_nack_task_exists = true;
-            self.spawn_unreliable_ack_nack_task(chan_id, ack_nack_lt);
-        }
+        self.maybe_spawn_unreliable_ack_nack_task(chan_id, &mut *receiver, 0);
 
         // transition from locking the receiver state to locking the ctrl stream
         let ctrl_stream_guard_fut = receiver.ctrl_stream.clone().lock_owned();
