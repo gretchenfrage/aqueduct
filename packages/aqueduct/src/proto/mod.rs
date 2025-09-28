@@ -393,10 +393,12 @@ impl Connection {
         };
         let receiver = &mut *receiver_guard;
 
+        // mark that the current reliable ack task as exited
         debug_assert!(receiver.reliable_ack_task_exists);
         receiver.reliable_ack_task_exists = false;
         debug_assert!(!receiver.reliable_received_unacked.is_empty());
 
+        // save this for later (lowest un-acked reliable message num)
         let first_unacked = receiver
             .reliable_received_acked
             .iter()
@@ -405,6 +407,8 @@ impl Connection {
             .map(|(_, e2)| e2 + 1)
             .unwrap_or(0);
 
+        // mark all received message as unacked. front-run duplicate detection short-circuiting to
+        // avoid arithmetic overflow/underflow edge cases.
         for (s, e) in receiver.reliable_received_unacked.iter() {
             read::ensure!(
                 !receiver.reliable_received_acked.insert(s, e),
@@ -412,6 +416,7 @@ impl Connection {
             );
         }
 
+        // form deltas
         let mut deltas = write::Deltas::default();
         let mut acking = receiver.reliable_received_unacked.iter().peekable();
         // there is always a single ack delta, representing a range length beyond 0
@@ -437,18 +442,14 @@ impl Connection {
         }
         receiver.reliable_received_unacked.clear();
 
+        // transition from locking the receiver state to locking the ctrl stream
         let ctrl_stream_guard_fut = receiver.ctrl_stream.clone().lock_owned();
         drop(receiver_guard);
         let mut ctrl_stream_guard = ctrl_stream_guard_fut.await;
 
-        if ctrl_stream_guard.is_none() {
-            let mut w = write::Frames::default();
-            w.route_to(chan_id);
-            let ctrl_stream = w.send_on_new_stream(&self.quic_connection).await?;
-            *ctrl_stream_guard = Some(ctrl_stream);
-        }
-
-        let ctrl_stream = ctrl_stream_guard.as_mut().unwrap();
+        // transmit the acks
+        let ctrl_stream =
+            lazy_init_ctrl_stream(&mut *ctrl_stream_guard, &self.quic_connection, chan_id).await?;
         let mut w = write::Frames::default();
         w.ack_reliable(deltas);
         w.send_on_stream(ctrl_stream).await?;
@@ -461,81 +462,79 @@ impl Connection {
         chan_id: ChanId,
         ack_nack_lt: u64,
     ) -> read::Result<()> {
+        // lock receiver state
         let Some(mut receiver_guard) = self.receivers.get_mut(&chan_id) else {
             trace!("unreliable ack timer elapsed for non-existent receiver, ignoring");
             return Ok(());
         };
         let receiver = &mut *receiver_guard;
 
+        // mark the current unreliable ack-nack task as exited
         debug_assert!(receiver.unreliable_ack_nack_task_exists);
         receiver.unreliable_ack_nack_task_exists = false;
         debug_assert!(ack_nack_lt > receiver.unreliable_ack_nacked_lt);
 
+        // form deltas
         let mut deltas = write::Deltas::default();
-
         // there is always a single ack delta, representing a range length beyond 0
-        let range = receiver
+        let first_ack = receiver
             .unreliable_received_unacked
-            .iter()
-            .next()
-            .filter(|&(s, _)| {
-                debug_assert!(receiver.unreliable_ack_nacked_lt <= s);
-                s == receiver.unreliable_ack_nacked_lt
-            });
-        if let Some((s, e)) = range {
-            // TODO the following if/else is repetitive
-            if e < ack_nack_lt {
-                deltas.delta(e - s + 1);
-                receiver.unreliable_ack_nacked_lt = e + 1;
-                receiver
-                    .unreliable_received_unacked
-                    .delete_range_by_start(s);
-            } else {
-                deltas.delta(ack_nack_lt - s);
-                receiver.unreliable_ack_nacked_lt = ack_nack_lt;
-                receiver
-                    .unreliable_received_unacked
-                    .delete_range_prefix(s, ack_nack_lt - 1);
-            }
-        } else {
-            deltas.delta(0);
-        }
-
+            .first_range_entry()
+            .filter(|range| range.start() == receiver.unreliable_ack_nacked_lt)
+            .map(|range| range.delete_lt(ack_nack_lt))
+            .unwrap_or(0);
+        deltas.delta(first_ack);
+        receiver.unreliable_ack_nacked_lt += first_ack;
+        // it is followed by 0 or more deltas, alternating between nacks and acks, representing
+        // range lengths beyond 1
         while receiver.unreliable_ack_nacked_lt < ack_nack_lt {
-            let range = receiver
+            if let Some(range) = receiver
                 .unreliable_received_unacked
-                .iter()
-                .next()
-                .filter(|&(s, _)| {
-                    debug_assert!(receiver.unreliable_ack_nacked_lt < s);
-                    s < ack_nack_lt
-                });
-            // TODO the following if/else is repetitive
-            if let Some((s, e)) = range {
-                // it is followed by 0 or more (nack, ack) delta pairs, representing range lengths
-                // beyond 1
-                deltas.delta(s - receiver.unreliable_ack_nacked_lt - 1);
-                if e < ack_nack_lt {
-                    deltas.delta(e - s + 1);
-                    receiver.unreliable_ack_nacked_lt = e + 1;
-                    receiver
-                        .unreliable_received_unacked
-                        .delete_range_by_start(s);
-                } else {
-                    deltas.delta(ack_nack_lt - s);
-                    receiver.unreliable_ack_nacked_lt = ack_nack_lt;
-                    receiver
-                        .unreliable_received_unacked
-                        .delete_range_prefix(s, ack_nack_lt - 1);
-                }
+                .first_range_entry()
+                .filter(|range| range.start() < ack_nack_lt)
+            {
+                // (ack, nack) pair
+                let curr_nack = range.start() - receiver.unreliable_ack_nacked_lt;
+                let curr_ack = range.delete_lt(ack_nack_lt);
+                deltas.delta(curr_nack - 1);
+                deltas.delta(curr_ack - 1);
+                receiver.unreliable_ack_nacked_lt += curr_nack + curr_ack;
             } else {
-                // finally, there is sometimes a final nack delta, representing a range length
-                // beyond 1
-                deltas.delta(ack_nack_lt - receiver.unreliable_ack_nacked_lt);
-                receiver.unreliable_ack_nacked_lt = ack_nack_lt;
+                // lone nack, the last delta
+                let curr_nack = ack_nack_lt - receiver.unreliable_ack_nacked_lt;
+                deltas.delta(curr_nack - 1);
+                receiver.unreliable_ack_nacked_lt += curr_nack;
+                debug_assert!(receiver.unreliable_ack_nacked_lt == ack_nack_lt);
             }
         }
+        debug_assert!(receiver.unreliable_ack_nacked_lt == ack_nack_lt);
+
+        // transition from locking the receiver state to locking the ctrl stream
+        let ctrl_stream_guard_fut = receiver.ctrl_stream.clone().lock_owned();
+        drop(receiver_guard);
+        let mut ctrl_stream_guard = ctrl_stream_guard_fut.await;
+
+        // transmit the acks
+        let ctrl_stream =
+            lazy_init_ctrl_stream(&mut *ctrl_stream_guard, &self.quic_connection, chan_id).await?;
+        let mut w = write::Frames::default();
+        w.ack_nack_unreliable(deltas);
+        w.send_on_stream(ctrl_stream).await?;
 
         Ok(())
     }
+}
+
+async fn lazy_init_ctrl_stream<'a>(
+    opt_ctrl_stream: &'a mut Option<quinn::SendStream>,
+    quic_connection: &quinn::Connection,
+    chan_id: ChanId,
+) -> Result<&'a mut quinn::SendStream, anyhow::Error> {
+    if opt_ctrl_stream.is_none() {
+        let mut w = write::Frames::default();
+        w.route_to(chan_id);
+        let ctrl_stream = w.send_on_new_stream(&quic_connection).await?;
+        *opt_ctrl_stream = Some(ctrl_stream);
+    }
+    Ok(opt_ctrl_stream.as_mut().unwrap())
 }

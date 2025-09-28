@@ -1,8 +1,12 @@
-use std::{cell::Cell, collections::BTreeMap};
+use std::{
+    cell::Cell,
+    collections::btree_map::{self, BTreeMap},
+};
 
-// set of u64 with memory O(N log N) to number of contiguous ranges present
-//
-// internally, map from non-overlapping non-empty non-contiguous ranges' start to end (inclusive).
+// TODO: I wonder if the arithmetic would be overall nicer if we made the upper bounds exclusive
+
+// set of u64, all of which are strictly less than `u64::MAX`, represented as a sorted set of
+// non-overlapping non-empty non-contiguous ranges.
 #[derive(Default)]
 pub struct RangeSetU64(BTreeMap<UnsafeAssertSync<Cell<u64>>, u64>);
 
@@ -10,13 +14,15 @@ impl RangeSetU64 {
     // insert a new [n, m] range, returning whether any of it was already present
     pub fn insert(&mut self, n: u64, mut m: u64) -> bool {
         assert!(m >= n);
+        assert!(m < u64::MAX);
+
         let mut intersected = false;
         loop {
             let mut ranges = self
                 .0
-                .range_mut(..=UnsafeAssertSync(Cell::new(m.saturating_add(1))))
+                .range_mut(..=UnsafeAssertSync(Cell::new(m + 1)))
                 .rev()
-                .take_while(|&(_, ref e)| **e >= m.saturating_sub(1));
+                .take_while(|&(_, ref e)| **e + 1 >= m);
             if let Some((s, e)) = ranges.next() {
                 if *e >= n || s.0.get() <= m {
                     intersected = true;
@@ -38,20 +44,6 @@ impl RangeSetU64 {
         intersected
     }
 
-    pub fn delete_range_by_start(&mut self, start: u64) {
-        self.0.remove(&UnsafeAssertSync(Cell::new(start))).unwrap();
-    }
-
-    pub fn delete_range_prefix(&mut self, old_start: u64, new_start: u64) {
-        assert!(new_start > new_start);
-        let (start, &end) = self
-            .0
-            .get_key_value(&UnsafeAssertSync(Cell::new(old_start)))
-            .unwrap();
-        assert!(new_start <= end);
-        start.0.set(new_start);
-    }
-
     // get whether self contains n
     pub fn contains(&self, n: u64) -> bool {
         self.0
@@ -70,8 +62,41 @@ impl RangeSetU64 {
         self.0.clear();
     }
 
+    // get whether is empty
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
+    }
+
+    // get an entry for in-place manipulation of the first range
+    pub fn first_range_entry(&mut self) -> Option<RangeEntry> {
+        self.0.first_entry().map(RangeEntry)
+    }
+}
+
+pub struct RangeEntry<'a>(btree_map::OccupiedEntry<'a, UnsafeAssertSync<Cell<u64>>, u64>);
+
+impl<'a> RangeEntry<'a> {
+    // get the start of this range
+    pub fn start(&self) -> u64 {
+        self.0.key().0.get()
+    }
+
+    // get the end of this range
+    pub fn end(&self) -> u64 {
+        *self.0.get()
+    }
+
+    // delete all elements of this range that are less than `n`, and return the number of elements
+    // that were deleted, or panic if no elements were deleted
+    pub fn delete_lt(self, n: u64) -> u64 {
+        assert!(self.start() < n);
+        let start = self.start();
+        (if self.end() + 1 < n {
+            self.0.key().0.set(n - 1);
+            n
+        } else {
+            self.0.remove() + 1
+        }) - start
     }
 }
 
