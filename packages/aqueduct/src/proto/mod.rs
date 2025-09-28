@@ -50,12 +50,12 @@ struct ReceiverState {
     reliable_received_acked: RangeSetU64,
     // set of reliable message numbers the local side has received but not sent acks for
     reliable_received_unacked: RangeSetU64,
-    // whether a task currently exists to sent acks for reliable message nums for this channel
+    // whether a task currently exists to send acks for reliable message nums for this channel
     reliable_ack_task_exists: bool,
 
     // set of unreliable message numbers the local side has ack-nacked (exclusive upper bound)
     unreliable_ack_nacked_lt: u64,
-    // set of unreliable message numbers we know the remote side has sent (exclusive upper)
+    // set of unreliable message numbers we know the remote side has sent (exclusive upper bound)
     unreliable_known_sent_lt: u64,
     // set of unreliable message numbers the local side has received and not acked
     unreliable_received_unacked: RangeSetU64,
@@ -189,11 +189,19 @@ impl Connection {
                 read::Frame::ConnectionHeaders(r) => todo!(),
                 read::Frame::RouteTo(r) => todo!(),
                 read::Frame::Message(r) => {
-                    // read message
+                    // read message, do basic stateless validation
                     let read::Message {
                         message_num,
                         message_headers: mut r,
                     } = r;
+                    read::ensure!(
+                        message_num < u64::MAX,
+                        "received MESSAGE frame with message num u64::MAX"
+                    );
+                    read::ensure!(
+                        chan_id.sender() != self.side,
+                        "received MESSAGE frame for channel ID for which local side is the sender"
+                    );
                     let mut message_headers = Vec::new();
                     while r.remaining_bytes() > 0 {
                         let (message_header_key, message_header_val) = r.header().await?;
@@ -232,17 +240,12 @@ impl Connection {
                         payload,
                     };
 
-                    // process message
-                    read::ensure!(
-                        message_num < u64::MAX,
-                        "received MESSAGE frame with message num u64::MAX"
-                    );
-                    read::ensure!(
-                        chan_id.sender() != self.side,
-                        "received MESSAGE frame for channel ID for which local side is the sender"
-                    );
+                    // lookup receiver / implicitly create receiver / short-circuit due to receiver
+                    // not existing (either with reset error or fatal error)
                     let mut receiver = self.receiver_state(chan_id)?;
+
                     if reliable {
+                        // deal with reliable acking
                         let is_duplicate = receiver
                             .reliable_received_unacked
                             .insert(message_num, message_num);
@@ -256,13 +259,13 @@ impl Connection {
                             });
                         }
                     } else {
+                        // deal with unreliable ack-nacking / reset if previously nacked
                         if message_num < receiver.unreliable_ack_nacked_lt {
                             trace!(
                                 "received unreliable message num that has already been nacked (or
                                 acked), ignoring"
                             );
-                            next = r;
-                            continue; // TODO: reset instead?
+                            return Err(read::Error::Reset);
                         }
                         let is_duplicate = receiver
                             .unreliable_received_unacked
@@ -283,6 +286,8 @@ impl Connection {
                             });
                         }
                     }
+
+                    // create attached channels / mark them as having received creating message
                     for attached_channel in &received_message.attached_channels {
                         read::ensure!(
                             attached_channel.chan_id.creator() != self.side,
@@ -305,8 +310,9 @@ impl Connection {
                             receiver.received_creating_message = true;
                         }
                     }
+
+                    // buffer message
                     receiver.received_messages.push(received_message);
-                    drop(receiver);
 
                     r
                 }
@@ -323,7 +329,7 @@ impl Connection {
     }
 
     // get the SenderState for the channel ID if it currently exists. if it used to exist but
-    // doesn't any more, return a Reset error. if it never existed, create it with defaults the
+    // doesn't any more, return a Reset error. if it never existed, create it with defaults if the
     // channel ID creator side is the remote side, or fatally error if it is the local side.
     fn sender_state(
         &self,
@@ -349,7 +355,7 @@ impl Connection {
     }
 
     // get the ReceiverState for the channel ID if it currently exists. if it used to exist but
-    // doesn't any more, return a Reset error. if it never existed, create it with defaults the
+    // doesn't any more, return a Reset error. if it never existed, create it with defaults if the
     // channel ID creator side is the remote side, or fatally error if it is the local side.
     fn receiver_state(
         &self,
@@ -393,7 +399,7 @@ impl Connection {
         };
         let receiver = &mut *receiver_guard;
 
-        // mark that the current reliable ack task as exited
+        // mark the current reliable ack task as exited
         debug_assert!(receiver.reliable_ack_task_exists);
         receiver.reliable_ack_task_exists = false;
         debug_assert!(!receiver.reliable_received_unacked.is_empty());
@@ -407,7 +413,7 @@ impl Connection {
             .map(|(_, e2)| e2 + 1)
             .unwrap_or(0);
 
-        // mark all received message as unacked. front-run duplicate detection short-circuiting to
+        // mark all received message as acked. front-run duplicate detection short-circuiting to
         // avoid arithmetic overflow/underflow edge cases.
         for (s, e) in receiver.reliable_received_unacked.iter() {
             read::ensure!(
@@ -440,6 +446,8 @@ impl Connection {
             deltas.delta(e - s);
             base = e + 1;
         }
+
+        // mark all received messages as not unacked (different from marking them as acked)
         receiver.reliable_received_unacked.clear();
 
         // transition from locking the receiver state to locking the ctrl stream
@@ -533,7 +541,7 @@ async fn lazy_init_ctrl_stream<'a>(
     if opt_ctrl_stream.is_none() {
         let mut w = write::Frames::default();
         w.route_to(chan_id);
-        let ctrl_stream = w.send_on_new_stream(&quic_connection).await?;
+        let ctrl_stream = w.send_on_new_stream(quic_connection).await?;
         *opt_ctrl_stream = Some(ctrl_stream);
     }
     Ok(opt_ctrl_stream.as_mut().unwrap())
