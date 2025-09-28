@@ -327,7 +327,7 @@ impl Connection {
         receiver.received_messages.push(received_message);
 
         // maybe finish
-        self.maybe_close_receiver(chan_id, &mut *receiver);
+        self.maybe_close_receiver(chan_id, &mut *receiver)?;
 
         Ok(r)
     }
@@ -366,7 +366,7 @@ impl Connection {
             "received FINISH_SENDER frame in duplicate"
         );
         receiver.finished_sent_reliable = Some(sent_reliable);
-        self.maybe_close_receiver(chan_id, &mut *receiver);
+        self.maybe_close_receiver(chan_id, &mut *receiver)?;
         Ok(r)
     }
 
@@ -387,6 +387,7 @@ impl Connection {
             .unreliable_ack_nacked_lt
             .max(receiver.unreliable_received_unacked.max_lt());
 
+        // TODO: ensure these at call sites _before_ we make the changes that might make these true
         read::ensure!(
             reliable_received_lt <= sent_reliable,
             "received reliable message nums beyond declared finish"
@@ -484,7 +485,7 @@ impl Connection {
         Ok(())
     }
 
-    async fn reliable_ack(&self, chan_id: ChanId) -> read::Result<()> {
+    async fn reliable_ack(self: &Arc<Self>, chan_id: ChanId) -> read::Result<()> {
         // lock receiver state
         let Some(mut receiver_guard) = self.receivers.get_mut(&chan_id) else {
             trace!("reliable ack timer elapsed for non-existent receiver, ignoring");
@@ -547,7 +548,7 @@ impl Connection {
         let ctrl_stream_guard_fut = receiver.ctrl_stream.clone().lock_owned();
 
         // maybe finish
-        self.maybe_close_receiver(chan_id, &mut *receiver);
+        self.maybe_close_receiver(chan_id, &mut *receiver)?;
 
         drop(receiver_guard);
         let mut ctrl_stream_guard = ctrl_stream_guard_fut.await;
@@ -649,7 +650,7 @@ impl Connection {
         let ctrl_stream_guard_fut = receiver.ctrl_stream.clone().lock_owned();
 
         // maybe finish
-        self.maybe_close_receiver(chan_id, &mut *receiver);
+        self.maybe_close_receiver(chan_id, &mut *receiver)?;
 
         drop(receiver_guard);
         let mut ctrl_stream_guard = ctrl_stream_guard_fut.await;
