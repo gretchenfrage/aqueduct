@@ -53,7 +53,7 @@ impl RangeSetU64 {
     }
 
     // iterate through ranges
-    pub fn iter(&self) -> impl Iterator<Item = (u64, u64)> + Send {
+    pub fn iter(&self) -> impl Iterator<Item = (u64, u64)> + DoubleEndedIterator + Send {
         self.0.iter().map(|(k, &v)| (k.0.get(), v))
     }
 
@@ -65,6 +65,11 @@ impl RangeSetU64 {
     // get whether is empty
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
+    }
+
+    // get the max value plus 1
+    pub fn max_lt(&self) -> u64 {
+        self.iter().rev().next().map(|(_, e)| e + 1).unwrap_or(0)
     }
 
     // get an entry for in-place manipulation of the first range

@@ -62,6 +62,9 @@ struct ReceiverState {
     // whether a task currently exists to sent acks for unreliable message nums for this channel
     unreliable_ack_nack_task_exists: bool,
 
+    // if the local side has received a finish frame, that frame's sent_reliable number
+    finished_sent_reliable: Option<u64>,
+
     // the receiver-to-sender feedback control stream for this channel. we utilize tokio Mutex's
     // strict FIFO guarantees to form a queue of control data to asynchronously write without
     // holding a receiver state lock across await boundaries.
@@ -181,6 +184,7 @@ impl Connection {
         r: read::RouteTo,
         reliable: bool,
     ) -> read::Result<()> {
+        // TODO: is it maybe kinda silly to be holding this at the task level
         let mut sent_unreliable_count_total = 0;
 
         let read::RouteTo { chan_id, mut next } = r;
@@ -194,7 +198,32 @@ impl Connection {
                 read::Frame::SentUnreliable(r) => {
                     self.handle_sent_unreliable_frame(&mut sent_unreliable_count_total, chan_id, r)?
                 }
-                read::Frame::FinishSender(r) => todo!(),
+                read::Frame::FinishSender(r) => {
+                    let read::FinishSender {
+                        sent_reliable,
+                        next: r,
+                    } = r;
+                    let mut receiver = self.setup_receiver_state(chan_id)?;
+                    read::ensure!(
+                        receiver.finished_sent_reliable.is_none(),
+                        "received FINISH_SENDER frame in duplicate"
+                    );
+                    receiver.finished_sent_reliable = Some(sent_reliable);
+
+                    let reliable_received_lt = receiver
+                        .reliable_received_acked
+                        .max_lt()
+                        .max(receiver.reliable_received_unacked.max_lt());
+                    ensure!(
+                        reliable_received_lt <= sent_reliable,
+                        "received reliable message nums beyond finish"
+                    );
+                    ensure!(
+                        receiver.unreliable_ack_nacked_lt <= 
+                    )
+
+                    r
+                }
                 read::Frame::CancelSender(r) => todo!(),
                 read::Frame::AckReliable(r) => todo!(),
                 read::Frame::AckNackUnreliable(r) => todo!(),
@@ -335,7 +364,7 @@ impl Connection {
         r: read::SentUnreliable,
     ) -> read::Result<read::Frames> {
         let read::SentUnreliable { count, next: r } = r;
-        sent_unreliable_count_total = sent_unreliable_count_total
+        *sent_unreliable_count_total = sent_unreliable_count_total
             .checked_add(count)
             .and_then(|n| n.checked_add(1))
             .filter(|&n| n < u64::MAX)
@@ -346,9 +375,9 @@ impl Connection {
         self.maybe_spawn_unreliable_ack_nack_task(
             chan_id,
             &mut *receiver,
-            sent_unreliable_count_total + 1,
+            *sent_unreliable_count_total + 1,
         );
-        r
+        Ok(r)
     }
 
     // get the SenderState for the channel ID if it currently exists. if it used to exist but
