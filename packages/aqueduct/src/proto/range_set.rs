@@ -72,6 +72,15 @@ impl RangeSetU64 {
         self.iter().rev().next().map(|(_, e)| e + 1).unwrap_or(0)
     }
 
+    // get the lowest value that self does not contain
+    pub fn min_absent(&self) -> u64 {
+        self.iter()
+            .next()
+            .filter(|&(s2, _)| s2 == 0)
+            .map(|(_, e2)| e2 + 1)
+            .unwrap_or(0)
+    }
+
     // get an entry for in-place manipulation of the first range
     pub fn first_range_entry(&mut self) -> Option<RangeEntry<'_>> {
         self.0.first_entry().map(RangeEntry)
