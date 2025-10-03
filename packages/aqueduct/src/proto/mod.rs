@@ -46,12 +46,12 @@ struct ReceiverState {
     // buffer of all messages we have received on this channel
     received_messages: Vec<ReceivedMessage>,
 
+    // invariant: a reliable acking task exists iff reliable_received_unacked is non-empty
+
     // set of reliable message numbers the local side has received and sent back acks for
     reliable_received_acked: RangeSetU64,
     // set of reliable message numbers the local side has received but not sent acks for
     reliable_received_unacked: RangeSetU64,
-    // whether a task currently exists to send acks for reliable message nums for this channel
-    reliable_ack_task_exists: bool,
 
     // set of unreliable message numbers the local side has ack-nacked (exclusive upper bound)
     unreliable_ack_nacked_lt: u64,
@@ -274,14 +274,14 @@ impl Connection {
                     .is_none_or(|n| message_num < n),
                 "received reliable message num beyond declared finish"
             );
+            let was_empty = receiver.reliable_received_unacked.is_empty();
             read::ensure!(
                 !receiver
                     .reliable_received_unacked
                     .insert(message_num, message_num),
                 "received reliable message num in duplicate"
             );
-            if !receiver.reliable_ack_task_exists {
-                receiver.reliable_ack_task_exists = true;
+            if !was_empty {
                 let this = self.clone();
                 self.spawn(async move {
                     tokio::time::sleep(Duration::from_secs(1)).await;
@@ -405,7 +405,7 @@ impl Connection {
             // not finished
             return;
         };
-        if receiver.reliable_ack_task_exists {
+        if !receiver.reliable_received_unacked.is_empty() {
             // un-acked reliable messages
             return;
         }
@@ -413,7 +413,6 @@ impl Connection {
             // un-(received + acked || nacked) unreliable messages
             return;
         }
-        debug_assert!(receiver.reliable_received_unacked.is_empty());
         debug_assert!(receiver.unreliable_received_unacked.is_empty());
         let reliable_acked_lt = receiver.reliable_received_acked.min_absent();
         debug_assert!(reliable_acked_lt <= sent_reliable);
@@ -512,11 +511,6 @@ impl Connection {
             return Ok(());
         };
         let receiver = &mut *receiver_guard;
-
-        // mark the current reliable ack task as exited
-        debug_assert!(receiver.reliable_ack_task_exists);
-        receiver.reliable_ack_task_exists = false;
-        debug_assert!(!receiver.reliable_received_unacked.is_empty());
 
         // save this for later (lowest un-acked reliable message num)
         let acked_lt = receiver.reliable_received_acked.min_absent();
