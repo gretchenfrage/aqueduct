@@ -1,9 +1,7 @@
 //! Simple API for ed25519 keys.
 
-use crate::{
-    base64::{base64_decode, base64_encode, hex_decode, hex_encode},
-    error::Error,
-};
+use crate::base64::{base64_decode, base64_encode, hex_decode, hex_encode};
+use anyhow::{Error, bail, ensure};
 use rand::{RngCore as _, rngs::OsRng};
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
 use std::{
@@ -184,9 +182,10 @@ impl KeyPair {
     ///
     /// Errors if they don't match.
     pub fn new(public: PublicKey, private: PrivateKey) -> Result<Self, Error> {
-        if private.to_public_key() != public {
-            return Err(Error::KeyPairMismatch);
-        }
+        ensure!(
+            private.to_public_key() == public,
+            "public and private keys within keypair do not match"
+        );
         Ok(KeyPair { public, private })
     }
 
@@ -219,7 +218,7 @@ impl KeyPair {
 
     /// Deserialize from a json object.
     pub fn from_json<S: AsRef<[u8]> + ?Sized>(json_string: &S) -> Result<Self, Error> {
-        serde_json::from_slice(json_string.as_ref()).map_err(Error::SerdeJson)
+        Ok(serde_json::from_slice(json_string.as_ref())?)
     }
 
     /// Read and deserialize from a json file at the given path.
@@ -237,11 +236,9 @@ impl KeyPair {
                 0 => break,
                 n => n,
             };
-            if size == buf.len() {
-                return Err(Error::KeyPairFileTooLarge);
-            }
+            ensure!(size < buf.len(), "keypair file is unreasonably large");
         }
-        Self::from_json(&buf[..size])
+        Ok(Self::from_json(&buf[..size])?)
     }
 
     /// Serialize and write to a json file at the given path non-destructively.
@@ -259,20 +256,20 @@ impl KeyPair {
             .open(path)?;
         if file.metadata()?.len() == 0 {
             // whatever, it should be fine to consider empty files the same as non-existent
-            serde_json::to_writer_pretty(&mut file, &self).map_err(Error::SerdeJson)
+            serde_json::to_writer_pretty(&mut file, &self)?;
         } else {
-            let exists = Self::read_from_reader(&mut file)?;
-            if exists == self {
-                Ok(())
-            } else {
-                Err(Error::KeyPairFileDifferentContent)
-            }
+            ensure!(
+                Self::read_from_reader(&mut file)? == self,
+                "keypair file already exists and contains different key than the in-memory one"
+            );
         }
+        Ok(())
     }
 
     /// Serialize and write to a json file at the given path, overwriting if one already exists.
     pub fn write_to_file_overwrite<P: AsRef<Path>>(self, path: P) -> Result<(), Error> {
-        serde_json::to_writer(File::create(path)?, &self).map_err(Error::SerdeJson)
+        serde_json::to_writer(File::create(path)?, &self)?;
+        Ok(())
     }
 
     /// Find a key pair file within the directory by file name and read and deserialize it.
@@ -326,7 +323,7 @@ impl KeyPair {
                 Err(e) => warn!(%e, "error in find_in_dir_and_read"),
             };
         }
-        Err(Error::KeyPairNotFound)
+        bail!("keypair not found");
     }
 
     /// Serialize and write to a json file in the given directory, automatically choosing the name.

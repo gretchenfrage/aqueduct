@@ -1,6 +1,6 @@
 //! Handling ed25519 representation as base64 url-safe strings (also hex).
 
-use crate::error::Error;
+use anyhow::{Result, bail, ensure};
 
 const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 
@@ -27,13 +27,14 @@ pub(crate) fn base64_encode(bytes: [u8; 32]) -> [u8; 43] {
 }
 
 /// Decode ed25519 raw bytes from their representation as base64 ascii characters.
-pub(crate) fn base64_decode(base64: &[u8]) -> Result<[u8; 32], Error> {
-    if base64.len() != 43 {
-        return Err(Error::Base64WrongLength);
-    }
+pub(crate) fn base64_decode(base64: &[u8]) -> Result<[u8; 32]> {
+    ensure!(
+        base64.len() == 43,
+        "ed25519 key base-64 string wrong length"
+    );
     let mut bytes = [0; 32];
     for i in 0..11 {
-        // pull in  group of up to 4 base64 chars
+        // pull in group of up to 4 base64 chars
         let mut grp = 0;
         let input_grp_offset = i * 4;
         let input_grp_len = usize::min(4, 43 - input_grp_offset);
@@ -47,29 +48,27 @@ pub(crate) fn base64_decode(base64: &[u8]) -> Result<[u8; 32], Error> {
         let grp_len = usize::min(3, 32 - grp_offset);
         bytes[grp_offset..grp_offset + grp_len].copy_from_slice(&grp[..grp_len]);
         for j in grp_len..3 {
-            if grp[j] != 0 {
-                return Err(Error::Base64ExtraBits);
-            }
+            ensure!(grp[j] == 0, "ed25519 key base-64 extra bits not zeroed")
         }
     }
     Ok(bytes)
 }
 
 // convert a single base64 char into a 6-bit integer
-fn base64_decode_char(c: u8) -> Result<u8, Error> {
-    if c >= b'A' && c <= b'Z' {
-        Ok(c - b'A')
+fn base64_decode_char(c: u8) -> Result<u8> {
+    Ok(if c >= b'A' && c <= b'Z' {
+        c - b'A'
     } else if c >= b'a' && c <= b'z' {
-        Ok(c - b'a' + 26)
+        c - b'a' + 26
     } else if c >= b'0' && c <= b'9' {
-        Ok(c - b'0' + 52)
+        c - b'0' + 52
     } else if c == b'-' {
-        Ok(62)
+        62
     } else if c == b'_' {
-        Ok(63)
+        63
     } else {
-        Err(Error::Base64IllegalCharacter)
-    }
+        bail!("invalid base64 character {:?}", c)
+    })
 }
 
 /// Encode ed25519 raw bytes into their representation as lower-hex ascii characters.
@@ -84,10 +83,11 @@ pub(crate) fn hex_encode(bytes: [u8; 32]) -> [u8; 64] {
 }
 
 /// Decode ed25519 raw bytes from their representation as lower-hex ascii characters.
-pub(crate) fn hex_decode(hex: &[u8]) -> Result<[u8; 32], Error> {
-    if hex.len() != 64 {
-        return Err(Error::HexadecimalWrongLength);
-    }
+pub(crate) fn hex_decode(hex: &[u8]) -> Result<[u8; 32]> {
+    ensure!(
+        hex.len() == 64,
+        "ed25519 key hexadecimal string wrong length"
+    );
     let mut bytes = [0; 32];
     for (i, b) in bytes.iter_mut().enumerate() {
         *b = (hex_decode_char(hex[i * 2])? << 4) | hex_decode_char(hex[i * 2 + 1])?;
@@ -96,18 +96,12 @@ pub(crate) fn hex_decode(hex: &[u8]) -> Result<[u8; 32], Error> {
 }
 
 // convert a single hex char into a nibble
-fn hex_decode_char(c: u8) -> Result<u8, Error> {
-    if c >= b'0' && c <= b'9' {
-        Ok(c - b'0')
+fn hex_decode_char(c: u8) -> Result<u8> {
+    Ok(if c >= b'0' && c <= b'9' {
+        c - b'0'
     } else if c >= b'a' && c <= b'f' {
-        Ok(c - b'a' + 10)
+        c - b'a' + 10
     } else {
-        Err(Error::HexadecimalIllegalCharacter)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn foobar() {}
+        bail!("invalid hexadecimal character {:?}", c)
+    })
 }

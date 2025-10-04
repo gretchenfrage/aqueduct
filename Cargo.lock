@@ -669,6 +669,7 @@ dependencies = [
 name = "qkai"
 version = "0.0.0-AFTER"
 dependencies = [
+ "anyhow",
  "dashmap 5.5.3",
  "ed25519-dalek",
  "quinn 0.10.2",

@@ -14,6 +14,7 @@ thiserror = "1"
 serde_json = "1"
 dashmap = "5"
 #tokio = "1"
+anyhow = "1"
 
 [dependencies.rustls]
 version = "0.21"

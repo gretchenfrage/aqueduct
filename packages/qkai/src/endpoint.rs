@@ -2,9 +2,9 @@
 
 use crate::{
     cert::{rustls_cert_to_pub_key, rustls_server_name_to_pub_key},
-    error::Error,
     url::QkaiUrl,
 };
+use anyhow::Error;
 use rustls::{
     Certificate, CertificateError, SignatureScheme,
     client::{ServerCertVerified, ServerCertVerifier, ServerName},
