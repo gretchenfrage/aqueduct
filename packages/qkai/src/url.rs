@@ -170,6 +170,23 @@ impl FromStr for QkaiUrl {
     }
 }
 
+/// Type that be try to be converted to [`QkaiUrl`].
+pub trait ToQkaiUrl {
+    fn to_url(self) -> Result<QkaiUrl, Error>;
+}
+
+impl ToQkaiUrl for QkaiUrl {
+    fn to_url(self) -> Result<QkaiUrl, Error> {
+        Ok(self)
+    }
+}
+
+impl<'a> ToQkaiUrl for &'a str {
+    fn to_url(self) -> Result<QkaiUrl, Error> {
+        QkaiUrl::parse(self)
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::*;

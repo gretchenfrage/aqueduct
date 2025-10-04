@@ -1,34 +1,12 @@
 //! Module for the actual network connection API.
 
-use crate::{
-    cert::{rustls_cert_to_pub_key, rustls_server_name_to_pub_key},
-    url::QkaiUrl,
-};
-use anyhow::Error;
+use super::crypto_conversions::{rustls_cert_to_pub_key, rustls_server_name_to_pub_key};
 use rustls::{
     CertificateError, DigitallySignedStruct, PeerIncompatible, SignatureScheme,
     client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
     crypto::{aws_lc_rs::default_provider, verify_tls13_signature},
     pki_types::{CertificateDer, ServerName, UnixTime},
 };
-use std::str;
-
-/// Type that be try to be converted to [`QkaiUrl`].
-pub trait ToQkaiUrl {
-    fn to_url(self) -> Result<QkaiUrl, Error>;
-}
-
-impl ToQkaiUrl for QkaiUrl {
-    fn to_url(self) -> Result<QkaiUrl, Error> {
-        Ok(self)
-    }
-}
-
-impl<'a> ToQkaiUrl for &'a str {
-    fn to_url(self) -> Result<QkaiUrl, Error> {
-        QkaiUrl::parse(self)
-    }
-}
 
 #[derive(Debug)]
 pub struct QkaiServerCertVerifier;
