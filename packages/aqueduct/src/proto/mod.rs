@@ -46,15 +46,10 @@ struct ReceiverState {
     // buffer of all messages we have received on this channel
     received_messages: Vec<ReceivedMessage>,
 
-    // invariant: a reliable acking task exists iff reliable_received_unacked is non-empty
-
     // set of reliable message numbers the local side has received and sent back acks for
     reliable_received_acked: RangeSetU64,
     // set of reliable message numbers the local side has received but not sent acks for
     reliable_received_unacked: RangeSetU64,
-
-    // invariant: an unreliable ack-nacking tasks exists iff unreliable_received_unacked is
-    //            non-empty or sent_unreliable_count_total > unreliable_ack_nacked_lt
 
     // set of unreliable message numbers the local side has ack-nacked (exclusive upper bound)
     unreliable_ack_nacked_lt: u64,
@@ -65,8 +60,6 @@ struct ReceiverState {
 
     // if the local side has received a finish_sender frame, that frame's sent_reliable number
     finished_sent_reliable: Option<u64>,
-    // whether the local side has sent a close_receiver frame
-    closed: bool,
 
     // the receiver-to-sender feedback control stream for this channel. we utilize tokio Mutex's
     // strict FIFO guarantees to form a queue of control data to asynchronously write without
@@ -75,9 +68,20 @@ struct ReceiverState {
 }
 
 impl ReceiverState {
+    fn reliable_ack_task_should_exist(&self) -> bool {
+        !self.reliable_received_unacked.is_empty()
+    }
+
     fn unreliable_ack_nack_task_should_exist(&self) -> bool {
         !self.unreliable_received_unacked.is_empty()
             || self.sent_unreliable_count_total > self.unreliable_ack_nacked_lt
+    }
+
+    fn should_be_closed(&self) -> bool {
+        self.finished_sent_reliable
+            .is_some_and(|n| n == self.reliable_received_acked.min_absent())
+            && !self.reliable_ack_task_should_exist()
+            && !self.unreliable_ack_nack_task_should_exist()
     }
 }
 
@@ -282,13 +286,14 @@ impl Connection {
                     .is_none_or(|n| message_num < n),
                 "received reliable message num beyond declared finish"
             );
-            let task_exists = !receiver.reliable_received_unacked.is_empty();
+            let task_exists = receiver.reliable_ack_task_should_exist();
             read::ensure!(
                 !receiver
                     .reliable_received_unacked
                     .insert(message_num, message_num),
                 "received reliable message num in duplicate"
             );
+            debug_assert!(receiver.reliable_ack_task_should_exist());
             if !task_exists {
                 let this = self.clone();
                 self.spawn(async move {
@@ -351,9 +356,6 @@ impl Connection {
         // buffer message
         receiver.received_messages.push(received_message);
 
-        // maybe finish
-        self.maybe_cleanly_close_receiver(chan_id, receiver);
-
         Ok(r)
     }
 
@@ -400,27 +402,16 @@ impl Connection {
             receiver.finished_sent_reliable.is_none(),
             "received FINISH_SENDER frame in duplicate"
         );
+        debug_assert!(!receiver.should_be_closed());
         receiver.finished_sent_reliable = Some(sent_reliable);
-        self.maybe_cleanly_close_receiver(chan_id, receiver);
+        self.maybe_close_receiver(chan_id, receiver);
         Ok(r)
     }
 
-    fn maybe_cleanly_close_receiver(
-        self: &Arc<Self>,
-        chan_id: ChanId,
-        receiver: &mut ReceiverState,
-    ) {
-        if receiver.closed
-            || !receiver
-                .finished_sent_reliable
-                .is_some_and(|n| n == receiver.reliable_received_acked.min_absent())
-            || !receiver.reliable_received_unacked.is_empty()
-            || receiver.unreliable_ack_nack_task_should_exist()
-        {
+    fn maybe_close_receiver(self: &Arc<Self>, chan_id: ChanId, receiver: &mut ReceiverState) {
+        if !receiver.should_be_closed() {
             return;
         }
-
-        // actually close it
         let ctrl_stream_guard_fut = receiver.ctrl_stream.clone().lock_owned();
         let this = self.clone();
         self.spawn(async move {
@@ -510,6 +501,9 @@ impl Connection {
         };
         let receiver = &mut *receiver_guard;
 
+        debug_assert!(receiver.reliable_ack_task_should_exist());
+        debug_assert!(!receiver.should_be_closed());
+
         // save this for later (lowest un-acked reliable message num)
         let acked_lt = receiver.reliable_received_acked.min_absent();
 
@@ -553,7 +547,7 @@ impl Connection {
         let ctrl_stream_guard_fut = receiver.ctrl_stream.clone().lock_owned();
 
         // maybe finish
-        self.maybe_cleanly_close_receiver(chan_id, receiver);
+        self.maybe_close_receiver(chan_id, receiver);
 
         drop(receiver_guard);
         let mut ctrl_stream_guard = ctrl_stream_guard_fut.await;
@@ -599,6 +593,9 @@ impl Connection {
         };
         let receiver = &mut *receiver_guard;
 
+        debug_assert!(receiver.unreliable_ack_nack_task_should_exist());
+        debug_assert!(!receiver.should_be_closed());
+
         // form deltas
         let mut deltas = write::Deltas::default();
         // there is always a single ack delta, representing a range length beyond 0
@@ -641,7 +638,7 @@ impl Connection {
         let ctrl_stream_guard_fut = receiver.ctrl_stream.clone().lock_owned();
 
         // maybe finish
-        self.maybe_cleanly_close_receiver(chan_id, receiver);
+        self.maybe_close_receiver(chan_id, receiver);
 
         drop(receiver_guard);
         let mut ctrl_stream_guard = ctrl_stream_guard_fut.await;
