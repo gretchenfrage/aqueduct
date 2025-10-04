@@ -6,14 +6,10 @@ publish = false
 
 [dependencies]
 tracing = "0.1"
-quinn = "0.10"
 rand = "0.8"
 rcgen = "0.12"
 x509-parser = "0.16"
-thiserror = "1"
 serde_json = "1"
-dashmap = "5"
-#tokio = "1"
 anyhow = "1"
 
 [dependencies.rustls]
@@ -27,8 +23,3 @@ features = ["pkcs8", "rand_core"]
 [dependencies.serde]
 version = "1"
 features = ["derive"]
-
-# TODO
-[dependencies.tokio]
-version = "1"
-features = ["full"]
