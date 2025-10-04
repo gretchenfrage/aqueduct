@@ -181,8 +181,12 @@ impl Connection {
                 read::Frame::ConnectionHeaders(r) => todo!(),
                 read::Frame::RouteTo(r) => return self.handle_routed_frames(r, reliable).await,
                 read::Frame::Message(_) => read::bail!("received un-routed MESSAGE frame"),
-                read::Frame::SentUnreliable(r) => todo!(),
-                read::Frame::FinishSender(r) => todo!(),
+                read::Frame::SentUnreliable(_) => {
+                    read::bail!("received un-routed SENT_UNRELIABLE frame")
+                }
+                read::Frame::FinishSender(_) => {
+                    read::bail!("received un-routed FINISH_SENDER frame")
+                }
                 read::Frame::CancelSender(r) => todo!(),
                 read::Frame::AckReliable(r) => todo!(),
                 read::Frame::AckNackUnreliable(r) => todo!(),
