@@ -2,7 +2,7 @@
 
 use crate::base64::{base64_decode, base64_encode, hex_decode, hex_encode};
 use anyhow::{Error, bail, ensure};
-use rand::{RngCore as _, rngs::OsRng};
+use rand::{TryRngCore as _, rngs::OsRng};
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
 use std::{
     cmp::Ordering,
@@ -117,7 +117,9 @@ impl PrivateKey {
     /// Use the OS random number generator to randomly generate a private key.
     pub fn generate() -> Self {
         let mut buf = [0; 32];
-        OsRng.fill_bytes(&mut buf);
+        OsRng
+            .try_fill_bytes(&mut buf)
+            .expect("rand::rngs::OsRng errored");
         Self::from_bytes(buf)
     }
 
