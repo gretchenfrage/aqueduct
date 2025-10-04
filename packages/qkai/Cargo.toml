@@ -1,0 +1,39 @@
+[package]
+name = "qkai"
+version = "0.0.0-AFTER"
+edition = "2021"
+license = "MIT"
+authors = ["Phoenix Kahlo"]
+readme = "../README.md"
+repository = "https://gitlab.com/gretchenfrage/qkai"
+categories = ["network-programming", ]
+workspace = ".."
+publish = false
+
+[dependencies]
+tracing = "0.1"
+quinn = "0.10"
+rand = "0.8"
+rcgen = "0.12"
+x509-parser = "0.16"
+thiserror = "1"
+serde_json = "1"
+dashmap = "5"
+#tokio = "1"
+
+[dependencies.rustls]
+version = "0.21"
+features = ["dangerous_configuration"]
+
+[dependencies.ed25519-dalek]
+version = "2"
+features = ["pkcs8", "rand_core"]
+
+[dependencies.serde]
+version = "1"
+features = ["derive"]
+
+# TODO
+[dependencies.tokio]
+version = "1"
+features = ["full"]
