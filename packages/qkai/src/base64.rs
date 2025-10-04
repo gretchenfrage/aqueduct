@@ -2,7 +2,6 @@
 
 use crate::error::Error;
 
-
 const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 
 /// Encode ed25519 raw bytes into their representation as base64 ascii characters.
@@ -110,7 +109,5 @@ fn hex_decode_char(c: u8) -> Result<u8, Error> {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn foobar() {
-
-    }
+    fn foobar() {}
 }

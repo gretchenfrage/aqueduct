@@ -4,7 +4,6 @@ use crate::ed25519::{KeyPair, PublicKey};
 use ed25519_dalek::pkcs8::EncodePrivateKey as _;
 use x509_parser::prelude::FromDer as _;
 
-
 /// Convert our crate's key pair type to rustls types.
 ///
 /// Given input:
@@ -19,10 +18,7 @@ use x509_parser::prelude::FromDer as _;
 ///   - The sole subject alt name is the base64 encoding of the public key.
 /// - DER-encoded PKCS#8 private key, containing the input ed25519 private key, represented as a
 ///   [`rustls::PrivateKey`].
-pub fn key_pair_to_rustls_cert_key(
-    key_pair: KeyPair,
-) -> (rustls::Certificate, rustls::PrivateKey)
-{
+pub fn key_pair_to_rustls_cert_key(key_pair: KeyPair) -> (rustls::Certificate, rustls::PrivateKey) {
     // simply wrap the private key bytes in dalek representation
     let dalek_raw_priv_key =
         ed25519_dalek::SigningKey::from_bytes(&key_pair.private_key().to_bytes());
@@ -71,11 +67,13 @@ pub(crate) fn rustls_cert_to_pub_key(rustls_cert: &rustls::Certificate) -> Resul
     let subject_pki = &x509_parser_cert.tbs_certificate.subject_pki;
 
     // validate that it's ed25519
-    let sig_algo = x509_parser::signature_algorithm::SignatureAlgorithm::try_from(
-        &subject_pki.algorithm
-    ).map_err(|e| warn!(%e, "rustls allowed a sig algo that x509_parser did not"))?;
-    if matches!(sig_algo, x509_parser::signature_algorithm::SignatureAlgorithm::ED25519)
-        && subject_pki.subject_public_key.data.len() == 32
+    let sig_algo =
+        x509_parser::signature_algorithm::SignatureAlgorithm::try_from(&subject_pki.algorithm)
+            .map_err(|e| warn!(%e, "rustls allowed a sig algo that x509_parser did not"))?;
+    if matches!(
+        sig_algo,
+        x509_parser::signature_algorithm::SignatureAlgorithm::ED25519
+    ) && subject_pki.subject_public_key.data.len() == 32
         && subject_pki.subject_public_key.unused_bits == 0
     {
         // copy into our representation
@@ -104,7 +102,6 @@ pub(crate) fn rustls_server_name_to_pub_key(
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -114,9 +111,6 @@ mod tests {
         let key = KeyPair::generate();
         println!("{:#?}", key);
         let (cert, _) = key_pair_to_rustls_cert_key(key);
-        assert_eq!(
-            key.public_key(),
-            rustls_cert_to_pub_key(&cert).unwrap(),
-        );
+        assert_eq!(key.public_key(), rustls_cert_to_pub_key(&cert).unwrap(),);
     }
 }

@@ -1,27 +1,17 @@
-
 #[macro_use]
 extern crate tracing;
 
+mod base64;
 mod ed25519;
 mod error;
-mod base64;
 mod url;
 
-pub mod endpoint;
 pub mod cert;
+pub mod endpoint;
 
 pub use crate::{
+    ed25519::{KeyPair, PrivateKey, PublicKey},
+    endpoint::ToQkaiUrl,
     error::Error,
-    ed25519::{
-        PublicKey,
-        PrivateKey,
-        KeyPair,
-    },
-    url::{
-        QkaiUrl,
-        QKAI_URL_MAX_LEN,
-    },
-    endpoint::{
-        ToQkaiUrl,
-    },
+    url::{QKAI_URL_MAX_LEN, QkaiUrl},
 };

@@ -1,35 +1,20 @@
 //! Simple API for ed25519 keys.
 
 use crate::{
+    base64::{base64_decode, base64_encode, hex_decode, hex_encode},
     error::Error,
-    base64::{
-        base64_encode,
-        base64_decode,
-        hex_encode,
-        hex_decode,
-    },
 };
+use rand::{RngCore as _, rngs::OsRng};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
 use std::{
-    fmt::{self, Formatter, Debug, Display},
-    str::{self, FromStr},
+    cmp::Ordering,
+    fmt::{self, Debug, Display, Formatter},
+    fs::{DirEntry, File, read_dir},
     hash::{Hash, Hasher},
     io::{self, Read},
     path::Path,
-    fs::{File, DirEntry, read_dir},
-    cmp::Ordering,
+    str::{self, FromStr},
 };
-use rand::{
-    rngs::OsRng,
-    RngCore as _,
-};
-use serde::{
-    Serialize,
-    Serializer,
-    Deserialize,
-    Deserializer,
-    de::Error as _,
-};
-
 
 /// A public key (ed25519). Wrapper around `[u8; 32]`.
 ///
@@ -143,7 +128,7 @@ impl PrivateKey {
         PublicKey::from_bytes(
             *ed25519_dalek::SigningKey::from_bytes(&self.to_bytes())
                 .verifying_key()
-                .as_bytes()
+                .as_bytes(),
         )
     }
 
@@ -228,7 +213,8 @@ impl KeyPair {
             serde_json::to_string_pretty(&self)
         } else {
             serde_json::to_string(&self)
-        }.unwrap()
+        }
+        .unwrap()
     }
 
     /// Deserialize from a json object.
@@ -265,8 +251,11 @@ impl KeyPair {
     /// this function simply returns ok, and otherwise returns an error.
     pub fn write_to_file_safe<P: AsRef<Path>>(self, path: P) -> Result<(), Error> {
         let mut file = File::options()
-            .read(true).write(true).create(true)
-            .append(false).truncate(false)
+            .read(true)
+            .write(true)
+            .create(true)
+            .append(false)
+            .truncate(false)
             .open(path)?;
         if file.metadata()?.len() == 0 {
             // whatever, it should be fine to consider empty files the same as non-existent
@@ -292,7 +281,7 @@ impl KeyPair {
     /// This function searches the direct children of `dir`, looking for a key file which's public
     /// key begins with `prefix`, and attempts to read it.
     ///
-    /// Calling with `dir` = `"."` and `prefix` = `""` will simply try to read any key pair in 
+    /// Calling with `dir` = `"."` and `prefix` = `""` will simply try to read any key pair in
     /// current directory.
     pub fn find_in_dir_and_read<P: AsRef<Path>>(dir: P, prefix: &str) -> Result<Self, Error> {
         fn try_entry(
@@ -320,7 +309,11 @@ impl KeyPair {
                 return Ok(None);
             }
             let key_pair = KeyPair::read_from_file(entry.path()).map_err(|e| dbg!(e))?;
-            if key_pair.public_key().to_base64_bytes().starts_with(prefix.as_bytes()) {
+            if key_pair
+                .public_key()
+                .to_base64_bytes()
+                .starts_with(prefix.as_bytes())
+            {
                 Ok(Some(key_pair))
             } else {
                 Ok(None)
@@ -384,11 +377,11 @@ impl FromStr for PrivateKey {
     }
 }
 
-fn serialize<
-    const N: usize,
-    F: Fn([u8; 32]) -> [u8; N],
-    S: Serializer,
->(encode: F, bytes: [u8; 32], s: S) -> Result<S::Ok, S::Error> {
+fn serialize<const N: usize, F: Fn([u8; 32]) -> [u8; N], S: Serializer>(
+    encode: F,
+    bytes: [u8; 32],
+    s: S,
+) -> Result<S::Ok, S::Error> {
     if s.is_human_readable() {
         let utf8 = encode(bytes);
         s.serialize_str(str::from_utf8(&utf8).unwrap())
@@ -397,11 +390,10 @@ fn serialize<
     }
 }
 
-fn deserialize<
-    'd,
-    F: Fn(&[u8]) -> Result<[u8; 32], Error>,
-    D: Deserializer<'d>,
->(decode: F, d: D) -> Result<[u8; 32], D::Error> {
+fn deserialize<'d, F: Fn(&[u8]) -> Result<[u8; 32], Error>, D: Deserializer<'d>>(
+    decode: F,
+    d: D,
+) -> Result<[u8; 32], D::Error> {
     struct V<F>(F);
     impl<'d, F: Fn(&[u8]) -> Result<[u8; 32], Error>> serde::de::Visitor<'d> for V<F> {
         type Value = [u8; 32];
@@ -420,7 +412,9 @@ fn deserialize<
                 buf.copy_from_slice(v);
                 Ok(buf)
             } else {
-                Err(E::custom("deserializing ed25519 binary key, wrong number of bytes"))
+                Err(E::custom(
+                    "deserializing ed25519 binary key, wrong number of bytes",
+                ))
             }
         }
     }
@@ -462,9 +456,9 @@ impl<'d> Deserialize<'d> for KeyPair {
             public: PublicKey,
             private: PrivateKey,
         }
-        KeyPairUnvalidated::deserialize(d)
-            .and_then(|key_pair| Self::new(key_pair.public, key_pair.private)
-                .map_err(D::Error::custom))
+        KeyPairUnvalidated::deserialize(d).and_then(|key_pair| {
+            Self::new(key_pair.public, key_pair.private).map_err(D::Error::custom)
+        })
     }
 }
 
@@ -496,7 +490,6 @@ impl Hash for KeyPair {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -511,7 +504,9 @@ mod tests {
             keys.public_key(),
         );
         assert_eq!(
-            PrivateKey::from_hex(&keys.private_key().to_hex_bytes()).unwrap().to_bytes(),
+            PrivateKey::from_hex(&keys.private_key().to_hex_bytes())
+                .unwrap()
+                .to_bytes(),
             keys.private_key().to_bytes(),
         );
         //keys.write_to_file_in_dir(".").unwrap();

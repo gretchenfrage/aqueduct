@@ -1,27 +1,15 @@
 //! Module for the actual network connection API.
 
 use crate::{
+    cert::{rustls_cert_to_pub_key, rustls_server_name_to_pub_key},
     error::Error,
-    cert::{
-        rustls_cert_to_pub_key,
-        rustls_server_name_to_pub_key,
-    },
     url::QkaiUrl,
 };
-use std::{
-    time::{SystemTime},
-    str,
-};
 use rustls::{
-    SignatureScheme,
-    Certificate,
-    CertificateError,
-    client::{
-        ServerCertVerifier,
-        ServerCertVerified,
-        ServerName,
-    },
+    Certificate, CertificateError, SignatureScheme,
+    client::{ServerCertVerified, ServerCertVerifier, ServerName},
 };
+use std::{str, time::SystemTime};
 
 /// Type that be try to be converted to [`QkaiUrl`].
 pub trait ToQkaiUrl {
@@ -48,7 +36,7 @@ impl ServerCertVerifier for QkaiServerCertVerifier {
         end_entity: &Certificate,
         intermediates: &[Certificate],
         server_name: &ServerName,
-        _scts: &mut dyn Iterator<Item=&[u8]>,
+        _scts: &mut dyn Iterator<Item = &[u8]>,
         _ocsp_response: &[u8],
         _now: SystemTime,
     ) -> Result<ServerCertVerified, rustls::Error> {

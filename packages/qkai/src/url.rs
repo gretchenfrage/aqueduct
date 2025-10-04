@@ -1,16 +1,12 @@
 //! Handling qkai urls.
 
-use crate::{
-    error::Error,
-    ed25519::PublicKey,
-};
+use crate::{ed25519::PublicKey, error::Error};
 use std::{
-    net::{SocketAddr, IpAddr, Ipv6Addr, Ipv4Addr},
-    fmt::{self, Formatter, Debug, Display},
-    str::{self, FromStr },
+    fmt::{self, Debug, Display, Formatter},
     io,
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
+    str::{self, FromStr},
 };
-
 
 /// Maximum possible ascii character length of a valid qkai url (104).
 ///
@@ -26,7 +22,6 @@ use std::{
 /// - 1 character for the `:` separator.
 /// - 5 characters for the longest possible port (a 16-bit uint has at most 5 digits).
 pub const QKAI_URL_MAX_LEN: usize = 104;
-
 
 /// A parsed qkai url, consisting of a public key and a socket address.
 #[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
@@ -66,9 +61,12 @@ impl QkaiUrl {
         let public_key = PublicKey::from_base64(&bytes[..43])?;
         // find colon that separates the ip and port
         let socket_addr_bytes = &bytes[44..];
-        let (colon_idx, _) = socket_addr_bytes.iter()
+        let (colon_idx, _) = socket_addr_bytes
+            .iter()
             // only search in last 6 chars for sanity check / dos protection
-            .enumerate().rev().take(6)
+            .enumerate()
+            .rev()
+            .take(6)
             .find(|&(_, &c)| c == b':')
             .ok_or(Error::UrlMissingColon)?;
         // parse ip address
@@ -83,14 +81,20 @@ impl QkaiUrl {
             let ip_addr_bytes_len = ip_addr_bytes.len();
             let ipv6_addr_bytes = &ip_addr_bytes[1..ip_addr_bytes_len - 1];
             // parse
-            IpAddr::V6(Ipv6Addr::from_str(str::from_utf8(ipv6_addr_bytes)
-                .map_err(|_| Error::UrlIpv6AddrNonUtf8)?)
-                .map_err(|_| Error::UrlIpv6AddrInvalid)?)
+            IpAddr::V6(
+                Ipv6Addr::from_str(
+                    str::from_utf8(ipv6_addr_bytes).map_err(|_| Error::UrlIpv6AddrNonUtf8)?,
+                )
+                .map_err(|_| Error::UrlIpv6AddrInvalid)?,
+            )
         } else {
             // parse
-            IpAddr::V4(Ipv4Addr::from_str(str::from_utf8(ip_addr_bytes)
-                .map_err(|_| Error::UrlIpv4AddrNonUtf8)?)
-                .map_err(|_| Error::UrlIpv4AddrInvalid)?)
+            IpAddr::V4(
+                Ipv4Addr::from_str(
+                    str::from_utf8(ip_addr_bytes).map_err(|_| Error::UrlIpv4AddrNonUtf8)?,
+                )
+                .map_err(|_| Error::UrlIpv4AddrInvalid)?,
+            )
         };
         // parse port
         // out of bounds indexing protection
@@ -98,9 +102,11 @@ impl QkaiUrl {
             return Err(Error::UrlEmptyPort);
         }
         // parse it
-        let port = u16::from_str(str::from_utf8(&socket_addr_bytes[colon_idx + 1..])
-            .map_err(|_| Error::UrlPortNonUtf8)?)
-            .map_err(|_| Error::UrlPortInvalid)?;
+        let port = u16::from_str(
+            str::from_utf8(&socket_addr_bytes[colon_idx + 1..])
+                .map_err(|_| Error::UrlPortNonUtf8)?,
+        )
+        .map_err(|_| Error::UrlPortInvalid)?;
         // done :)
         Ok(QkaiUrl::new(public_key, SocketAddr::new(ip_addr, port)))
     }
@@ -168,18 +174,16 @@ impl FromStr for QkaiUrl {
     }
 }
 
-
 #[cfg(test)]
 mod test {
     use super::*;
 
     #[test]
     fn foobar() {
-        let url = QkaiUrl::parse("qkai://KpEkgtLmGEs4JMD-uSSNMF_EnOQYesylTkvohvggK3A@127.0.0.1:8686").unwrap();
+        let url =
+            QkaiUrl::parse("qkai://KpEkgtLmGEs4JMD-uSSNMF_EnOQYesylTkvohvggK3A@127.0.0.1:8686")
+                .unwrap();
         println!("{}", url);
-        assert_eq!(
-            url,
-            QkaiUrl::parse(&url.to_string(false)).unwrap(),
-        );
+        assert_eq!(url, QkaiUrl::parse(&url.to_string(false)).unwrap(),);
     }
 }
