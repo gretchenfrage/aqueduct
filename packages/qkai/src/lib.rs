@@ -6,8 +6,9 @@ mod ed25519;
 mod error;
 mod base64;
 mod url;
-mod cert;
-mod endpoint;
+
+pub mod endpoint;
+pub mod cert;
 
 pub use crate::{
     error::Error,
@@ -21,8 +22,6 @@ pub use crate::{
         QKAI_URL_MAX_LEN,
     },
     endpoint::{
-        Client,
-        Server,
         ToQkaiUrl,
     },
 };

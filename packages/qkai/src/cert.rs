@@ -19,7 +19,7 @@ use x509_parser::prelude::FromDer as _;
 ///   - The sole subject alt name is the base64 encoding of the public key.
 /// - DER-encoded PKCS#8 private key, containing the input ed25519 private key, represented as a
 ///   [`rustls::PrivateKey`].
-pub(crate) fn key_pair_to_rustls_cert_key(
+pub fn key_pair_to_rustls_cert_key(
     key_pair: KeyPair,
 ) -> (rustls::Certificate, rustls::PrivateKey)
 {
