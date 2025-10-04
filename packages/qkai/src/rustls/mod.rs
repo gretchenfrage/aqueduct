@@ -1,3 +1,5 @@
+//! Rustls integration.
+
 mod crypto_conversions;
 mod server_cert_verifier;
 

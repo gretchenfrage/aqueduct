@@ -12,12 +12,12 @@ use x509_parser::prelude::FromDer as _;
 ///
 /// Create outputs:
 ///
-/// - Self-signed X.509 certificate, represented as [`rustls::Certificate`], wherein:
+/// - Self-signed X.509 certificate, represented as [`rustls::pki_types::CertificateDer`], wherein:
 ///   
 ///   - The public and private keys are those input ed25519 keys.
 ///   - The sole subject alt name is the base64 encoding of the public key.
 /// - DER-encoded PKCS#8 private key, containing the input ed25519 private key, represented as a
-///   [`rustls::PrivateKey`].
+///   [`rustls::pki_types::PrivatePkcs8KeyDer`].
 pub fn key_pair_to_rustls_cert_key(
     key_pair: KeyPair,
 ) -> (
