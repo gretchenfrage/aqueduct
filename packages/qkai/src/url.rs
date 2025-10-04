@@ -69,7 +69,7 @@ impl QkaiUrl {
         let (colon_idx, _) = socket_addr_bytes.iter()
             // only search in last 6 chars for sanity check / dos protection
             .enumerate().rev().take(6)
-            .find(|(_, &c)| c == b':')
+            .find(|&(_, &c)| c == b':')
             .ok_or(Error::UrlMissingColon)?;
         // parse ip address
         let ip_addr_bytes = &socket_addr_bytes[..colon_idx];

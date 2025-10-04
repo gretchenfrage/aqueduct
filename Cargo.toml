@@ -3,4 +3,5 @@ resolver = "2"
 members = [
     "packages/aqueduct",
     "packages/multibytes",
+    "packages/qkai",
 ]
