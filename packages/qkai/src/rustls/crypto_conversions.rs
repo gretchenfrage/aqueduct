@@ -25,35 +25,36 @@ pub fn key_pair_to_rustls_cert_key(
     rustls::pki_types::PrivatePkcs8KeyDer<'static>,
 ) {
     // simply wrap the private key bytes in dalek representation
-    let dalek_raw_priv_key =
+    let dalek_raw_priv_key: ed25519_dalek::SigningKey =
         ed25519_dalek::SigningKey::from_bytes(&key_pair.private_key().to_bytes());
 
     // encapsulate the private key in the PKCS#8 format and encode that with DER encoding
     //
     // now, rather than just being the raw bytes of an ed25519 key, it's a generic "private key"
     // with metadata describing that fact that it happens to be of the ed25519 algorithm
-    let dalek_pkcs_priv_key = dalek_raw_priv_key.to_pkcs8_der().unwrap();
+    let dalek_pkcs_priv_key: ed25519_dalek::pkcs8::SecretDocument =
+        dalek_raw_priv_key.to_pkcs8_der().unwrap();
 
     // convert that PKCS#8 DER encapsulation of the private key from
-    // ed25519_dalek::pkcs::SecretDocument to rcgen::KeyPair representation, using the DER-encoded
-    // bytes as the common format they both understand
-    let rcgen_pkcs_priv_key = rcgen::KeyPair::from_der(dalek_pkcs_priv_key.as_bytes()).unwrap();
-
-    // do a similar conversion of the private key to rustls::PrivateKey representation
-    let rustls_pkcs_priv_key =
+    // ed25519_dalek::pkcs::SecretDocument to rustls::pki_types::PrivatePkcs8KeyDer representation,
+    // using the DER-encoded bytes as the common format they both understand
+    let rustls_pkcs_priv_key: rustls::pki_types::PrivatePkcs8KeyDer =
         rustls::pki_types::PrivatePkcs8KeyDer::from(dalek_pkcs_priv_key.as_bytes().to_vec());
 
+    // wrap the rustls::pki_types::PrivatePkcs8KeyDer in an rcgen::KeyPair, which is generic over
+    // whether the DER format is PKCS#8 or something else like RSA or Sec1
+    let rcgen_key_pair: rcgen::KeyPair = rcgen::KeyPair::try_from(&rustls_pkcs_priv_key).unwrap();
+
     // now, use rcgen to mint the self-signed X.509 certificate
-    let subject_alt_names = vec![key_pair.public_key().to_base64()];
-    let mut rcgen_params = rcgen::CertificateParams::new(subject_alt_names);
-    rcgen_params.alg = &rcgen::PKCS_ED25519;
-    rcgen_params.key_pair = Some(rcgen_pkcs_priv_key);
-    let rcgen_cert = rcgen::Certificate::from_params(rcgen_params).unwrap();
+    let subject_alt_names: Vec<String> = vec![key_pair.public_key().to_base64()];
+    let rcgen_params: rcgen::CertificateParams =
+        rcgen::CertificateParams::new(subject_alt_names).unwrap();
+    let rcgen_cert: rcgen::Certificate = rcgen_params.self_signed(&rcgen_key_pair).unwrap();
 
     // convert that X.509 certificate from rcgen::Certificate to rustls::Certificate
     // representation, using the DER encoding of the X.509 certificate as the common format they
     // both understand
-    let rustls_cert = rustls::pki_types::CertificateDer::from(rcgen_cert.serialize_der().unwrap());
+    let rustls_cert: rustls::pki_types::CertificateDer<'static> = rcgen_cert.der().clone();
 
     // done
     (rustls_cert, rustls_pkcs_priv_key)
@@ -66,7 +67,7 @@ pub fn key_pair_to_rustls_cert_key(
 pub(crate) fn rustls_cert_to_pub_key(
     rustls_cert: &rustls::pki_types::CertificateDer,
 ) -> Result<PublicKey, ()> {
-    // convert that X.509 certificate from rustls::Certificate to
+    // convert that X.509 certificate from rustls::CertificateDer to
     // x509_parser::certificate::X509Certificate, which actually provides us meaningful information
     // about its internal structure, using the DER encoding of the X.509 certificate as the common
     // format they both understand
