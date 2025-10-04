@@ -53,14 +53,15 @@ struct ReceiverState {
     // set of reliable message numbers the local side has received but not sent acks for
     reliable_received_unacked: RangeSetU64,
 
+    // invariant: an unreliable ack-nacking tasks exists iff unreliable_received_unacked is
+    //            non-empty or sent_unreliable_count_total > unreliable_ack_nacked_lt
+
     // set of unreliable message numbers the local side has ack-nacked (exclusive upper bound)
     unreliable_ack_nacked_lt: u64,
     // set of unreliable message numbers the local side has received and not acked
     unreliable_received_unacked: RangeSetU64,
     // sum of count values of all sent_unreliable frames local side has received
     sent_unreliable_count_total: u64,
-    // whether a task currently exists to sent acks for unreliable message nums for this channel
-    unreliable_ack_nack_task_exists: bool,
 
     // if the local side has received a finish_sender frame, that frame's sent_reliable number
     finished_sent_reliable: Option<u64>,
@@ -71,6 +72,13 @@ struct ReceiverState {
     // strict FIFO guarantees to form a queue of control data to asynchronously write without
     // holding a receiver state lock across await boundaries.
     ctrl_stream: Arc<tokio::sync::Mutex<Option<quinn::SendStream>>>,
+}
+
+impl ReceiverState {
+    fn unreliable_ack_nack_task_should_exist(&self) -> bool {
+        !self.unreliable_received_unacked.is_empty()
+            || self.sent_unreliable_count_total > self.unreliable_ack_nacked_lt
+    }
 }
 
 struct ReceivedMessage {
@@ -274,14 +282,14 @@ impl Connection {
                     .is_none_or(|n| message_num < n),
                 "received reliable message num beyond declared finish"
             );
-            let was_empty = receiver.reliable_received_unacked.is_empty();
+            let task_exists = !receiver.reliable_received_unacked.is_empty();
             read::ensure!(
                 !receiver
                     .reliable_received_unacked
                     .insert(message_num, message_num),
                 "received reliable message num in duplicate"
             );
-            if !was_empty {
+            if !task_exists {
                 let this = self.clone();
                 self.spawn(async move {
                     tokio::time::sleep(Duration::from_secs(1)).await;
@@ -302,15 +310,16 @@ impl Connection {
                 );
                 return Err(read::Error::Reset);
             }
-            let is_duplicate = receiver
-                .unreliable_received_unacked
-                .insert(message_num, message_num);
+            let task_exists = receiver.unreliable_ack_nack_task_should_exist();
             read::ensure!(
-                !is_duplicate,
+                !receiver
+                    .unreliable_received_unacked
+                    .insert(message_num, message_num),
                 "received unreliable message num in duplicate"
             );
-
-            self.maybe_spawn_unreliable_ack_nack_task(chan_id, &mut *receiver);
+            if !task_exists {
+                self.maybe_spawn_unreliable_ack_nack_task(chan_id, receiver)
+            }
         }
 
         // create attached channels / mark them as having received creating message
@@ -343,7 +352,7 @@ impl Connection {
         receiver.received_messages.push(received_message);
 
         // maybe finish
-        self.maybe_cleanly_close_receiver(chan_id, &mut *receiver);
+        self.maybe_cleanly_close_receiver(chan_id, receiver);
 
         Ok(r)
     }
@@ -360,6 +369,8 @@ impl Connection {
             receiver.finished_sent_reliable.is_none(),
             "received SENT_UNRELIABLE frame after receiving FINISH_SENDER frame for same channel",
         );
+        let task_exists = receiver.unreliable_ack_nack_task_should_exist();
+
         receiver.sent_unreliable_count_total = receiver
             .sent_unreliable_count_total
             .checked_add(count)
@@ -368,7 +379,9 @@ impl Connection {
             .ok_or_else(|| {
                 read::error!("received overflowing SENT_UNRELIABLE frame count total")
             })?;
-        self.maybe_spawn_unreliable_ack_nack_task(chan_id, &mut *receiver);
+        if !task_exists {
+            self.maybe_spawn_unreliable_ack_nack_task(chan_id, receiver);
+        }
         Ok(r)
     }
 
@@ -388,7 +401,7 @@ impl Connection {
             "received FINISH_SENDER frame in duplicate"
         );
         receiver.finished_sent_reliable = Some(sent_reliable);
-        self.maybe_cleanly_close_receiver(chan_id, &mut *receiver);
+        self.maybe_cleanly_close_receiver(chan_id, receiver);
         Ok(r)
     }
 
@@ -409,14 +422,16 @@ impl Connection {
             // un-acked reliable messages
             return;
         }
-        if receiver.unreliable_ack_nack_task_exists {
+        if !receiver.unreliable_received_unacked.is_empty() {
+            // un-ack-nacked reliable messages
+            return;
+        }
+        if receiver.sent_unreliable_count_total > receiver.unreliable_ack_nacked_lt {
             // un-(received + acked || nacked) unreliable messages
             return;
         }
-        debug_assert!(receiver.unreliable_received_unacked.is_empty());
         let reliable_acked_lt = receiver.reliable_received_acked.min_absent();
         debug_assert!(reliable_acked_lt <= sent_reliable);
-        debug_assert!(receiver.unreliable_ack_nacked_lt == receiver.sent_unreliable_count_total);
         if reliable_acked_lt < sent_reliable {
             // un-received reliable messages
             return;
@@ -555,7 +570,7 @@ impl Connection {
         let ctrl_stream_guard_fut = receiver.ctrl_stream.clone().lock_owned();
 
         // maybe finish
-        self.maybe_cleanly_close_receiver(chan_id, &mut *receiver);
+        self.maybe_cleanly_close_receiver(chan_id, receiver);
 
         drop(receiver_guard);
         let mut ctrl_stream_guard = ctrl_stream_guard_fut.await;
@@ -575,23 +590,18 @@ impl Connection {
         chan_id: ChanId,
         receiver: &mut ReceiverState,
     ) {
-        if receiver.unreliable_ack_nack_task_exists {
+        if !receiver.unreliable_ack_nack_task_should_exist() {
             return;
         }
-
-        let known_newly_sent_lt = receiver
+        let ack_nack_lt = receiver
             .unreliable_received_unacked
-            .max_lt()
+            .min_absent()
             .max(receiver.sent_unreliable_count_total);
-
-        if known_newly_sent_lt > receiver.unreliable_ack_nacked_lt {
-            receiver.unreliable_ack_nack_task_exists = true;
-            let this = self.clone();
-            self.spawn(async move {
-                tokio::time::sleep(Duration::from_secs(1)).await;
-                this.unreliable_ack_nack(chan_id, known_newly_sent_lt).await
-            });
-        }
+        let this = self.clone();
+        self.spawn(async move {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            this.unreliable_ack_nack(chan_id, ack_nack_lt).await
+        });
     }
 
     async fn unreliable_ack_nack(
@@ -605,15 +615,6 @@ impl Connection {
             return Ok(());
         };
         let receiver = &mut *receiver_guard;
-
-        // mark the current unreliable ack-nack task as exited
-        debug_assert!(receiver.unreliable_ack_nack_task_exists);
-        receiver.unreliable_ack_nack_task_exists = false;
-        debug_assert!(ack_nack_lt > receiver.unreliable_ack_nacked_lt);
-        debug_assert!(
-            ack_nack_lt <= receiver.sent_unreliable_count_total
-                || ack_nack_lt <= receiver.unreliable_received_unacked.max_lt()
-        );
 
         // form deltas
         let mut deltas = write::Deltas::default();
@@ -651,13 +652,13 @@ impl Connection {
         debug_assert!(receiver.unreliable_ack_nacked_lt == ack_nack_lt);
 
         // potentially immediately create another unreliable ack-nack task
-        self.maybe_spawn_unreliable_ack_nack_task(chan_id, &mut *receiver);
+        self.maybe_spawn_unreliable_ack_nack_task(chan_id, receiver);
 
         // transition from locking the receiver state to locking the ctrl stream
         let ctrl_stream_guard_fut = receiver.ctrl_stream.clone().lock_owned();
 
         // maybe finish
-        self.maybe_cleanly_close_receiver(chan_id, &mut *receiver);
+        self.maybe_cleanly_close_receiver(chan_id, receiver);
 
         drop(receiver_guard);
         let mut ctrl_stream_guard = ctrl_stream_guard_fut.await;
