@@ -410,30 +410,13 @@ impl Connection {
         chan_id: ChanId,
         receiver: &mut ReceiverState,
     ) {
-        if receiver.closed {
-            // already closed
-            return;
-        }
-        let Some(sent_reliable) = receiver.finished_sent_reliable else {
-            // not finished
-            return;
-        };
-        if !receiver.reliable_received_unacked.is_empty() {
-            // un-acked reliable messages
-            return;
-        }
-        if !receiver.unreliable_received_unacked.is_empty() {
-            // un-ack-nacked reliable messages
-            return;
-        }
-        if receiver.sent_unreliable_count_total > receiver.unreliable_ack_nacked_lt {
-            // un-(received + acked || nacked) unreliable messages
-            return;
-        }
-        let reliable_acked_lt = receiver.reliable_received_acked.min_absent();
-        debug_assert!(reliable_acked_lt <= sent_reliable);
-        if reliable_acked_lt < sent_reliable {
-            // un-received reliable messages
+        if receiver.closed
+            || !receiver
+                .finished_sent_reliable
+                .is_some_and(|n| n == receiver.reliable_received_acked.min_absent())
+            || !receiver.reliable_received_unacked.is_empty()
+            || receiver.unreliable_ack_nack_task_should_exist()
+        {
             return;
         }
 
