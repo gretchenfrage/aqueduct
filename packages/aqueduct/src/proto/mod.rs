@@ -60,6 +60,8 @@ struct ReceiverState {
 
     // if the local side has received a finish_sender frame, that frame's sent_reliable number
     finished_sent_reliable: Option<u64>,
+    // whether the local side has received a cancel_sender frame
+    cancelled: bool,
 
     // the receiver-to-sender feedback control stream for this channel. we utilize tokio Mutex's
     // strict FIFO guarantees to form a queue of control data to asynchronously write without
@@ -78,10 +80,12 @@ impl ReceiverState {
     }
 
     fn should_be_closed(&self) -> bool {
-        self.finished_sent_reliable
-            .is_some_and(|n| n == self.reliable_received_acked.min_absent())
-            && !self.reliable_ack_task_should_exist()
-            && !self.unreliable_ack_nack_task_should_exist()
+        self.cancelled
+            || (self
+                .finished_sent_reliable
+                .is_some_and(|n| n == self.reliable_received_acked.min_absent())
+                && !self.reliable_ack_task_should_exist()
+                && !self.unreliable_ack_nack_task_should_exist())
     }
 }
 
@@ -187,7 +191,9 @@ impl Connection {
                 read::Frame::FinishSender(_) => {
                     read::bail!("received un-routed FINISH_SENDER frame")
                 }
-                read::Frame::CancelSender(r) => todo!(),
+                read::Frame::CancelSender(_) => {
+                    read::bail!("received un-routed CANCEL_SENDER frame")
+                }
                 read::Frame::AckReliable(r) => todo!(),
                 read::Frame::AckNackUnreliable(r) => todo!(),
                 read::Frame::CloseReceiver(r) => todo!(),
@@ -212,7 +218,7 @@ impl Connection {
                 read::Frame::Message(r) => self.handle_message_frame(chan_id, reliable, r).await?,
                 read::Frame::SentUnreliable(r) => self.handle_sent_unreliable_frame(chan_id, r)?,
                 read::Frame::FinishSender(r) => self.handle_finish_sender_frame(chan_id, r)?,
-                read::Frame::CancelSender(r) => todo!(),
+                read::Frame::CancelSender(r) => self.handle_cancel_sender_frame(chan_id, r)?,
                 read::Frame::AckReliable(r) => todo!(),
                 read::Frame::AckNackUnreliable(r) => todo!(),
                 read::Frame::CloseReceiver(r) => todo!(),
@@ -396,6 +402,7 @@ impl Connection {
         chan_id: ChanId,
         r: read::FinishSender,
     ) -> read::Result<read::Frames> {
+        // TODO remove this boilerplate threading-through
         let read::FinishSender {
             sent_reliable,
             next: r,
@@ -406,9 +413,31 @@ impl Connection {
             receiver.finished_sent_reliable.is_none(),
             "received FINISH_SENDER frame in duplicate"
         );
-        debug_assert!(!receiver.should_be_closed());
+        let already_closed = receiver.should_be_closed();
         receiver.finished_sent_reliable = Some(sent_reliable);
-        self.maybe_close_receiver(chan_id, receiver);
+        if !already_closed {
+            self.maybe_close_receiver(chan_id, receiver);
+        }
+        Ok(r)
+    }
+
+    fn handle_cancel_sender_frame(
+        self: &Arc<Self>,
+        chan_id: ChanId,
+        r: read::Frames,
+    ) -> read::Result<read::Frames> {
+        let mut receiver_entry = self.setup_receiver_state(chan_id)?;
+        let receiver = receiver_entry.get_mut();
+        read::ensure!(
+            !receiver.cancelled,
+            "received CANCEL_SENDER frame in duplicate"
+        );
+        let already_closed = receiver.should_be_closed();
+        receiver.cancelled = true;
+        if !already_closed {
+            debug_assert!(receiver.should_be_closed());
+            self.maybe_close_receiver(chan_id, receiver);
+        }
         Ok(r)
     }
 
@@ -506,6 +535,9 @@ impl Connection {
         let receiver = &mut *receiver_guard;
 
         debug_assert!(receiver.reliable_ack_task_should_exist());
+        if receiver.cancelled {
+            return Ok(());
+        }
         debug_assert!(!receiver.should_be_closed());
 
         // save this for later (lowest un-acked reliable message num)
@@ -598,6 +630,9 @@ impl Connection {
         let receiver = &mut *receiver_guard;
 
         debug_assert!(receiver.unreliable_ack_nack_task_should_exist());
+        if receiver.cancelled {
+            return Ok(());
+        }
         debug_assert!(!receiver.should_be_closed());
 
         // form deltas
