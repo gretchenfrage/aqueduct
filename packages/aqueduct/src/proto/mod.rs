@@ -402,7 +402,6 @@ impl Connection {
         chan_id: ChanId,
         r: read::FinishSender,
     ) -> read::Result<read::Frames> {
-        // TODO remove this boilerplate threading-through
         let read::FinishSender {
             sent_reliable,
             next: r,
