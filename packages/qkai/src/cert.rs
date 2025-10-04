@@ -18,7 +18,12 @@ use x509_parser::prelude::FromDer as _;
 ///   - The sole subject alt name is the base64 encoding of the public key.
 /// - DER-encoded PKCS#8 private key, containing the input ed25519 private key, represented as a
 ///   [`rustls::PrivateKey`].
-pub fn key_pair_to_rustls_cert_key(key_pair: KeyPair) -> (rustls::Certificate, rustls::PrivateKey) {
+pub fn key_pair_to_rustls_cert_key(
+    key_pair: KeyPair,
+) -> (
+    rustls::pki_types::CertificateDer<'static>,
+    rustls::pki_types::PrivatePkcs8KeyDer<'static>,
+) {
     // simply wrap the private key bytes in dalek representation
     let dalek_raw_priv_key =
         ed25519_dalek::SigningKey::from_bytes(&key_pair.private_key().to_bytes());
@@ -35,7 +40,8 @@ pub fn key_pair_to_rustls_cert_key(key_pair: KeyPair) -> (rustls::Certificate, r
     let rcgen_pkcs_priv_key = rcgen::KeyPair::from_der(dalek_pkcs_priv_key.as_bytes()).unwrap();
 
     // do a similar conversion of the private key to rustls::PrivateKey representation
-    let rustls_pkcs_priv_key = rustls::PrivateKey(dalek_pkcs_priv_key.as_bytes().to_vec());
+    let rustls_pkcs_priv_key =
+        rustls::pki_types::PrivatePkcs8KeyDer::from(dalek_pkcs_priv_key.as_bytes().to_vec());
 
     // now, use rcgen to mint the self-signed X.509 certificate
     let subject_alt_names = vec![key_pair.public_key().to_base64()];
@@ -47,7 +53,7 @@ pub fn key_pair_to_rustls_cert_key(key_pair: KeyPair) -> (rustls::Certificate, r
     // convert that X.509 certificate from rcgen::Certificate to rustls::Certificate
     // representation, using the DER encoding of the X.509 certificate as the common format they
     // both understand
-    let rustls_cert = rustls::Certificate(rcgen_cert.serialize_der().unwrap());
+    let rustls_cert = rustls::pki_types::CertificateDer::from(rcgen_cert.serialize_der().unwrap());
 
     // done
     (rustls_cert, rustls_pkcs_priv_key)
@@ -57,12 +63,14 @@ pub fn key_pair_to_rustls_cert_key(key_pair: KeyPair) -> (rustls::Certificate, r
 /// that as our [`PublicKey`] representation.
 ///
 /// This is somewhat of a mirror to `key_pair_to_rustls_cert_key`.
-pub(crate) fn rustls_cert_to_pub_key(rustls_cert: &rustls::Certificate) -> Result<PublicKey, ()> {
+pub(crate) fn rustls_cert_to_pub_key(
+    rustls_cert: &rustls::pki_types::CertificateDer,
+) -> Result<PublicKey, ()> {
     // convert that X.509 certificate from rustls::Certificate to
     // x509_parser::certificate::X509Certificate, which actually provides us meaningful information
     // about its internal structure, using the DER encoding of the X.509 certificate as the common
     // format they both understand
-    let (_, x509_parser_cert) = x509_parser::certificate::X509Certificate::from_der(&rustls_cert.0)
+    let (_, x509_parser_cert) = x509_parser::certificate::X509Certificate::from_der(&*rustls_cert)
         .map_err(|e| warn!(%e, "rustls understood a cert that x509_parser did not"))?;
     let subject_pki = &x509_parser_cert.tbs_certificate.subject_pki;
 
@@ -90,10 +98,10 @@ pub(crate) fn rustls_cert_to_pub_key(rustls_cert: &rustls::Certificate) -> Resul
 ///
 /// This is somewhat of a mirror to `key_pair_to_rustls_cert_key`.
 pub(crate) fn rustls_server_name_to_pub_key(
-    rustls_server_name: &rustls::client::ServerName,
+    rustls_server_name: &rustls::pki_types::ServerName,
 ) -> Result<PublicKey, ()> {
     match rustls_server_name {
-        &rustls::client::ServerName::DnsName(ref name) => PublicKey::from_base64(name.as_ref())
+        &rustls::pki_types::ServerName::DnsName(ref name) => PublicKey::from_base64(name.as_ref())
             .map_err(|e| warn!(%e, "rustls server name unexpectedly failed to decode")),
         _ => {
             warn!("rustls server name was unexpectedly not a dns name");

@@ -6,10 +6,12 @@ use crate::{
 };
 use anyhow::Error;
 use rustls::{
-    Certificate, CertificateError, SignatureScheme,
-    client::{ServerCertVerified, ServerCertVerifier, ServerName},
+    CertificateError, DigitallySignedStruct, PeerIncompatible, SignatureScheme,
+    client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
+    crypto::{aws_lc_rs::default_provider, verify_tls13_signature},
+    pki_types::{CertificateDer, ServerName, UnixTime},
 };
-use std::{str, time::SystemTime};
+use std::str;
 
 /// Type that be try to be converted to [`QkaiUrl`].
 pub trait ToQkaiUrl {
@@ -28,17 +30,17 @@ impl<'a> ToQkaiUrl for &'a str {
     }
 }
 
+#[derive(Debug)]
 pub struct QkaiServerCertVerifier;
 
 impl ServerCertVerifier for QkaiServerCertVerifier {
     fn verify_server_cert(
         &self,
-        end_entity: &Certificate,
-        intermediates: &[Certificate],
-        server_name: &ServerName,
-        _scts: &mut dyn Iterator<Item = &[u8]>,
+        end_entity: &CertificateDer<'_>,
+        intermediates: &[CertificateDer<'_>],
+        server_name: &ServerName<'_>,
         _ocsp_response: &[u8],
-        _now: SystemTime,
+        _now: UnixTime,
     ) -> Result<ServerCertVerified, rustls::Error> {
         if !intermediates.is_empty() {
             trace!("rejecting server cert because has intermediates");
@@ -55,6 +57,31 @@ impl ServerCertVerifier for QkaiServerCertVerifier {
             trace!("rejecting server cert");
             Err(CertificateError::ApplicationVerificationFailure.into())
         }
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        Err(rustls::Error::PeerIncompatible(
+            PeerIncompatible::Tls12NotOffered,
+        ))
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &default_provider().signature_verification_algorithms,
+        )
     }
 
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
