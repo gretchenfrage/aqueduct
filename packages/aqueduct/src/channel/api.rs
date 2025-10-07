@@ -2,7 +2,7 @@
 
 use self::future::*;
 use super::{core, error::*};
-use std::{mem::take, sync::atomic::Ordering::Relaxed};
+use std::{future::pending, mem::take, sync::atomic::Ordering::Relaxed};
 
 // ==== helper functions for adapting core API to exposed API ====
 
@@ -489,7 +489,127 @@ impl<T> Receiver<T> {
         recv_terminal_state(self.0.recv_state())
     }
 
-    #[allow(dead_code)]
+    /// Asynchronously await the receivers of this channel entering a terminal state
+    ///
+    /// Once this resolves, all receivers for this channel are permanently in that terminal state,
+    /// and all attempts to send will return a corresponding error.
+    ///
+    /// The returned future does not contribute to this channel's receiver reference count.
+    pub fn terminal_state_fut(
+        &self,
+    ) -> impl Future<Output = RecvTerminalState> + Send + Sync + 'static {
+        let fast_result = self
+            .terminal_state()
+            .ok_or_else(|| self.0.watch_recv_state().clone());
+        async move {
+            match fast_result {
+                Ok(terminal_state) => terminal_state,
+                Err(mut watch) => recv_terminal_state(
+                    *watch
+                        .wait_for(|&recv_state| recv_state != core::RecvState::Normal as u8)
+                        .await
+                        .unwrap(),
+                )
+                .unwrap(),
+            }
+        }
+    }
+
+    /// Asynchronously await the receivers of this channel entering the "finished" terminal state,
+    /// or pend forever if a terminal error state is entered instead
+    ///
+    /// If this resolves, all senders have finished, no more buffered messages remain, and all
+    /// subsequent attempts to receive messages from this channel will return `Ok(None)`.
+    ///
+    /// The returned future does not contribute to this channel's receiver reference count.
+    pub fn finished_fut(&self) -> impl Future<Output = ()> + Send + Sync + 'static {
+        let terminal_state_fut = self.terminal_state_fut();
+        async move {
+            match terminal_state_fut.await {
+                RecvTerminalState::Finished => (),
+                _ => pending().await,
+            }
+        }
+    }
+
+    /// Asynchronously await the receivers of this channel entering a terminal [`RecvError`] state,
+    /// or pend forever if the "finished" terminal state is entered instead
+    ///
+    /// If this resolves, all subsequent attempts to send or receive messages on this channel will
+    /// return a corresponding error.
+    ///
+    /// The returned future does not contribute to this channel's receiver reference count.
+    pub fn error_fut(&self) -> impl Future<Output = RecvError> + Send + Sync + 'static {
+        let terminal_state_fut = self.terminal_state_fut();
+        async move {
+            match terminal_state_fut.await {
+                RecvTerminalState::Error(e) => e,
+                _ => pending().await,
+            }
+        }
+    }
+
+    /// Asynchronously await the receivers of this channel entering the [`RecvError::Cancelled`]
+    /// terminal error state, or pend forever if a different terminal error state or the "finished"
+    /// terminal state is entered instead
+    ///
+    /// If this resolves, all subsequent attempts to send or receive messages on this channel will
+    /// return a corresponding error.
+    ///
+    /// The returned future does not contribute to this channel's receiver reference count.
+    pub fn cancelled_error_fut(
+        &self,
+    ) -> impl Future<Output = CancelledError> + Send + Sync + 'static {
+        let terminal_state_fut = self.terminal_state_fut();
+        async move {
+            match terminal_state_fut.await {
+                RecvTerminalState::Error(RecvError::Cancelled(e)) => e,
+                _ => pending().await,
+            }
+        }
+    }
+
+    /// Asynchronously await the receivers of this channel entering the
+    /// [`RecvError::ConnectionLost`] terminal error state, or pend forever if a different terminal
+    /// error state or the "finished" terminal state is entered instead
+    ///
+    /// If this resolves, all subsequent attempts to send or receive messages on this channel will
+    /// return a corresponding error.
+    ///
+    /// The returned future does not contribute to this channel's receiver reference count.
+    pub fn connection_lost_error_fut(
+        &self,
+    ) -> impl Future<Output = ConnectionLostError> + Send + Sync + 'static {
+        let terminal_state_fut = self.terminal_state_fut();
+        async move {
+            match terminal_state_fut.await {
+                RecvTerminalState::Error(RecvError::ConnectionLost(e)) => e,
+                _ => pending().await,
+            }
+        }
+    }
+
+    /// Asynchronously await the receivers of this channel entering the
+    /// [`RecvError::ChannelLostInTransit`] terminal error state, or pend forever if a different
+    /// terminal error state or the "finished" terminal state is entered instead
+    ///
+    /// If this resolves, all subsequent attempts to receive messages from this channel will return
+    /// a corresponding error, and no sender handles exist because the sender half of this channel
+    /// has been sent through another networked channel in a message that will never be delivered.
+    ///
+    /// The returned future does not contribute to this channel's receiver reference count.
+    pub fn channel_lost_in_transit_error_fut(
+        &self,
+    ) -> impl Future<Output = ChannelLostInTransitError> + Send + Sync + 'static {
+        let terminal_state_fut = self.terminal_state_fut();
+        async move {
+            match terminal_state_fut.await {
+                RecvTerminalState::Error(RecvError::ChannelLostInTransit(e)) => e,
+                _ => pending().await,
+            }
+        }
+    }
+
     pub(crate) fn delivery_guarantees(&self) -> DeliveryGuarantees {
         DeliveryGuarantees::from_byte(self.0.delivery_guarantees_byte().load(Relaxed))
     }

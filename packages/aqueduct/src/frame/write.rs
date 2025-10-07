@@ -1,9 +1,9 @@
 //! Typed API for writing frames to quic streams and datagrams.
 
 use crate::frame::common::*;
-use anyhow::*;
+use anyhow::{Error, anyhow};
 use multibytes::*;
-use quinn::{Connection, SendDatagramError, SendStream};
+use quinn::{Connection, SendStream};
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 
 // utility internal to this module that wraps around MultiBytes and adds some helper functions.
@@ -44,7 +44,7 @@ impl Writer {
     }
 
     // send data written to `self` on the provided QUIC stream (zero-copy-ly).
-    async fn send_on_stream(self, stream: &mut SendStream) -> Result<()> {
+    async fn send_on_stream(self, stream: &mut SendStream) -> Result<(), Error> {
         for fragment in self.0.fragments() {
             stream.write_chunk(fragment).await?;
         }
@@ -52,7 +52,7 @@ impl Writer {
     }
 
     // open new unidirectional QUIC stream, send written data on it, finish stream.
-    async fn send_on_new_stream(self, conn: &Connection) -> Result<quinn::SendStream> {
+    async fn send_on_new_stream(self, conn: &Connection) -> Result<quinn::SendStream, Error> {
         let mut stream = conn.open_uni().await?;
         self.send_on_stream(&mut stream).await?;
         stream.finish().unwrap();
@@ -60,28 +60,14 @@ impl Writer {
     }
 
     // send written data in a QUIC datagram, or fall back to send_new_stream if too large.
-    async fn send_on_datagram(self, conn: &Connection) -> Result<()> {
+    fn send_on_datagram(self, conn: &Connection) -> Result<(), quinn::SendDatagramError> {
         let max_datagram_size = conn
             .max_datagram_size()
-            .ok_or_else(|| anyhow!("datagrams disabled"))?;
+            .ok_or_else(|| quinn::SendDatagramError::UnsupportedByPeer)?;
         if self.0.len() > max_datagram_size {
-            self.send_on_new_stream(conn).await?;
-            Ok(())
-        } else {
-            let bytes = self.0.defragment();
-            if let Err(e) = conn.send_datagram(bytes.clone()) {
-                if e == SendDatagramError::TooLarge {
-                    let mut stream = conn.open_uni().await?;
-                    stream.write_chunk(bytes).await?;
-                    stream.finish().unwrap();
-                    Ok(())
-                } else {
-                    Err(e.into())
-                }
-            } else {
-                Ok(())
-            }
+            return Err(quinn::SendDatagramError::TooLarge);
         }
+        conn.send_datagram(self.0.defragment())
     }
 }
 
@@ -114,20 +100,20 @@ impl Frames {
     }
 
     /// Send bytes written to `self` on an existing QUIC stream.
-    pub async fn send_on_stream(self, stream: &mut SendStream) -> Result<()> {
+    pub async fn send_on_stream(self, stream: &mut SendStream) -> Result<(), Error> {
         self.0.send_on_stream(stream).await
     }
 
     /// Open a new unidirectional QUIC stream, send bytes written to `self` on it, then finish the
     /// stream.
-    pub async fn send_on_new_stream(self, conn: &Connection) -> Result<quinn::SendStream> {
+    pub async fn send_on_new_stream(self, conn: &Connection) -> Result<quinn::SendStream, Error> {
         self.0.send_on_new_stream(conn).await
     }
 
     /// Send bytes written to `self` in a QUIC datagram, or fall back to `send_on_new_stream` if
     /// too large.
-    pub async fn send_on_datagram(self, conn: &Connection) -> Result<()> {
-        self.0.send_on_datagram(conn).await
+    pub fn send_on_datagram(self, conn: &Connection) -> Result<(), quinn::SendDatagramError> {
+        self.0.send_on_datagram(conn)
     }
 
     pub fn version(&mut self) {
@@ -193,7 +179,7 @@ impl Frames {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct Headers(Writer);
 
 impl Headers {
@@ -203,7 +189,7 @@ impl Headers {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct Attachments(Writer);
 
 impl Attachments {
@@ -213,7 +199,7 @@ impl Attachments {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct Deltas(Writer);
 
 impl Deltas {

@@ -7,6 +7,7 @@ extern crate tracing;
 
 pub extern crate bytes;
 pub extern crate multibytes;
+pub extern crate qkai;
 
 mod channel;
 #[allow(dead_code)]
@@ -15,14 +16,13 @@ mod frame;
 mod proto;
 mod quic_zc;
 
-pub use crate::channel::api::*;
+pub use crate::public_api::*;
 
-/// Error types
-pub mod error {
-    pub use crate::channel::error::*;
-}
+mod public_api {
+    pub use crate::channel::{api::*, error::*};
 
-/// Future types
-pub mod future {
-    pub use crate::channel::api::future::*;
+    /// Future types
+    pub mod future {
+        pub use crate::channel::api::future::*;
+    }
 }

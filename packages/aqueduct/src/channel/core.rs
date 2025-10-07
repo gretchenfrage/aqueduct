@@ -168,7 +168,6 @@ impl<T> Channel<T> {
     }
 
     // get the watch receiver for the recv state byte.
-    #[allow(dead_code)]
     pub(crate) fn watch_recv_state(&self) -> &watch::Receiver<u8> {
         &self.0.watch_recv_state.1
     }

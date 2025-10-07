@@ -8,6 +8,7 @@ members = [
 
 [workspace.dependencies]
 multibytes = { path = "packages/multibytes" }
+qkai = { path = "packages/qkai" }
 
 anyhow = "1"
 bytes = "1"

@@ -6,16 +6,19 @@
 
 /// Error for trying to send into a channel for which all receivers have been dropped
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[non_exhaustive]
 pub struct NoReceiversError;
 
 /// Error for trying to use a channel which a sender has cancelled
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[non_exhaustive]
 pub struct CancelledError;
 // TODO: ^--- install a backtrace
 
 /// Error for trying to use a networked channel for which the encompassing network connection has
 /// been lost
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[non_exhaustive]
 pub struct ConnectionLostError;
 
 /// Error for trying to use a channel which was sent through another channel in a message that will
@@ -32,11 +35,13 @@ pub struct ConnectionLostError;
 /// This is not designed to cover cases where the relevant encompassing network connection failed
 /// as a whole--see [`ConnectionLostError`].
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[non_exhaustive]
 pub struct ChannelLostInTransitError; // TODO: use thread local variables to make this trigger
 
 /// Error for attempting to use a channel with no or limited blocking, and the operation not
 /// completing immediately or by the specified deadline
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[non_exhaustive]
 pub struct WouldBlockError;
 
 // ==== compound error types ====
@@ -150,3 +155,13 @@ pub enum RecvTerminalState {
 compound_from!(RecvTerminalState {
     Error(RecvError),
 });
+
+impl RecvTerminalState {
+    /// Convert `Self::Finished` to `Option::None` and `Self::Error(e)` to `Option::Some(e)`
+    pub fn into_option_error(self) -> Option<RecvError> {
+        match self {
+            RecvTerminalState::Finished => None,
+            RecvTerminalState::Error(e) => Some(e),
+        }
+    }
+}

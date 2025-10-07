@@ -30,6 +30,7 @@ macro_rules! other_from {
 other_from!(anyhow::Error);
 other_from!(TooFewBytesError);
 other_from!(quinn::ConnectionError);
+other_from!(quinn::ClosedStream);
 
 impl From<quic_zc::Error> for Error {
     fn from(e: quic_zc::Error) -> Self {
