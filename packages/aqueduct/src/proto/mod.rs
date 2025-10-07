@@ -89,9 +89,15 @@ enum SendMessageFramesState {
     },
     NotOrdered {
         next_reliable_message_num: u64,
-        next_unreliable_message_num: Option<u64>,
+        unreliable: Option<SendMessageFramesUnreliableState>,
         message_frame_streams_reset: Arc<tokio::sync::SetOnce<()>>,
     },
+}
+
+#[derive(Default)]
+struct SendMessageFramesUnreliableState {
+    next_unreliable_message_num: u64,
+    sent_unreliable_count_total: u64,
 }
 
 #[derive(Default)]
@@ -848,12 +854,12 @@ impl Connection {
                             }
                             DeliveryGuarantees::Unordered => SendMessageFramesState::NotOrdered {
                                 next_reliable_message_num: 0,
-                                next_unreliable_message_num: None,
+                                unreliable: None,
                                 message_frame_streams_reset: Default::default(),
                             },
                             DeliveryGuarantees::Unreliable => SendMessageFramesState::NotOrdered {
                                 next_reliable_message_num: 0,
-                                next_unreliable_message_num: Some(0),
+                                unreliable: Some(SendMessageFramesUnreliableState::default()),
                                 message_frame_streams_reset: Default::default(),
                             },
                         });
@@ -875,23 +881,23 @@ impl Connection {
                         }
                         &mut SendMessageFramesState::NotOrdered {
                             ref mut next_reliable_message_num,
-                            ref mut next_unreliable_message_num,
+                            ref mut unreliable,
                             ref mut message_frame_streams_reset,
                         } => {
-                            let sent_unreliably = next_unreliable_message_num
+                            let sent_unreliably = unreliable
                                 .as_mut()
-                                .map(|n| {
+                                .map(|unreliable_state| {
                                     let mut w = write::Frames::default();
                                     w.route_to(chan_id);
                                     w.message(
-                                        *n,
+                                        unreliable_state.next_unreliable_message_num,
                                         headers.clone(),
                                         attachments.clone(),
                                         payload.clone(),
                                     );
                                     w.send_on_datagram(&self.quic_connection)
                                         .map(|()| {
-                                            *n += 1;
+                                            unreliable_state.next_unreliable_message_num += 1;
                                             true
                                         })
                                         .or_else(|e| match e {
@@ -944,7 +950,7 @@ impl Connection {
                             }
                         }
                     }
-                },
+                }
                 _ => todo!(),
             }
         }
