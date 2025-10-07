@@ -149,9 +149,9 @@ impl Frames {
         self.0.write_varbytes(payload);
     }
 
-    pub fn sent_unreliable(&mut self, count: u64) {
+    pub fn sent_unreliable(&mut self, count_minus_1: u64) {
         self.0.write(&[FrameTag::SentUnreliable as u8]);
-        self.0.write_varint(count);
+        self.0.write_varint(count_minus_1);
     }
 
     pub fn finish_sender(&mut self, sent_reliable: u64) {

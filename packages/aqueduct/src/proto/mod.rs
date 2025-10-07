@@ -9,6 +9,7 @@ use crate::{
     frame::{common::*, read, write},
     public_api::*,
 };
+use anyhow::Context as _;
 use dashmap::DashMap;
 use multibytes::MultiBytes;
 use qkai::{QkaiUrl, rustls::QkaiServerCertVerifier};
@@ -22,7 +23,11 @@ use std::{
     time::Duration,
 };
 
-pub fn client<T: Send + 'static>(url: QkaiUrl) -> IntoSender<T> {
+pub fn client<M, F>(url: QkaiUrl, packer: F) -> IntoSender<M>
+where
+    M: Send + 'static,
+    F: FnMut(M) -> Result<PackedMessage, anyhow::Error> + Send + 'static,
+{
     let (send, recv) = channel();
     tokio::task::spawn(async move {
         // create endpoint
@@ -51,10 +56,15 @@ pub fn client<T: Send + 'static>(url: QkaiUrl) -> IntoSender<T> {
             .await
             .expect("TODO");
 
-        // start doing aqueduct stuff
-        let connection = Connection::new(Side::CLIENT, quic_connection);
-        let recv = recv.into_receiver();
-        todo!()
+        // start driving the entrypoint channel sender
+        let conn = Arc::new(Connection::new(Side::CLIENT, quic_connection));
+        conn.spawn({
+            let conn = conn.clone();
+            async move {
+                conn.drive_sender(ChanId::ENTRYPOINT, recv, packer).await?;
+                Ok(())
+            }
+        });
     });
     send
 }
@@ -103,7 +113,7 @@ struct SendMessageFramesUnreliableState {
 #[derive(Default)]
 struct ReceiverState {
     // whether the local side has received the message that this channel was attached to, or true
-    // this is the entrypoint channel
+    // this is the entrypoint channel or a channel created locally
     received_creating_message: bool,
     // buffer of all messages we have received on this channel
     received_messages: Vec<ReceivedMessage>,
@@ -436,7 +446,10 @@ impl Connection {
         chan_id: ChanId,
         r: read::SentUnreliable,
     ) -> read::Result<read::Frames> {
-        let read::SentUnreliable { count, next: r } = r;
+        let read::SentUnreliable {
+            count_minus_1,
+            next: r,
+        } = r;
         let mut receiver_entry = self.setup_receiver_state(chan_id)?;
         let receiver = receiver_entry.get_mut();
         read::ensure!(
@@ -447,7 +460,7 @@ impl Connection {
 
         receiver.sent_unreliable_count_total = receiver
             .sent_unreliable_count_total
-            .checked_add(count)
+            .checked_add(count_minus_1)
             .and_then(|n| n.checked_add(1))
             .filter(|&n| n < u64::MAX)
             .ok_or_else(|| {
@@ -753,11 +766,16 @@ impl Connection {
         Ok(())
     }
 
-    async fn drive_sender<T>(
+    async fn drive_sender<M, F>(
         self: &Arc<Self>,
         chan_id: ChanId,
-        recv: IntoReceiver<T>,
-    ) -> Result<(), anyhow::Error> {
+        recv: IntoReceiver<M>,
+        mut packer: F,
+    ) -> Result<(), anyhow::Error>
+    where
+        M: Send + 'static,
+        F: FnMut(M) -> Result<PackedMessage, anyhow::Error> + Send + 'static,
+    {
         debug_assert!(chan_id.sender() == self.side);
         let recv = recv.into_receiver();
         loop {
@@ -768,6 +786,14 @@ impl Connection {
 
             match msg_result {
                 Ok(Some(msg)) => {
+                    // TODO: catch application packer function panics
+                    let packed = packer(msg).context("application packer function errored")?;
+                    let PackedMessage {
+                        payload,
+                        headers: packed_headers,
+                        attachments: packed_attachments,
+                    } = packed;
+
                     if sender.send_message_frames_state.is_none() {
                         sender.send_message_frames_state = Some(match recv.delivery_guarantees() {
                             DeliveryGuarantees::Unconverted => unreachable!(),
@@ -865,9 +891,29 @@ impl Connection {
                         });
                     }
 
-                    let headers = write::Headers::default();
+                    let mut headers = write::Headers::default();
+                    for (key, val) in packed_headers {
+                        headers.header(key, val);
+                    }
                     let attachments = write::Attachments::default();
-                    let payload = MultiBytes::default();
+                    for attachment in packed_attachments {
+                        match attachment.0 {
+                            PackedAttachmentInner::Sender => {
+                                todo!()
+                            }
+                            PackedAttachmentInner::Receiver { spawn_drive_sender } => {
+                                let chan_id = self.mint_chan_id(true, false);
+                                self.senders.insert(
+                                    chan_id,
+                                    SenderState {
+                                        received_creating_message: true,
+                                        ..Default::default()
+                                    },
+                                );
+                                (spawn_drive_sender)(chan_id, self);
+                            }
+                        }
+                    }
 
                     match sender.send_message_frames_state.as_mut().unwrap() {
                         &mut SendMessageFramesState::Ordered {
@@ -886,18 +932,72 @@ impl Connection {
                         } => {
                             let sent_unreliably = unreliable
                                 .as_mut()
-                                .map(|unreliable_state| {
+                                .map(|unreliable| {
                                     let mut w = write::Frames::default();
                                     w.route_to(chan_id);
                                     w.message(
-                                        unreliable_state.next_unreliable_message_num,
+                                        unreliable.next_unreliable_message_num,
                                         headers.clone(),
                                         attachments.clone(),
                                         payload.clone(),
                                     );
                                     w.send_on_datagram(&self.quic_connection)
                                         .map(|()| {
-                                            unreliable_state.next_unreliable_message_num += 1;
+                                            if unreliable.next_unreliable_message_num
+                                                == unreliable.sent_unreliable_count_total
+                                            {
+                                                let this = self.clone();
+                                                self.spawn(async move {
+                                                    tokio::time::sleep(Duration::from_secs(1))
+                                                        .await;
+                                                    let mut sender_guard = this
+                                                        .senders
+                                                        .get_mut(&chan_id)
+                                                        .expect("TODO");
+                                                    let sender = &mut *sender_guard;
+
+                                                    let &mut Some(
+                                                        SendMessageFramesState::NotOrdered {
+                                                            unreliable: Some(ref mut unreliable),
+                                                            ..
+                                                        },
+                                                    ) = &mut sender.send_message_frames_state
+                                                    else {
+                                                        unreachable!();
+                                                    };
+
+                                                    debug_assert!(
+                                                        unreliable.next_unreliable_message_num
+                                                            > unreliable
+                                                                .sent_unreliable_count_total
+                                                    );
+                                                    let count_minus_1 = unreliable
+                                                        .next_unreliable_message_num
+                                                        - unreliable.sent_unreliable_count_total
+                                                        - 1;
+                                                    unreliable.sent_unreliable_count_total =
+                                                        unreliable.next_unreliable_message_num;
+
+                                                    let ctrl_stream_guard_fut =
+                                                        sender.ctrl_stream.clone().lock_owned();
+                                                    drop(sender_guard);
+                                                    let mut ctrl_stream_guard =
+                                                        ctrl_stream_guard_fut.await;
+
+                                                    let ctrl_stream = lazy_init_ctrl_stream(
+                                                        &mut *ctrl_stream_guard,
+                                                        &this.quic_connection,
+                                                        chan_id,
+                                                    )
+                                                    .await?;
+                                                    let mut w = write::Frames::default();
+                                                    w.sent_unreliable(count_minus_1);
+                                                    w.send_on_stream(ctrl_stream).await?;
+
+                                                    Ok(())
+                                                });
+                                            }
+                                            unreliable.next_unreliable_message_num += 1;
                                             true
                                         })
                                         .or_else(|e| match e {
@@ -954,6 +1054,60 @@ impl Connection {
                 _ => todo!(),
             }
         }
+    }
+
+    fn mint_chan_id(&self, outgoing: bool, is_oneshot: bool) -> ChanId {
+        let sender_side = if outgoing {
+            self.side
+        } else {
+            Side(!self.side.0)
+        };
+        let idx = self
+            .next_chan_id_idxs
+            .by_sender(sender_side)
+            .by_is_oneshot(is_oneshot)
+            .fetch_add(1, Relaxed);
+        ChanId::new(self.side, sender_side, is_oneshot, idx)
+    }
+}
+
+pub struct PackedMessage {
+    pub payload: MultiBytes,
+    pub headers: Vec<(MultiBytes, MultiBytes)>,
+    pub attachments: Vec<PackedAttachment>,
+}
+
+pub struct PackedAttachment(PackedAttachmentInner);
+
+enum PackedAttachmentInner {
+    Sender,
+    Receiver {
+        spawn_drive_sender: Box<dyn FnOnce(ChanId, &Arc<Connection>) + Send + 'static>,
+    },
+}
+
+impl PackedAttachment {
+    pub fn sender<M>(sender: IntoSender<M>) -> Self
+    where
+        M: Send + 'static,
+    {
+        todo!()
+    }
+
+    pub fn receiver<M, F>(receiver: IntoReceiver<M>, packer: F) -> Self
+    where
+        M: Send + 'static,
+        F: FnMut(M) -> Result<PackedMessage, anyhow::Error> + Send + 'static,
+    {
+        Self(PackedAttachmentInner::Receiver {
+            spawn_drive_sender: Box::new(|chan_id, conn_1: &Arc<Connection>| {
+                let conn_2 = conn_1.clone();
+                conn_1.spawn(async move {
+                    conn_2.drive_sender(chan_id, receiver, packer).await?;
+                    Ok(())
+                });
+            }) as _,
+        })
     }
 }
 

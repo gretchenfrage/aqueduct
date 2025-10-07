@@ -266,8 +266,8 @@ impl Frames {
     }
 
     async fn sent_unreliable(mut self) -> Result<SentUnreliable> {
-        let count = self.0.read_varint().await?;
-        Ok(SentUnreliable { count, next: self })
+        let count_minus_1 = self.0.read_varint().await?;
+        Ok(SentUnreliable { count_minus_1, next: self })
     }
 
     async fn finish_sender(mut self) -> Result<FinishSender> {
@@ -440,7 +440,7 @@ impl MessagePayload {
 }
 
 pub struct SentUnreliable {
-    pub count: u64,
+    pub count_minus_1: u64,
     pub next: Frames,
 }
 

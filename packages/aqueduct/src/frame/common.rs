@@ -15,11 +15,11 @@ impl ChanId {
     pub const ENTRYPOINT: Self = ChanId(0);
 
     /// panics if channel index excessively high.
-    pub fn new(creator: Side, sender: Side, oneshot: bool, idx: u64) -> Self {
+    pub fn new(creator: Side, sender: Side, is_oneshot: bool, idx: u64) -> Self {
         // panic safety: if idxs are assigned sequentially within a process, with four being
         //               assigned every nanosecond, it would take over 18 years to overflow
         assert!((idx & (0b111u64 << 61)) == 0, "chan idx overflowed");
-        ChanId((creator.0 as u64) | ((sender.0 as u64) << 1) | ((oneshot as u64) << 2) | (idx << 3))
+        ChanId((creator.0 as u64) | ((sender.0 as u64) << 1) | ((is_oneshot as u64) << 2) | (idx << 3))
     }
 
     pub fn creator(self) -> Side {
