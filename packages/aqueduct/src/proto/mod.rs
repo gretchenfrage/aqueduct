@@ -810,101 +810,6 @@ impl Connection {
             attachments: packed_attachments,
         } = packed;
 
-        if sender.send_message_frames_state.is_none() {
-            sender.send_message_frames_state = Some(match receiver.delivery_guarantees() {
-                DeliveryGuarantees::Unconverted => unreachable!(),
-                DeliveryGuarantees::Ordered => {
-                    let (send_message_frames, recv_message_frames) = channel::<write::Frames>();
-
-                    let this = self.clone();
-                    self.spawn(async move {
-                        let recv_message_frames = recv_message_frames.into_receiver();
-
-                        let mut opt_message_frame_stream = None;
-                        let mut opt_recv_message_frames_err_1 = None;
-                        let mut opt_recv_message_frames_err_2 = None;
-                        let mut opt_send_on_stream_err: Option<anyhow::Error> = None;
-
-                        // we attempt to initialize opt_message_frame_stream with a new
-                        // QUIC stream, write a ROUTE_TO frame into it, then relay
-                        // frames from recv_message_frames into the QUIC stream until
-                        // recv_message_frames finishes. if attempting to write to the
-                        // QUIC stream errors we save the error to
-                        // opt_send_on_stream_err. if recv_message_frames enters an
-                        // error state, we save the error to
-                        // opt_recv_message_frames_err. by using tokio::select! and our
-                        // channel's terminal state future API, we are able to
-                        // short-circuit this phase of the coroutine due to
-                        // recv_message_frames entering an error state even while
-                        // waiting to initialize or write on the QUIC stream.
-                        tokio::select! {
-                            biased;
-                            () = async {
-                                opt_recv_message_frames_err_1 = Some(recv_message_frames.error_fut().await);
-                            } => (),
-                            send_on_stream_result = async {
-                                let message_frame_stream = this.quic_connection.open_uni().await?;
-                                opt_message_frame_stream = Some(message_frame_stream);
-                                let message_frame_stream = opt_message_frame_stream.as_mut().unwrap();
-
-                                {
-                                    let mut w = write::Frames::default();
-                                    w.route_to(chan_id);
-                                    w.send_on_stream(message_frame_stream).await?;
-                                }
-
-                                loop {
-                                    match recv_message_frames.recv().await {
-                                        Ok(Some(w)) => w.send_on_stream(message_frame_stream).await?,
-                                        Ok(None) => break,
-                                        Err(e) => {
-                                            opt_recv_message_frames_err_2 = Some(e);
-                                            break;
-                                        }
-                                    }
-                                }
-
-                                Ok(())
-                            } => opt_send_on_stream_err = send_on_stream_result.err(),
-                        };
-
-                        if let Some(e) = opt_send_on_stream_err {
-                            // escalate QUIC stream write errors into critical errors
-                            // TODO: wait I don't know that this is correct?
-                            return Err(e.into());
-                        }
-
-                        let opt_recv_message_frames_err = opt_recv_message_frames_err_1.or(opt_recv_message_frames_err_2);
-                        if let Some(e) = opt_recv_message_frames_err {
-                            // if recv_message_frames was cancelled, reset the QUIC
-                            // stream rather than sending a FIN on it.
-                            debug_assert!(matches!(e, RecvError::Cancelled(_)));
-                            if let Some(mut message_frame_stream) = opt_message_frame_stream {
-                                message_frame_stream.reset(0u8.into())?;
-                            }
-                        }
-
-                        Ok(())
-                    });
-
-                    SendMessageFramesState::Ordered {
-                        next_message_num: 0,
-                        send_message_frames: send_message_frames.into_ordered_unbounded(),
-                    }
-                }
-                DeliveryGuarantees::Unordered => SendMessageFramesState::NotOrdered {
-                    next_reliable_message_num: 0,
-                    unreliable: None,
-                    message_frame_streams_reset: Default::default(),
-                },
-                DeliveryGuarantees::Unreliable => SendMessageFramesState::NotOrdered {
-                    next_reliable_message_num: 0,
-                    unreliable: Some(SendMessageFramesUnreliableState::default()),
-                    message_frame_streams_reset: Default::default(),
-                },
-            });
-        }
-
         let mut headers = write::Headers::default();
         for (key, val) in packed_headers {
             headers.header(key, val);
@@ -929,7 +834,10 @@ impl Connection {
             }
         }
 
-        match sender.send_message_frames_state.as_mut().unwrap() {
+        let send_message_frames_state = sender
+            .send_message_frames_state
+            .get_or_insert_with(|| self.create_send_message_frames_state(chan_id, &receiver));
+        match send_message_frames_state {
             &mut SendMessageFramesState::Ordered {
                 ref mut next_message_num,
                 ref mut send_message_frames,
@@ -947,69 +855,13 @@ impl Connection {
                 let sent_unreliably = unreliable
                     .as_mut()
                     .map(|unreliable| {
-                        let mut w = write::Frames::default();
-                        w.route_to(chan_id);
-                        w.message(
-                            unreliable.next_unreliable_message_num,
+                        self.try_send_unreliably(
+                            chan_id,
+                            unreliable,
                             headers.clone(),
                             attachments.clone(),
                             payload.clone(),
-                        );
-                        w.send_on_datagram(&self.quic_connection)
-                            .map(|()| {
-                                if unreliable.next_unreliable_message_num
-                                    == unreliable.sent_unreliable_count_total
-                                {
-                                    let this = self.clone();
-                                    self.spawn(async move {
-                                        tokio::time::sleep(Duration::from_secs(1)).await;
-                                        let mut sender_guard =
-                                            this.senders.get_mut(&chan_id).expect("TODO");
-                                        let sender = &mut *sender_guard;
-
-                                        let &mut Some(SendMessageFramesState::NotOrdered {
-                                            unreliable: Some(ref mut unreliable),
-                                            ..
-                                        }) = &mut sender.send_message_frames_state
-                                        else {
-                                            unreachable!();
-                                        };
-
-                                        debug_assert!(
-                                            unreliable.next_unreliable_message_num
-                                                > unreliable.sent_unreliable_count_total
-                                        );
-                                        let count_minus_1 = unreliable.next_unreliable_message_num
-                                            - unreliable.sent_unreliable_count_total
-                                            - 1;
-                                        unreliable.sent_unreliable_count_total =
-                                            unreliable.next_unreliable_message_num;
-
-                                        let ctrl_stream_guard_fut =
-                                            sender.ctrl_stream.clone().lock_owned();
-                                        drop(sender_guard);
-                                        let mut ctrl_stream_guard = ctrl_stream_guard_fut.await;
-
-                                        let ctrl_stream = lazy_init_ctrl_stream(
-                                            &mut *ctrl_stream_guard,
-                                            &this.quic_connection,
-                                            chan_id,
-                                        )
-                                        .await?;
-                                        let mut w = write::Frames::default();
-                                        w.sent_unreliable(count_minus_1);
-                                        w.send_on_stream(ctrl_stream).await?;
-
-                                        Ok(())
-                                    });
-                                }
-                                unreliable.next_unreliable_message_num += 1;
-                                true
-                            })
-                            .or_else(|e| match e {
-                                quinn::SendDatagramError::TooLarge => Ok(false),
-                                e => Err(e),
-                            })
+                        )
                     })
                     .transpose()?
                     == Some(true);
@@ -1050,6 +902,184 @@ impl Connection {
                 }
             }
         }
+
+        Ok(())
+    }
+
+    fn create_send_message_frames_state<M>(
+        self: &Arc<Self>,
+        chan_id: ChanId,
+        receiver: &Receiver<M>,
+    ) -> SendMessageFramesState {
+        match receiver.delivery_guarantees() {
+            DeliveryGuarantees::Unconverted => unreachable!(),
+            DeliveryGuarantees::Ordered => {
+                let (send_message_frames, recv_message_frames) = channel::<write::Frames>();
+
+                let this = self.clone();
+                self.spawn(async move {
+                    this.relay_ordered_messages(chan_id, recv_message_frames)
+                        .await?;
+                    Ok(())
+                });
+
+                SendMessageFramesState::Ordered {
+                    next_message_num: 0,
+                    send_message_frames: send_message_frames.into_ordered_unbounded(),
+                }
+            }
+            DeliveryGuarantees::Unordered => SendMessageFramesState::NotOrdered {
+                next_reliable_message_num: 0,
+                unreliable: None,
+                message_frame_streams_reset: Default::default(),
+            },
+            DeliveryGuarantees::Unreliable => SendMessageFramesState::NotOrdered {
+                next_reliable_message_num: 0,
+                unreliable: Some(SendMessageFramesUnreliableState::default()),
+                message_frame_streams_reset: Default::default(),
+            },
+        }
+    }
+
+    async fn relay_ordered_messages(
+        &self,
+        chan_id: ChanId,
+        recv_message_frames: IntoReceiver<write::Frames>,
+    ) -> Result<(), anyhow::Error> {
+        let recv_message_frames = recv_message_frames.into_receiver();
+
+        let mut opt_message_frame_stream = None;
+        let mut opt_recv_message_frames_err_1 = None;
+        let mut opt_recv_message_frames_err_2 = None;
+        let mut opt_send_on_stream_err: Option<anyhow::Error> = None;
+
+        // we attempt to initialize opt_message_frame_stream with a new
+        // QUIC stream, write a ROUTE_TO frame into it, then relay
+        // frames from recv_message_frames into the QUIC stream until
+        // recv_message_frames finishes. if attempting to write to the
+        // QUIC stream errors we save the error to
+        // opt_send_on_stream_err. if recv_message_frames enters an
+        // error state, we save the error to
+        // opt_recv_message_frames_err. by using tokio::select! and our
+        // channel's terminal state future API, we are able to
+        // short-circuit this phase of the coroutine due to
+        // recv_message_frames entering an error state even while
+        // waiting to initialize or write on the QUIC stream.
+        tokio::select! {
+            biased;
+            () = async {
+                opt_recv_message_frames_err_1 = Some(recv_message_frames.error_fut().await);
+            } => (),
+            send_on_stream_result = async {
+                let message_frame_stream = self.quic_connection.open_uni().await?;
+                opt_message_frame_stream = Some(message_frame_stream);
+                let message_frame_stream = opt_message_frame_stream.as_mut().unwrap();
+
+                {
+                    let mut w = write::Frames::default();
+                    w.route_to(chan_id);
+                    w.send_on_stream(message_frame_stream).await?;
+                }
+
+                loop {
+                    match recv_message_frames.recv().await {
+                        Ok(Some(w)) => w.send_on_stream(message_frame_stream).await?,
+                        Ok(None) => break,
+                        Err(e) => {
+                            opt_recv_message_frames_err_2 = Some(e);
+                            break;
+                        }
+                    }
+                }
+
+                Ok(())
+            } => opt_send_on_stream_err = send_on_stream_result.err(),
+        };
+
+        if let Some(e) = opt_send_on_stream_err {
+            // escalate QUIC stream write errors into critical errors
+            // TODO: wait I don't know that this is correct?
+            return Err(e.into());
+        }
+
+        let opt_recv_message_frames_err =
+            opt_recv_message_frames_err_1.or(opt_recv_message_frames_err_2);
+        if let Some(e) = opt_recv_message_frames_err {
+            // if recv_message_frames was cancelled, reset the QUIC
+            // stream rather than sending a FIN on it.
+            debug_assert!(matches!(e, RecvError::Cancelled(_)));
+            if let Some(mut message_frame_stream) = opt_message_frame_stream {
+                message_frame_stream.reset(0u8.into())?;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn try_send_unreliably(
+        self: &Arc<Self>,
+        chan_id: ChanId,
+        unreliable: &mut SendMessageFramesUnreliableState,
+        headers: write::Headers,
+        attachments: write::Attachments,
+        payload: MultiBytes,
+    ) -> Result<bool, anyhow::Error> {
+        let mut w = write::Frames::default();
+        w.route_to(chan_id);
+        w.message(
+            unreliable.next_unreliable_message_num,
+            headers,
+            attachments,
+            payload,
+        );
+
+        match w.send_on_datagram(&self.quic_connection) {
+            Ok(()) => (),
+            Err(quinn::SendDatagramError::TooLarge) => return Ok(false),
+            Err(e) => return Err(e.into()),
+        };
+
+        if unreliable.next_unreliable_message_num == unreliable.sent_unreliable_count_total {
+            let this = self.clone();
+            self.spawn(async move {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                this.send_sent_unreliable(chan_id).await?;
+                Ok(())
+            });
+        }
+        unreliable.next_unreliable_message_num += 1;
+
+        Ok(true)
+    }
+
+    async fn send_sent_unreliable(&self, chan_id: ChanId) -> Result<(), anyhow::Error> {
+        let mut sender_guard = self.senders.get_mut(&chan_id).expect("TODO");
+        let sender = &mut *sender_guard;
+
+        let &mut Some(SendMessageFramesState::NotOrdered {
+            unreliable: Some(ref mut unreliable),
+            ..
+        }) = &mut sender.send_message_frames_state
+        else {
+            unreachable!();
+        };
+
+        debug_assert!(
+            unreliable.next_unreliable_message_num > unreliable.sent_unreliable_count_total
+        );
+        let count_minus_1 =
+            unreliable.next_unreliable_message_num - unreliable.sent_unreliable_count_total - 1;
+        unreliable.sent_unreliable_count_total = unreliable.next_unreliable_message_num;
+
+        let ctrl_stream_guard_fut = sender.ctrl_stream.clone().lock_owned();
+        drop(sender_guard);
+        let mut ctrl_stream_guard = ctrl_stream_guard_fut.await;
+
+        let ctrl_stream =
+            lazy_init_ctrl_stream(&mut *ctrl_stream_guard, &self.quic_connection, chan_id).await?;
+        let mut w = write::Frames::default();
+        w.sent_unreliable(count_minus_1);
+        w.send_on_stream(ctrl_stream).await?;
 
         Ok(())
     }
